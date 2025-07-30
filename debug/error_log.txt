@@ -1,0 +1,6 @@
+Error generating slides: name 'cleaned_slides' is not defined
+Traceback (most recent call last):
+  File "C:\johnify\backend\app\slidegen.py", line 158, in generate_slide_markdown
+    cleaned_file.write_text("\n\n---\n\n".join(cleaned_slides), encoding="utf-8")
+                                               ^^^^^^^^^^^^^^
+NameError: name 'cleaned_slides' is not defined. Did you mean: 'cleaned_file'?
