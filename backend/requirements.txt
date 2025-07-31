@@ -1,0 +1,37 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+alembic
+psycopg2-binary
+pydantic[email]
+aiofiles
+python-multipart
+markdown2
+beautifulsoup4
+openai
+python-dotenv
+python-pptx
+comtypes
+pydub
+pyaudio
+google-cloud-texttospeech
+pywin32>=300
+torch>=1.12.0
+torchvision>=0.13.0
+torchaudio>=0.12.0
+ffmpeg-python>=0.2.0
+numpy>=1.23.0
+opencv-python>=4.6.0
+tqdm>=4.64.0
+facexlib>=0.3.0
+gdown>=4.6.0
+passlib[bcrypt]
+python-jose[cryptography]
+python-multipart
+python-dateutil
+email-validator
+python-jose[cryptography]
+
+# Note: FFmpeg is required for audio processing
+# Download FFmpeg from: https://ffmpeg.org/download.html
+# Add FFmpeg to your system PATH
