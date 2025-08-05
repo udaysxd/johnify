@@ -2,11 +2,12 @@
 
 import { useEffect, useState, useRef } from 'react';
 import { useSession } from 'next-auth/react';
+import type { Session } from 'next-auth';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import Header from '@/components/Header';
-import { signOut } from 'next-auth/react';
 import Image from 'next/image';
+
 
 type Video = {
   id: string;
@@ -17,11 +18,7 @@ type Video = {
   status: 'processing' | 'completed' | 'failed';
 };
 
-type ApiError = {
-  error: string;
-  details?: string;
-  stack?: string;
-};
+
 
 export default function HomePage() {
   const { data: session, status } = useSession();
@@ -56,7 +53,18 @@ export default function HomePage() {
         setError(null);
         
         // Get the token from the session
-        const token = (session as any).accessToken || (session as any).user?.accessToken;
+function getAccessToken(session: Session | null | undefined): string | undefined {
+  if (!session) return undefined;
+  if ('accessToken' in session && typeof (session as { accessToken?: unknown }).accessToken === 'string') {
+    return (session as { accessToken: string }).accessToken;
+  }
+  if ('user' in session && session.user && 'accessToken' in session.user && typeof (session.user as { accessToken?: unknown }).accessToken === 'string') {
+    return (session.user as { accessToken: string }).accessToken;
+  }
+  return undefined;
+}
+
+const token = getAccessToken(session);
         
         if (!token) {
           console.error('No access token found in session');
@@ -260,10 +268,13 @@ export default function HomePage() {
                 >
                   <div className="relative pb-[56.25%] bg-black">
                     {video.thumbnailUrl ? (
-                      <img
+                      <Image
                         className="w-full h-full object-cover"
                         src={video.thumbnailUrl}
                         alt={video.title}
+                        width={640}
+                        height={360}
+                        unoptimized
                       />
                     ) : (
                       <div className="w-full h-full bg-gradient-to-br from-blue-600 to-purple-600 flex flex-col items-center justify-center text-white p-4 text-center">

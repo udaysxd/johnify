@@ -19,11 +19,17 @@ export default function VideoPlayer({ videos, onVideoChange, initialLevel = 1 }:
     Math.max(0, videos.findIndex(v => v.level === initialLevel))
   );
   const [error, setError] = useState<string | null>(null);
-  const [debugInfo, setDebugInfo] = useState<any>(null);
+  interface DebugInfo {
+    contentType?: string;
+    contentLength?: string;
+    [key: string]: unknown;
+  }
+  const [debugInfo, setDebugInfo] = useState<DebugInfo | null>(null);
   const [isChecking, setIsChecking] = useState(true);
   const [isPlaying, setIsPlaying] = useState(false);
   const [progress, setProgress] = useState(0);
-  const [duration, setDuration] = useState(0);
+  // Removed unused duration state
+
   const [isLoading, setIsLoading] = useState(true);
 
   const currentVideo = videos[currentVideoIndex];
@@ -123,7 +129,6 @@ export default function VideoPlayer({ videos, onVideoChange, initialLevel = 1 }:
 
   const handleLoadedMetadata = (e: React.SyntheticEvent<HTMLVideoElement>) => {
     const video = e.target as HTMLVideoElement;
-    setDuration(video.duration);
     // Try to play the video automatically
     video.play().catch(err => {
       console.log('Autoplay prevented:', err);

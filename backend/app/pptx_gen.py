@@ -4,7 +4,21 @@ from pptx import Presentation
 import shutil
 import time
 import os
-import comtypes.client
+import sys
+
+# Cross-platform Marp CLI command
+if sys.platform == "win32":
+    MARP_CANDIDATES = ["marp.cmd", "marp"]
+else:
+    MARP_CANDIDATES = ["marp"]
+
+def find_marp_cli():
+    """Find a working Marp CLI command in PATH."""
+    for marp in MARP_CANDIDATES:
+        if shutil.which(marp):
+            return marp
+    raise RuntimeError("Marp CLI not found in PATH. Please install it globally with 'npm install -g @marp-team/marp-cli'.")
+
 
 def fresh_dir(path: str):
     """Create a fresh directory, removing any existing contents."""
@@ -47,8 +61,11 @@ def markdown_to_pptx(md_path: Path, pptx_path: Path):
         # Ensure output directory exists
         pptx_path.parent.mkdir(parents=True, exist_ok=True)
         
-        # Run Marp to convert markdown to PPTX
-        MARP = r"C:\Users\uday\AppData\Roaming\npm\marp.cmd"
+        # Run Marp to convert markdown to PPTX (cross-platform)
+        try:
+            MARP = find_marp_cli()
+        except Exception as e:
+            raise RuntimeError(f"Marp CLI not found: {e}")
         cmd = [
             MARP,
             str(md_path),
@@ -109,87 +126,98 @@ def markdown_to_pptx(md_path: Path, pptx_path: Path):
     except Exception as e:
         raise RuntimeError(f"Error converting markdown to PPTX: {str(e)}") from e
 
-def convert_pptx_to_images(pptx: Path, out_dir: Path) -> Path:
+def export_slides_to_png_with_marp(md_path: Path, out_dir: Path):
     """
-    Convert PPTX slides to PNG images using Microsoft PowerPoint.
-    
-    Args:
-        pptx: Path to the PowerPoint file
-        out_dir: Directory to save the output PNG files
-        
-    Returns:
-        Path: Directory containing the exported PNG files
-        
-    Raises:
-        Exception: If there's an error during conversion
+    Export slide images as PNGs using Marp CLI from markdown file.
+    This works on both Windows and Linux as long as Marp CLI is installed.
     """
-    import pythoncom
-    
-    print(f"\n🔄 Starting PPTX to PNG conversion for: {pptx}")
-    
-    # Ensure paths are absolute
-    pptx = Path(pptx).resolve()
-    out_dir = Path(out_dir).resolve()
-    
-    # Create fresh output directory
-    out_dir = fresh_dir(out_dir)
-    print(f"📁 Output directory: {out_dir}")
-    
-    # Initialize COM objects
-    pp = None
-    pres = None
-    
+    md_path = Path(md_path).absolute()
+    out_dir = Path(out_dir).absolute()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     try:
-        # Initialize COM
-        pythoncom.CoInitialize()
-        
-        # Create PowerPoint application instance
-        print("🚀 Starting PowerPoint...")
-        pp = comtypes.client.CreateObject("PowerPoint.Application")
-        pp.Visible = True
-        
-        # Open the presentation
-        print(f"📂 Opening presentation: {pptx.name}")
-        pres = pp.Presentations.Open(str(pptx), WithWindow=False)  # Run in background
-        
-        # Wait for PowerPoint to be ready
-        time.sleep(2)
-        
-        # Export each slide as PNG
-        print(f"🖼️ Exporting {len(pres.Slides)} slides...")
-        for i, slide in enumerate(pres.Slides, 1):
-            png_path = out_dir / f"slide_{i:03d}.png"
-            try:
-                print(f"   • Exporting slide {i} to {png_path.name}")
-                slide.Export(str(png_path), "PNG")
-                time.sleep(0.5)  # Small delay between exports
-                
-                # Verify the file was created
-                if not png_path.exists() or png_path.stat().st_size == 0:
-                    print(f"   ⚠️ Warning: Slide {i} export may have failed - file is empty")
-                    
-            except Exception as e:
-                print(f"   ⚠️ Error exporting slide {i}: {str(e)}")
-                continue
-                
-        print(f"✅ Successfully exported {len(pres.Slides)} slides to {out_dir}")
-        return out_dir
-        
+        MARP = find_marp_cli()
     except Exception as e:
-        error_msg = f"❌ Error during PPTX to PNG conversion: {str(e)}"
-        print(error_msg)
-        raise Exception(error_msg) from e
-        
-    finally:
-        # Clean up PowerPoint objects
+        raise RuntimeError(f"Marp CLI not found: {e}")
+
+    # Always run Marp CLI in the markdown's directory, output to local 'images' folder
+    cmd = [MARP, md_path.name, "--images", "png", "--output", "images"]
+    print("\n🚀 Running Marp CLI for PNG export (cwd=md_path.parent):")
+    print("  " + " ".join(f'\"{arg}\"' if ' ' in arg else arg for arg in cmd))
+
+    result = subprocess.run(
+        cmd,
+        cwd=str(md_path.parent),
+        capture_output=True,
+        text=True,
+        encoding='utf-8',
+        errors='replace'
+    )
+    # Move/rename Marp output images (images.001, images.002, ...) to out_dir/slide_001.png, ...
+    for i in range(1, 100):  # Assume max 99 slides
+        src = md_path.parent / f"images.{i:03d}"
+        if not src.exists():
+            break
+        dst = out_dir / f"slide_{i:03d}.png"
+        src.replace(dst)
+    # Optionally clean up any leftover images.* files
+    for f in md_path.parent.glob("images.*"):
         try:
-            if pres:
-                pres.Close()
-            if pp:
-                pp.Quit()
-        except Exception as e:
-            print(f"⚠️ Warning during PowerPoint cleanup: {str(e)}")
-        
-        # Uninitialize COM
-        pythoncom.CoUninitialize()
-        print("🔌 Released PowerPoint resources")
+            f.unlink()
+        except Exception:
+            pass
+    if result.stdout:
+        print("\n📋 Marp PNG export stdout:")
+        print(result.stdout)
+    if result.stderr:
+        print("\n⚠️  Marp PNG export stderr:")
+        print(result.stderr)
+    if result.returncode != 0:
+        error_msg = f"Marp PNG export failed with exit code {result.returncode}"
+        if result.stderr:
+            error_msg += f"\n{result.stderr}"
+        raise RuntimeError(error_msg)
+    # Check if PNGs were created
+    pngs = list(out_dir.glob("*.png"))
+    if not pngs:
+        raise FileNotFoundError(f"No PNG files were created in {out_dir}")
+    print(f"✅ Exported {len(pngs)} PNG slides to {out_dir}")
+    return pngs
+
+def convert_pptx_to_images(pptx_path: Path, out_dir: Path, markdown_path: Path = None):
+    """
+    Convert each slide in a PPTX file to a PNG image in out_dir.
+    If markdown_path is provided and Marp CLI is available, use Marp CLI to export PNGs from markdown (cross-platform).
+    Otherwise, fallback to python-pptx and Pillow.
+    """
+    import sys
+    from pptx import Presentation
+    from pathlib import Path
+    import os
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        # Prefer Marp CLI with markdown if available
+        if markdown_path is not None:
+            try:
+                export_slides_to_png_with_marp(markdown_path, out_dir)
+                print(f"[convert_pptx_to_images] Used Marp CLI to export PNGs from markdown: {markdown_path}")
+                return out_dir
+            except Exception as e:
+                print(f"[convert_pptx_to_images] Marp CLI PNG export failed: {e}. Falling back to python-pptx.")
+        # Fallback to python-pptx and Pillow
+        from PIL import Image, ImageDraw
+        prs = Presentation(pptx_path)
+        for i, slide in enumerate(prs.slides):
+            # Render slide as blank (no text rendering)
+            img = Image.new('RGB', (1280, 720), color='white')
+            d = ImageDraw.Draw(img)
+            d.text((10,10), f"Slide {i+1}", fill=(0,0,0))
+            img_path = out_dir / f"slide_{i+1:03d}.png"
+            img.save(img_path)
+        print(f"[convert_pptx_to_images] Exported {len(prs.slides)} slides as images to {out_dir} (fallback mode)")
+        return out_dir
+    except Exception as e:
+        print(f"Error in convert_pptx_to_images: {e}")
+        raise
+

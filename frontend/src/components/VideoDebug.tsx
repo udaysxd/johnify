@@ -1,16 +1,43 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
+
+interface VideoEvent {
+  event: string;
+  time: number;
+}
+
+interface DebugInfo {
+  [key: string]: unknown;
+  events?: VideoEvent[];
+  timestamp?: string;
+}
 
 interface VideoDebugProps {
   videoUrl: string | null;
 }
 
 export default function VideoDebug({ videoUrl }: VideoDebugProps) {
-  const [debugInfo, setDebugInfo] = useState<any>(null);
+  const [debugInfo, setDebugInfo] = useState<DebugInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
-  
+  const isMounted = useRef(true);
+
+  useEffect(() => {
+    isMounted.current = true;
+    return () => { isMounted.current = false; };
+  }, []);
+
+  const updateDebugInfo = useCallback((newInfo: Record<string, unknown>) => {
+    if (isMounted.current) {
+      setDebugInfo((prev: DebugInfo | null) => ({
+        ...(prev || {}),
+        ...newInfo,
+        timestamp: new Date().toISOString(),
+      }));
+    }
+  }, []);
+
   useEffect(() => {
     if (!videoUrl) {
       setDebugInfo(null);
@@ -27,44 +54,46 @@ export default function VideoDebug({ videoUrl }: VideoDebugProps) {
     const video = document.createElement('video');
     let isMounted = true;
     
-    const updateDebugInfo = (newInfo: any) => {
-      if (isMounted) {
-        setDebugInfo(prev => ({
-          ...prev,
-          ...newInfo,
-          timestamp: new Date().toISOString()
-        }));
-      }
-    };
+    // updateDebugInfo will be defined at the top-level of the component
     
     // Set up event listeners
     const events = [
       'loadstart', 'loadeddata', 'canplay', 'canplaythrough', 'play', 'playing',
       'waiting', 'stalled', 'suspend', 'abort', 'error', 'emptied', 'ended'
-    ];
+    ] as const;
+    
+    type VideoEventType = typeof events[number];
     
     const eventHandlers: Record<string, (e: Event) => void> = {};
     
-    events.forEach(event => {
+    events.forEach((event: VideoEventType) => {
       eventHandlers[event] = (e: Event) => {
         console.log(`Video ${event} event:`, e);
-        updateDebugInfo({
-          events: [...(debugInfo?.events || []), { event, time: Date.now() }]
+        setDebugInfo((prev: DebugInfo | null) => {
+          const currentEvents = Array.isArray(prev?.events) ? prev.events : [];
+          return {
+            ...(prev || {}),
+            events: [...currentEvents, { event, time: Date.now() }],
+            timestamp: new Date().toISOString()
+          };
         });
       };
       video.addEventListener(event, eventHandlers[event]);
     });
     
     // Set up error handler
-    video.onerror = (e) => {
-      console.error('Video error:', e);
-      console.error('Video error details:', video.error);
-      setError(`Error ${video.error?.code}: ${video.error?.message || 'Unknown error'}`);
+    video.onerror = () => {
+      const mediaError = video.error;
+      console.error('Video error:', mediaError);
+      const errorMessage = mediaError ? `Error ${mediaError.code}: ${mediaError.message}` : 'Unknown error';
+      setError(errorMessage);
       updateDebugInfo({
         error: {
-          code: video.error?.code,
-          message: video.error?.message,
-          name: video.error?.name
+          code: mediaError?.code,
+          message: mediaError?.message,
+          // MediaError doesn't have a 'name' property in the standard
+          // So we'll use the code as a string representation
+          errorType: mediaError ? `MediaError ${mediaError.code}` : 'Unknown error'
         }
       });
     };
@@ -73,22 +102,25 @@ export default function VideoDebug({ videoUrl }: VideoDebugProps) {
     video.src = urlWithTimestamp;
     
     // Check if the video can be played
-    const checkPlayback = async () => {
+    const checkPlayback = async (): Promise<void> => {
       try {
-        const canPlay = await video.play();
-        if (canPlay !== undefined) {
-          canPlay.catch(e => {
-            console.error('Playback failed:', e);
-            setError(`Playback failed: ${e.message}`);
-          });
+        const playPromise = video.play();
+        if (playPromise !== undefined) {
+          await playPromise;
         }
-      } catch (e: any) {
-        console.error('Playback check failed:', e);
-        setError(`Playback check failed: ${e.message}`);
+      } catch (e) {
+        const errorMessage = e instanceof Error ? e.message : String(e);
+        console.error('Playback error:', e);
+        setError(`Playback error: ${errorMessage}`);
+        throw e; // Re-throw to be caught by the outer catch
       }
     };
     
-    checkPlayback();
+    checkPlayback().catch((error: unknown) => {
+      const errorMessage = error instanceof Error ? error.message : 'Failed to play video';
+      console.error('Playback check failed:', error);
+      updateDebugInfo({ error: errorMessage });
+    });
     
     // Clean up
     return () => {

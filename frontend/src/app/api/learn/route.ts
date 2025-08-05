@@ -60,9 +60,9 @@ export async function POST(request: Request) {
       const data = await response.json();
       return NextResponse.json(data);
       
-    } catch (error) {
+    } catch (error: unknown) {
       clearTimeout(timeoutId);
-      if (error.name === 'AbortError') {
+      if (error instanceof Error && error.name === 'AbortError') {
         return NextResponse.json(
           { error: 'Request timed out. Please try again.' },
           { status: 504 }
@@ -71,12 +71,12 @@ export async function POST(request: Request) {
       throw error;
     }
     
-  } catch (error) {
+  } catch (error: unknown) {
     console.error('Error in /api/learn:', error);
     return NextResponse.json(
       { 
         error: 'Internal server error',
-        details: process.env.NODE_ENV === 'development' ? error.message : undefined
+        details: process.env.NODE_ENV === 'development' && error instanceof Error ? error.message : undefined
       },
       { status: 500 }
     );

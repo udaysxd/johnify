@@ -11,7 +11,7 @@ export default function VerifyRequestPage() {
             Check your email
           </h2>
           <p className="mt-2 text-sm text-gray-600">
-            We've sent you a magic link to sign in. Please check your email and click the link to continue.
+            We&apos;ve sent you a magic link to sign in. Please check your email and click the link to continue.
           </p>
         </div>
         
@@ -24,7 +24,7 @@ export default function VerifyRequestPage() {
             </div>
             <div className="ml-3">
               <h3 className="text-sm font-medium text-blue-800">
-                Didn't receive an email?
+                Didn&apos;t receive an email?
               </h3>
               <div className="mt-2 text-sm text-blue-700">
                 <p>Check your spam folder or try again.</p>

@@ -1,0 +1,18 @@
+[build]
+  [[build.env]]
+    name = "GOOGLE_ENTRYPOINT"
+    value = "gunicorn -w 4 -k uvicorn.workers.UvicornWorker app.main:app"
+
+[metadata]
+  [metadata.build]
+    builder = "gcr.io/buildpacks/builder:v1"
+    [metadata.build.env]
+      GOOGLE_ENTRYPOINT = { type = "overridable" }
+
+[[build.env]]
+  name = "PYTHON_VERSION"
+  value = "3.9.16"
+
+[[build.env]]
+  name = "GOOGLE_ENTRYPOINT"
+  value = "gunicorn -w 4 -k uvicorn.workers.UvicornWorker app.main:app"

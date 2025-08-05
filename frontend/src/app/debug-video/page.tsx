@@ -2,10 +2,28 @@
 
 import { useState } from 'react';
 
+interface DebugResult {
+  url: string;
+  timestamp: string;
+  head?: {
+    url: string;
+    status?: number;
+    statusText?: string;
+    headers?: Record<string, string>;
+  };
+  get?: {
+    status?: number;
+    statusText?: string;
+    headers?: Record<string, string>;
+    bodyPreview?: string;
+  };
+  error?: string;
+}
+
 export default function DebugVideoPage() {
   const [videoUrl, setVideoUrl] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<DebugResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {

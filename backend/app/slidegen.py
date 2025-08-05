@@ -14,14 +14,13 @@ import requests
 import concurrent.futures
 import asyncio
 
-# Initialize DeepSeek client
-client = OpenAI(
-    base_url="https://api.deepseek.com/v1",
-    api_key=os.environ.get("DEEPSEEK_API_KEY")
-)
+# DeepSeek client getter
 
-if not client.api_key:
-    print("⚠️ Warning: DEEPSEEK_API_KEY environment variable not set. Slide content generation will fail.")
+def get_deepseek_client():
+    api_key = os.environ.get("DEEPSEEK_API_KEY")
+    if not api_key:
+        raise RuntimeError("DEEPSEEK_API_KEY environment variable not set. Slide content generation will fail.")
+    return OpenAI(api_key=api_key, base_url="https://api.deepseek.com/v1")
 
 # Configuration for Pollinations AI
 POLLINATIONS_BASE_URL = "https://image.pollinations.ai/prompt/"
@@ -324,6 +323,7 @@ def remove_marp_headers_and_styles(md: str) -> str:
 
 
 def generate_learn_slides(topic: str, complexity_level: int = 3) -> List[str]:
+    client = get_deepseek_client()
     """
     Generate educational slides for a given topic.
     
@@ -547,53 +547,55 @@ def generate_learn_slides(topic: str, complexity_level: int = 3) -> List[str]:
         ]
 
 def generate_narration(slides: list[str]) -> list[str]:
-    """Generate narration for each slide."""
+    """Generate narration for each slide using DeepSeek."""
     try:
-        global client  # Use the client defined at the module level
-        
-        # Check if client is properly initialized
-        if not client or not hasattr(client, 'chat'):
-            raise ValueError("OpenAI client is not properly initialized. Please check your API key.")
-            
+        client = get_deepseek_client()  # Get client at runtime
         MODEL = "deepseek-chat"  # Model to use for narration
         
         narration_prompt = (
             f"There are {len(slides)} slides below. Each starts with a heading.\n\n"
             + "\n\n".join(f"--- SLIDE {i+1} ---\n{slide}" for i, slide in enumerate(slides))
-            + "\n\nWrite exactly one engaging GCSE-level narration per slide, 60–90 words each. "
-              "Return a valid **JSON array** of narration strings — no extra text, only the array. "
-              "Example format: [\"Narration for slide 1\", \"Narration for slide 2\", …]."
+            + "\n\nWrite exactly one engaging GCSE‑level narration per slide, 60–90 words each. "
+            "Return ONLY a valid JSON array of narration strings — no code blocks, no extra text, no explanations, no markdown. Just the array. "
+            "If a slide is not suitable for narration, return an empty string for that slide."
         )
-
-        print("Generating narration script …")
-        narration_raw = client.chat.completions.create(
-            model=MODEL,
-            messages=[{"role": "user", "content": narration_prompt}],
-            temperature=0.7,
-        ).choices[0].message.content.strip()
-
-        # 🔧 Remove Markdown code block if present
-        if narration_raw.startswith("```json"):
-            narration_raw = narration_raw.removeprefix("```json").removesuffix("```").strip()
-        elif narration_raw.startswith("```"):
-            narration_raw = narration_raw.removeprefix("```").removesuffix("```").strip()
         
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": "You are a helpful narrator for educational slides."},
+                {"role": "user", "content": narration_prompt}
+            ],
+            temperature=0.7
+        )
+        narration_raw = response.choices[0].message.content
+        import re
+        narrations = None
         try:
             narrations = json.loads(narration_raw)
-        except json.JSONDecodeError as e:
-            print(f"⚠️ DeepSeek raw response (not JSON):\n", narration_raw)
-            raise RuntimeError("DeepSeek did not return valid JSON") from e
-        
+        except Exception:
+            # Try to extract first JSON array from anywhere in the output
+            match = re.search(r'\[.*?\]', narration_raw, re.DOTALL)
+            if match:
+                try:
+                    narrations = json.loads(match.group(0))
+                except Exception as e2:
+                    print(f"Secondary JSON extraction failed: {str(e2)}")
+                    narrations = None
         if not isinstance(narrations, list):
-            raise RuntimeError("Expected a JSON array of narration strings.")
-        
-        if len(narrations) != len(slides):
-            print(f"⚠️ JSON returned fewer narrations than slides")
-            print(f"📝 JSON array:\n", narrations)
-            raise RuntimeError(f"Expected {len(slides)} narrations, got {len(narrations)}")
-
+            print(f"Narration extraction failed. Raw output:\n{narration_raw}")
+            narrations = []
+        # Fill or trim narrations to match slides
+        if len(narrations) < len(slides):
+            narrations += ["Please review this slide carefully."] * (len(slides) - len(narrations))
+        elif len(narrations) > len(slides):
+            narrations = narrations[:len(slides)]
+        if not narrations:
+            raise RuntimeError("Could not extract any narrations from model output.")
         return narrations
 
     except Exception as e:
         print(f"Error generating narration: {str(e)}")
+        # Fallback: return a default narration for each slide
+        return ["Please review this slide carefully."] * len(slides)
         raise

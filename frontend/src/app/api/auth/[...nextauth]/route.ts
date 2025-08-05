@@ -1,12 +1,7 @@
 import { auth, handlers } from '@/lib/auth';
 import { NextResponse, type NextRequest } from 'next/server';
 
-// Extend the session type to include accessToken
-declare module 'next-auth' {
-  interface Session {
-    accessToken?: string;
-  }
-}
+// Types are now defined in src/types/next-auth.d.ts
 
 // Helper function to add CORS headers
 const addCorsHeaders = (response: NextResponse, origin: string) => {

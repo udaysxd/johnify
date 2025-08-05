@@ -1,10 +1,11 @@
 'use client';
 
-import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
+import { createContext, useContext, useEffect, useState, ReactNode, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { signIn, signOut as nextAuthSignOut, useSession } from 'next-auth/react';
+import { User as AuthUser } from '@/types/auth';
 
-interface User {
+interface AppUser {
   user_id: string;
   user_email: string;
   user_name: string;
@@ -12,7 +13,7 @@ interface User {
 }
 
 interface AuthContextType {
-  user: User | null;
+  user: AppUser | null;
   loading: boolean;
   signIn: (email: string, password: string) => Promise<{ error?: string; ok: boolean }>;
   signOut: () => Promise<void>;
@@ -22,31 +23,38 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUser] = useState<AppUser | null>(null);
   const [loading, setLoading] = useState(true);
-  const { data: session, status } = useSession();
+  const { data: session, status, update: updateSession } = useSession();
   const router = useRouter();
 
   // Update user when session changes
-  useEffect(() => {
-    const fetchUser = async () => {
-      setLoading(true);
-      try {
-        if (status === 'authenticated' && session?.user) {
-          setUser(session.user as User);
-        } else {
-          setUser(null);
-        }
-      } catch (error) {
-        console.error('Error fetching user:', error);
+  const updateUserFromSession = useCallback(async () => {
+    setLoading(true);
+    try {
+      if (status === 'authenticated' && session?.user) {
+        // Map the session user to our AppUser type
+        const userData: AppUser = {
+          user_id: session.user.id || '',
+          user_email: session.user.email || '',
+          user_name: session.user.name || '',
+          is_verified: false // You might want to get this from your session
+        };
+        setUser(userData);
+      } else {
         setUser(null);
-      } finally {
-        setLoading(false);
       }
-    };
+    } catch (error) {
+      console.error('Error updating user from session:', error);
+      setUser(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [status, session]);
 
-    fetchUser();
-  }, [session, status]);
+  useEffect(() => {
+    updateUserFromSession();
+  }, [updateUserFromSession, status]);
 
   const handleSignIn = async (email: string, password: string) => {
     try {

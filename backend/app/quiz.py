@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 router = APIRouter(prefix="/api/quiz", tags=["quiz"])
 
@@ -86,6 +86,15 @@ def mock_test():
 async def get_questions():
     """Endpoint to get all quiz questions."""
     return mock_test()
+
+@router.post("/generate")
+async def generate_quiz(request: Request):
+    data = await request.json()
+    topic = data.get("topic", "General Knowledge")
+    num_questions = int(data.get("num_questions", 10))
+    # For now, return the first num_questions from mock_test
+    questions = mock_test()[:num_questions]
+    return {"topic": topic, "questions": questions}
 
 def administer(answers):
     """

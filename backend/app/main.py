@@ -55,7 +55,10 @@ os.environ["PATH"] += os.pathsep + (
 load_dotenv()
 
 # Set up Google Cloud credentials
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+creds = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+if creds:
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = creds
+# This avoids TypeError if the env var is not set (which happens on GCP if not configured)
 
 # Initialize DeepSeek client
 DS_KEY = os.getenv("DEEPSEEK_API_KEY")
@@ -70,7 +73,16 @@ class LearnRequest(BaseModel):
     complexity_level: int = Field(3, ge=1, le=5, description="Complexity level from 1 (basic) to 5 (advanced)")
     user_email: str = Field(None, description="Email of the user generating the video")
 
+class QuizRequest(BaseModel):
+    topic: str = Field(..., description="The topic for the quiz")
+    num_questions: int = Field(10, ge=1, le=50, description="Number of questions to generate")
+    difficulty: Optional[str] = Field(None, description="Difficulty level (optional)")
+
 app = FastAPI(title="Johnify API")
+
+@app.get("/")
+def root():
+    return {"message": "Backend is running"}
 
 # Initialize database tables
 init_db()
@@ -151,9 +163,10 @@ async def test_files():
                 rel_path = ''
             for f in files_list:
                 if f.endswith('.mp4'):  # Only list video files
+                    rel_file = os.path.join(rel_path, f).replace("\\", "/")
                     files.append({
-                        'path': os.path.join(rel_path, f).replace('\\', '/'),
-                        'url': f"/videos/{os.path.join(rel_path, f).replace('\\', '/')}"
+                        'path': rel_file,
+                        'url': f"/videos/{rel_file}"
                     })
         return {
             'generated_dir': str(generated_dir),
@@ -348,7 +361,7 @@ class LearnVideoTask:
             os.makedirs(image_dir, exist_ok=True)
             
             try:
-                pptx_gen.convert_pptx_to_images(pptx_file, image_dir)
+                pptx_gen.convert_pptx_to_images(pptx_file, image_dir, Path(md_file))
                 image_files = sorted([str(f) for f in Path(image_dir).glob("*.png")])
                 if not image_files:
                     raise FileNotFoundError("No slide images were generated")
@@ -564,7 +577,7 @@ async def learn_topic(learn_request: LearnRequest):
         return error_response
 
 
-class QuizRequest(BaseModel):
+class QuizAnswerRequest(BaseModel):
     answers: list[str]  # list of 10 letters a/b/c/d
 
 def generate_narration(slides: List[str]) -> List[str]:
@@ -606,12 +619,12 @@ def generate_narration(slides: List[str]) -> List[str]:
         return ["Please review this concept carefully."] * len(slides)
 
 @app.post("/generate")
-def generate(req: QuizRequest, bg: BackgroundTasks):
+def generate(req: QuizAnswerRequest, bg: BackgroundTasks):
     """
     Submit quiz answers and generate educational content.
     
     Args:
-        req: QuizRequest containing answers
+        req: QuizAnswerRequest containing answers
         bg: BackgroundTasks for async processing
     
     Returns:
@@ -899,14 +912,13 @@ def generate(req: QuizRequest, bg: BackgroundTasks):
         }
 
 
-class QuizRequest(BaseModel):
-    topic: str
-    num_questions: int = 10
+
 
 class QuizResponse(BaseModel):
     questions: List[Dict[str, Any]]
 
 @app.post("/generate_quiz", response_model=QuizResponse)
+@app.post("/generate-quiz", response_model=QuizResponse)
 async def generate_quiz(quiz_request: QuizRequest):
     try:
         # Call DeepSeek API to generate quiz
@@ -962,7 +974,10 @@ class VideoRequest(BaseModel):
     questions: List[Dict[str, Any]]
     answers: Dict[str, str]
 
-# ... (previous code remains the same)
+class QuizRequest(BaseModel):
+    topic: str = Field(..., description="The topic for the quiz")
+    num_questions: int = Field(10, ge=1, le=50, description="Number of questions to generate")
+    difficulty: Optional[str] = Field(None, description="Difficulty level (optional)")
 
 @app.post("/generate-video")
 async def generate_video_endpoint(request: VideoRequest):

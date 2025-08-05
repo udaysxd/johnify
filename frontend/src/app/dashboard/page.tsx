@@ -32,7 +32,7 @@ export default function DashboardPage() {
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="text-center">
           <h1 className="text-3xl font-bold text-gray-900 mb-6">
-            Welcome back, {session?.user?.user_name || 'User'}!
+            Welcome back, {session?.user?.name || 'User'}!
           </h1>
           <p className="text-lg text-gray-600 mb-8">
             What would you like to do today?

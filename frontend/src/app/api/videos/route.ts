@@ -1,6 +1,22 @@
 import { NextResponse } from 'next/server';
 import { getToken } from 'next-auth/jwt';
 
+// Define types for our session and API response
+interface SessionWithToken {
+  accessToken?: string;
+  [key: string]: unknown;
+}
+
+interface VideoItem {
+  id: string;
+  title: string;
+  url: string;
+  thumbnail?: string;
+  duration?: number;
+  createdAt: string;
+  [key: string]: unknown;
+}
+
 // Get the secret from environment variables
 const secret = process.env.NEXTAUTH_SECRET;
 if (!secret) {
@@ -10,13 +26,17 @@ if (!secret) {
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 // Helper function to handle errors
-function createErrorResponse(message: string, status: number, details?: any) {
+function createErrorResponse(message: string, status: number, details?: unknown): NextResponse {
   console.error(`[API Error] ${message}`, details || '');
+  
+  // Create the response object without spread
+  const responseBody: { error: string; details?: unknown } = { error: message };
+  if (details !== undefined) {
+    responseBody.details = details;
+  }
+  
   return new NextResponse(
-    JSON.stringify({ 
-      error: message,
-      ...(details && { details })
-    }), 
+    JSON.stringify(responseBody), 
     { 
       status,
       headers: {
@@ -26,7 +46,7 @@ function createErrorResponse(message: string, status: number, details?: any) {
   );
 }
 
-export async function GET(req: Request) {
+export async function GET(req: Request): Promise<NextResponse> {
   try {
     // Verify the token from the Authorization header
     const authHeader = req.headers.get('authorization');
@@ -38,13 +58,13 @@ export async function GET(req: Request) {
       return createErrorResponse('Server configuration error', 500, 'Authentication is not properly configured');
     }
     
-    const session = await getToken({ req, secret });
+    const session = await getToken({ req, secret }) as SessionWithToken | null;
     
     if (!session) {
       return createErrorResponse('Unauthorized', 401);
     }
 
-    const accessToken = (session as any).accessToken;
+    const accessToken = session.accessToken;
     if (!accessToken) {
       return createErrorResponse('No access token found in session', 401);
     }

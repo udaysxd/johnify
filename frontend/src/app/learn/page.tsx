@@ -96,7 +96,7 @@ export default function LearnPage() {
         <div className="max-w-3xl mx-auto">
           <div className="text-center mb-8">
             <h1 className="text-3xl font-bold text-gray-900 mb-2">Learn Something New</h1>
-            <p className="text-gray-600">Enter a topic and we'll generate an educational video for you</p>
+            <p className="text-gray-600">Enter a topic and we&apos;ll generate an educational video for you</p>
           </div>
           
           {!videoUrl ? (

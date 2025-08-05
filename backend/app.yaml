@@ -1,0 +1,28 @@
+runtime: python39
+env: standard
+instance_class: F4
+
+entrypoint: gunicorn -b :$PORT app.main:app
+
+
+handlers:
+  - url: .*
+    script: auto
+
+env_variables:
+  DATABASE_URL: >-
+    postgresql+pg8000://postgres:E^3j#soDHIW!68gW@/johnify?unix_sock=/cloudsql/optimum-shape-467809-h9:us-central1:johnify-db/.s.PGSQL.5432
+  ENVIRONMENT: production
+  LOG_LEVEL: DEBUG
+  PORT: '8080'
+  PYTHONPATH: '$PYTHONPATH:/app'
+  PYTHONUNBUFFERED: '1'
+
+automatic_scaling:
+  min_instances: 1
+  max_instances: 1
+  target_cpu_utilization: 0.65
+  target_throughput_utilization: 0.75
+  max_concurrent_requests: 80
+
+service_account: optimum-shape-467809-h9@appspot.gserviceaccount.com

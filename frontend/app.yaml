@@ -1,0 +1,44 @@
+runtime: nodejs20
+instance_class: F2
+
+# Environment variables
+env_variables:
+  NODE_ENV: production
+  NODE_OPTIONS: --max_old_space_size=1024
+
+# Basic scaling for cost efficiency
+basic_scaling:
+  max_instances: 3
+  idle_timeout: 10m
+
+# Health checks for GCP
+health_check:
+  enable_health_check: true
+  check_interval_sec: 5
+  timeout_sec: 4
+  unhealthy_threshold: 2
+  healthy_threshold: 2
+  restart_threshold: 50
+
+# Resource allocation
+resources:
+  cpu: 1
+  memory_gb: 1
+  disk_size_gb: 10
+
+# Install command will run before deployment
+runtime_config:
+  document_root: .
+
+# Skip files in .gcloudignore
+skip_files:
+  - ^(.*/)?#.*#$
+  - ^(.*/)?.*~$
+  - ^(.*/)?.*\.py[co]$
+  - ^(.*/)?.*\RCS/.*$
+  - ^(.*/)?\..*$
+  - ^(.*/)?__pycache__/.*$
+  - ^(.*/)?\.git/.*$
+  - ^(.*/)?\.hg/.*$
+  - ^(.*/)?\.svn/.*$
+  - ^(.*/)?node_modules/.*$

@@ -25,7 +25,7 @@ def create_slide_video(img: Path, mp3: Path, out_mp4: Path):
             "ffmpeg", "-y", "-loop", "1", "-i", str(img), "-i", str(mp3),
             "-t", str(get_audio_duration(mp3)), "-c:v", "libx264",
             "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(out_mp4)
-        ], check=True)
+        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         print(f" Created video segment: {out_mp4}")
         return out_mp4
     except Exception as e:
@@ -53,7 +53,7 @@ def stitch_images_and_audio_to_video(img_dir: Path, aud_dir: Path, out_mp4: Path
             subprocess.run([
                 "ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
                 "-t", "5", "-c:a", "libmp3lame", str(silent_mp3)
-            ], check=True)
+            ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             mp3s = [silent_mp3] * len(imgs)
         
         pair_n = min(len(imgs), len(mp3s))
@@ -86,7 +86,7 @@ def stitch_images_and_audio_to_video(img_dir: Path, aud_dir: Path, out_mp4: Path
             "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat),
             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart",
             str(out_mp4)
-        ], check=True)
+        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         
         print(f"🎬 Final video created: {out_mp4}")
         return out_mp4

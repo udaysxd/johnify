@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getBackendUrl } from '../utils';
+import { getBackendUrl } from '../../../utils';
 
 export async function POST(request: Request) {
   try {

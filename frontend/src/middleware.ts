@@ -2,12 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { getToken } from 'next-auth/jwt';
 
-// JWT secret for token verification
-const secret = process.env.NEXTAUTH_SECRET;
 
-if (!secret) {
-  throw new Error('NEXTAUTH_SECRET is not set. Please check your .env.local file and restart the development server.');
-}
 
 // List of public paths that don't require authentication
 const publicPaths = [
@@ -29,6 +24,14 @@ const publicApiRoutes = [
 ];
 
 export async function middleware(request: NextRequest) {
+  // JWT secret for token verification
+  const secret = process.env.NEXTAUTH_SECRET;
+  if (!secret) {
+    return new NextResponse(JSON.stringify({ error: 'NEXTAUTH_SECRET is not set. Please check your environment variables.' }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
   const { pathname } = request.nextUrl;
   const origin = request.headers.get('origin') || '';
   
@@ -51,7 +54,23 @@ export async function middleware(request: NextRequest) {
     pathname.endsWith('.jpg') ||
     pathname.endsWith('.jpeg') ||
     pathname.endsWith('.svg') ||
-    pathname.endsWith('.ico')
+    pathname.endsWith('.ico') ||
+    pathname.endsWith('.json') ||
+    pathname.endsWith('.webmanifest') ||
+    pathname.endsWith('.css') ||
+    pathname.endsWith('.js') ||
+    pathname.endsWith('.txt') ||
+    pathname.endsWith('.woff') ||
+    pathname.endsWith('.woff2') ||
+    pathname.endsWith('.ttf') ||
+    pathname.endsWith('.eot') ||
+    pathname.endsWith('.otf') ||
+    pathname.endsWith('.mp4') ||
+    pathname.endsWith('.webm') ||
+    pathname.endsWith('.ogg') ||
+    pathname.endsWith('.mp3') ||
+    pathname.endsWith('.wav') ||
+    pathname.endsWith('.pdf')
   ) {
     return response;
   }

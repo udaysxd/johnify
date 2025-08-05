@@ -3,10 +3,28 @@
 import { useRouter } from 'next/navigation';
 import { useEffect, ReactNode } from 'react';
 import { useSession } from 'next-auth/react';
+import { Session } from 'next-auth';
+
+// Define user role type
+type UserRole = 'user' | 'admin' | 'premium' | string;
+
+// Extended user type with role
+interface AppUser {
+  id: string;
+  name?: string | null;
+  email?: string | null;
+  image?: string | null;
+  role?: UserRole;
+}
+
+// Type guard to check if session has our custom user type
+function hasUserWithRole(session: Session | null): session is Session & { user: AppUser } {
+  return !!session?.user && typeof session.user === 'object';
+}
 
 interface ProtectedRouteProps {
   children: ReactNode;
-  requiredRole?: string;
+  requiredRole?: UserRole;
   redirectTo?: string;
 }
 
@@ -24,9 +42,11 @@ export default function ProtectedRoute({
       const redirectUrl = window.location.pathname + window.location.search;
       router.push(`${redirectTo}?callbackUrl=${encodeURIComponent(redirectUrl)}`);
     } else if (status === 'authenticated' && requiredRole) {
+      // Type-safe role check
+      const userRole = hasUserWithRole(session) ? session.user.role : undefined;
+      
       // Check if user has the required role
-      const userRole = session?.user?.role; // Assuming role is stored in the user object
-      if (userRole !== requiredRole) {
+      if (requiredRole && userRole !== requiredRole) {
         router.push('/unauthorized');
       }
     }
@@ -41,8 +61,11 @@ export default function ProtectedRoute({
   }
 
   if (status === 'authenticated') {
+    // Type-safe role check
+    const userRole = hasUserWithRole(session) ? session.user.role : undefined;
+    
     // Check role if required
-    if (requiredRole && session?.user?.role !== requiredRole) {
+    if (requiredRole && userRole !== requiredRole) {
       return null; // Will be redirected by the useEffect
     }
     return <>{children}</>;

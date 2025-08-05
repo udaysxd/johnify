@@ -1,0 +1,14 @@
+[build]
+  command = "npm run build"
+
+[[plugins]]
+  package = "@netlify/plugin-nextjs"
+
+
+
+[dev]
+  command = "npm run dev"
+  port = 3000
+
+
+

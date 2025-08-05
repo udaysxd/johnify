@@ -1,9 +1,26 @@
 import { NextResponse } from 'next/server';
 
+interface QuestionOption {
+  [key: string]: string;
+}
+
+interface Question {
+  q: string;
+  a: string;
+  opts: QuestionOption;
+  [key: string]: unknown; // For any additional properties
+}
+
 interface VideoRequest {
   topic: string;
-  questions: any[];
+  questions: Question[];
   answers: Record<string, string>;
+}
+
+interface VideoResponse {
+  videoUrl?: string;
+  video_url?: string; // For backward compatibility
+  [key: string]: unknown; // For any additional properties
 }
 
 // Helper function to get backend URL
@@ -66,7 +83,7 @@ export async function POST(request: Request) {
     console.log('Raw backend response:', JSON.stringify(data, null, 2));
     
     // Normalize the response to use camelCase and ensure video URL is absolute
-    const normalizedResponse: any = { ...data };
+    const normalizedResponse: VideoResponse = { ...data };
     
     // Handle both snake_case and camelCase video URL fields
     const videoUrl = data.video_url || data.videoUrl;
@@ -90,13 +107,13 @@ export async function POST(request: Request) {
     
     return NextResponse.json(normalizedResponse);
     
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Video generation error:', error);
     return NextResponse.json(
       { 
         error: 'Failed to generate video', 
-        details: error?.message || 'Unknown error occurred',
-        stack: process.env.NODE_ENV === 'development' ? error?.stack : undefined
+        details: error instanceof Error ? error.message : 'Unknown error occurred',
+        stack: process.env.NODE_ENV === 'development' && error instanceof Error ? error.stack : undefined
       },
       { status: 500 }
     );

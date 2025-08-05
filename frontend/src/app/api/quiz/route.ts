@@ -4,8 +4,11 @@ import { NextResponse } from 'next/server';
 export async function POST(request: Request) {
   try {
     const { topic, numQuestions = 10 } = await request.json();
+    console.log('Loaded backend URL:', process.env.NEXT_PUBLIC_BACKEND_URL);
     
-    const response = await fetch('http://localhost:8000/generate_quiz', {
+    // Use backend URL from env or default to localhost
+    const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+    const response = await fetch(`${backendUrl}/api/quiz/generate`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -17,16 +20,22 @@ export async function POST(request: Request) {
     });
 
     if (!response.ok) {
-      const error = await response.text();
-      throw new Error(error);
+      // Try to extract message for frontend error handling
+      let errorMessage = 'Failed to generate quiz';
+      try {
+        const errorData = await response.json();
+        errorMessage = errorData.message || errorData.error || errorMessage;
+      } catch {}
+      throw new Error(errorMessage);
     }
 
     const data = await response.json();
-    return NextResponse.json(data);
+    // Always include topic in the response for frontend compatibility
+    return NextResponse.json({ ...data, topic });
   } catch (error) {
     console.error('Quiz generation error:', error);
     return NextResponse.json(
-      { error: 'Failed to generate quiz' },
+      { message: error instanceof Error ? error.message : 'Failed to generate quiz' },
       { status: 500 }
     );
   }
