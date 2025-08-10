@@ -31,13 +31,13 @@ export async function POST(request: Request) {
     // Format questions to ensure they match the expected format
     const formattedQuestions: FormattedQuestion[] = questions.map((q) => {
       const formattedOpts: Record<string, string> = {};
-      Object.entries(q.opts).forEach(([key, value]) => {
+      Object.entries(q.opts || {}).forEach(([key, value]) => {
         formattedOpts[key.toString().toUpperCase()] = String(value);
       });
       
       return {
         ...q,
-        a: q.a.toString().toLowerCase(),
+        a: q.a ? q.a.toString().toLowerCase() : '',
         opts: formattedOpts
       };
     });

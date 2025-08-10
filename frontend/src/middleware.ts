@@ -7,6 +7,7 @@ import { getToken } from 'next-auth/jwt';
 // List of public paths that don't require authentication
 const publicPaths = [
   '/',
+  '/about',
   '/auth/signin',
   '/auth/signup',
   '/auth/error',
@@ -21,6 +22,11 @@ const publicApiRoutes = [
   '/api/auth',
   '/api/health',
   '/api/public',
+  '/api/auth/session',  // Explicitly allow session endpoint
+  '/api/auth/csrf',     // Allow CSRF endpoint
+  '/api/auth/providers', // Allow providers endpoint
+  '/api/auth/signin',   // Allow signin endpoint
+  '/api/auth/signout',  // Allow signout endpoint
 ];
 
 export async function middleware(request: NextRequest) {
@@ -38,6 +44,29 @@ export async function middleware(request: NextRequest) {
   // Handle CORS preflight requests
   if (request.method === 'OPTIONS') {
     const response = new NextResponse(null, { status: 204 });
+    addCorsHeaders(response, origin);
+    return response;
+  }
+
+  // Handle auth endpoints specifically
+  if (pathname.startsWith('/api/auth/')) {
+    // Handle session endpoint
+    if (pathname === '/api/auth/session' || pathname === '/api/auth/session/') {
+      try {
+        const session = await getToken({ req: request, secret });
+        const response = NextResponse.json(session ? { user: session } : { user: null });
+        addCorsHeaders(response, origin);
+        return response;
+      } catch (error) {
+        console.error('Session endpoint error:', error);
+        const response = NextResponse.json({ user: null });
+        addCorsHeaders(response, origin);
+        return response;
+      }
+    }
+    
+    // Skip middleware for other auth endpoints
+    const response = NextResponse.next();
     addCorsHeaders(response, origin);
     return response;
   }

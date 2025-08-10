@@ -42,10 +42,17 @@ export const GET = async (req: NextRequest) => {
     const pathname = nextUrl.pathname;
     
     // Handle session endpoint specifically
-    if (pathname.endsWith('/session')) {
-      const session = await auth();
-      const response = NextResponse.json(session);
-      return addCorsHeaders(response, origin);
+    if (pathname.endsWith('/session') || pathname.endsWith('/session/')) {
+      try {
+        const session = await auth();
+        const response = NextResponse.json(session);
+        return addCorsHeaders(response, origin);
+      } catch (sessionError) {
+        console.error('Session error:', sessionError);
+        // Return empty session instead of error if not authenticated
+        const response = NextResponse.json({ user: null, expires: null });
+        return addCorsHeaders(response, origin);
+      }
     }
     
     // For other auth endpoints, use the default NextAuth handler

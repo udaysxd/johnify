@@ -98,14 +98,23 @@ async def login_for_access_token(
             detail="Please verify your email before logging in"
         )
     
-    # Create access token
+    # Create access token with expiration
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": str(user.user_id)},
         expires_delta=access_token_expires
     )
     
-    return {"access_token": access_token, "token_type": "bearer"}
+    # Calculate token expiration timestamp (in seconds since epoch)
+    from datetime import datetime, timezone
+    expires_at = int((datetime.now(timezone.utc) + access_token_expires).timestamp())
+    
+    return {
+        "access_token": access_token, 
+        "token_type": "bearer",
+        "expires_in": int(access_token_expires.total_seconds()),
+        "expires_at": expires_at
+    }
 
 @router.get("/verify-email", response_model=schemas.UserResponse)
 async def verify_email(

@@ -96,55 +96,68 @@ async def generate_quiz(request: Request):
     questions = mock_test()[:num_questions]
     return {"topic": topic, "questions": questions}
 
-def administer(answers):
+def administer(answers, questions=None):
     """
     Grade quiz answers and identify wrong questions with detailed feedback.
-    
     Args:
         answers: List of answer choices (a, b, c, or d) for each question
-        
+        questions: List of question dicts (optional, for dynamic quizzes)
     Returns:
         dict: Contains score, total questions, wrong indices, and detailed wrong questions
     """
-    questions = mock_test()
+    if questions is None:
+        questions = mock_test()
     score = 0
     wrong_indices = []
     wrong_questions = []
-    
     print(f"\n📝 Grading answers: {answers}")
-    
     for i, answer in enumerate(answers):
         if i >= len(questions):
             print(f"⚠️ More answers ({len(answers)}) than questions ({len(questions)})")
             break
-            
         question = questions[i]
-        correct = question["a"]
+        correct = question.get("a")
         user_answer = answer.strip().lower() if answer else ""
-        
         print(f"  Q{i+1}: Given '{user_answer}', Correct is '{correct}'", end="")
-        
-        if user_answer == correct.lower():
+        if user_answer == (correct.lower() if correct else ""):
             score += 1
             print(" ✅")
         else:
             # Get the full text of the correct answer
-            correct_opt_index = ord(correct.lower()) - ord('a')
-            correct_answer_text = question["opts"][correct_opt_index][3:] if 0 <= correct_opt_index < len(question["opts"]) else ""
-            
+            opts = question.get("opts") or question.get("options") or []
+            if isinstance(opts, dict):
+                # Convert dict to list of strings like ['a) Laos', 'b) Cambodia', ...]
+                opts = [f"{k}) {v}" for k, v in opts.items()]
+            if not isinstance(opts, list):
+                print(f"[WARN] Question opts is not a list: {opts}")
+                opts = []
+            correct_answer_text = ""
+            try:
+                correct_opt_index = ord(correct.lower()) - ord('a') if correct else -1
+                if 0 <= correct_opt_index < len(opts):
+                    # Strip 'a) ' prefix if present
+                    opt_val = opts[correct_opt_index]
+                    correct_answer_text = opt_val[3:] if opt_val[:3].lower() in ["a) ", "b) ", "c) ", "d) "] else opt_val
+            except Exception as e:
+                print(f"[WARN] Failed to get correct answer text: {e}")
+                correct_answer_text = ""
             # Get the user's selected answer text
             user_answer_text = ""
             if user_answer:
-                user_opt_index = ord(user_answer[0].lower()) - ord('a')
-                if 0 <= user_opt_index < len(question["opts"]):
-                    user_answer_text = question["opts"][user_opt_index][3:]
-            
+                try:
+                    user_opt_index = ord(user_answer[0].lower()) - ord('a')
+                    if 0 <= user_opt_index < len(opts):
+                        opt_val = opts[user_opt_index]
+                        user_answer_text = opt_val[3:] if opt_val[:3].lower() in ["a) ", "b) ", "c) ", "d) "] else opt_val
+                except Exception as e:
+                    print(f"[WARN] Failed to get user answer text: {e}")
+                    user_answer_text = ""
             # Create a detailed question object with explanation
             wrong_question = {
-                "question": question["q"],
+                "question": question.get("q") or question.get("question", ""),
                 "correct_answer": correct,
                 "user_answer": user_answer if user_answer else "(No answer provided)",
-                "options": question["opts"],
+                "options": opts,
                 "explanation": question.get("explanation", ""),
                 "correct_answer_text": correct_answer_text,
                 "user_answer_text": user_answer_text,
@@ -153,10 +166,8 @@ def administer(answers):
             wrong_indices.append(i)
             wrong_questions.append(wrong_question)
             print(f" ❌ (Adding to wrong answers)")
-    
     print(f"🎯 Score: {score}/{len(questions)}")
     print(f"❌ Wrong answers: {len(wrong_questions)}")
-    
     return {
         "score": score,
         "total_questions": len(questions),
@@ -164,6 +175,16 @@ def administer(answers):
         "wrong_questions": wrong_questions,
         "percentage": int((score / len(questions)) * 100) if questions else 0
     }
+
+@router.post("/grade")
+async def grade_quiz(request: Request):
+    data = await request.json()
+    answers = data.get("answers", [])
+    questions = data.get("questions")
+    # answers: list of selected answer keys (e.g., ["a", "b", ...])
+    # questions: list of question dicts (optional, for dynamic quizzes)
+    result = administer(answers, questions)
+    return result
 
 # Export the router
 __all__ = ["router"]

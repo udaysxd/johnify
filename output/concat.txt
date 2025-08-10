@@ -1,6 +1,0 @@
-file 'C:/johnify/output/slides_png/slide.001.png'
-duration 23.232
-file 'C:/johnify/output/slides_png/slide.002.png'
-duration 27.96
-file 'C:/johnify/output/slides_png/slide.003.png'
-duration 23.64

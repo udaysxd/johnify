@@ -15,33 +15,44 @@ export default function Header() {
     setIsMounted(true);
   }, []);
   
-  // Log session state for debugging
+  // Log session state for debugging (client-side only)
   useEffect(() => {
-    console.log('Session status:', status);
-    console.log('Session data:', session);
-    
-    // Check for session token in cookies
-    if (typeof document !== 'undefined') {
+    if (isMounted) {
+      console.log('Session status:', status);
+      console.log('Session data:', session);
       console.log('Cookies:', document.cookie);
     }
-  }, [session, status]);
+  }, [session, status, isMounted]);
   
   const isAuthenticated = status === 'authenticated' && session?.user;
   const isLoading = status === 'loading' && !isMounted;
 
   const handleSignOut = async () => {
     try {
-      // Clear any existing session data
-      await fetch('/api/auth/signout', { method: 'POST' });
+      // First, clear all auth-related data from the client
+      if (typeof window !== 'undefined') {
+        // Clear localStorage and sessionStorage
+        ['nextauth.message', 'nextauth.user', 'nextauth.tokens'].forEach(key => {
+          localStorage.removeItem(key);
+          sessionStorage.removeItem(key);
+        });
+      }
       
-      // Sign out using NextAuth
-      const data = await signOut({ 
-        redirect: false,
-        callbackUrl: '/'
+      // Call the signout API
+      const signoutResponse = await fetch('/api/auth/signout', { 
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        credentials: 'include' // Important for cookies to be sent
       });
       
-      // Force a hard refresh to clear all state
-      window.location.href = data.url;
+      if (!signoutResponse.ok) {
+        throw new Error('Failed to sign out');
+      }
+      
+      // Force a hard refresh to ensure all state is cleared
+      window.location.href = '/';
     } catch (error) {
       console.error('Error during sign out:', error);
       // Still redirect even if there's an error

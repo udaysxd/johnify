@@ -31,7 +31,7 @@ interface ProtectedRouteProps {
 export default function ProtectedRoute({
   children,
   requiredRole,
-  redirectTo = '/auth/login',
+  redirectTo = '/auth/signin',
 }: ProtectedRouteProps) {
   const { data: session, status } = useSession();
   const router = useRouter();

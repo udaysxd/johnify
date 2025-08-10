@@ -79,7 +79,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       await nextAuthSignOut({ redirect: false });
       setUser(null);
-      router.push('/auth/login');
+      router.push('/auth/signin');
     } catch (error) {
       console.error('Sign out error:', error);
     }

@@ -1,24 +1,30 @@
 'use client';
 
 import { SessionProvider, useSession } from 'next-auth/react';
-import { ReactNode, useEffect } from 'react';
+import { ReactNode, useEffect, useState } from 'react';
 
 // Debug component to log session changes
 function SessionDebugger() {
   const { data: session, status } = useSession();
+  const [isMounted, setIsMounted] = useState(false);
   
   useEffect(() => {
-    console.group('SessionDebugger - Session Update');
-    console.log('Session status:', status);
-    console.log('Session data:', session);
-    console.groupEnd();
+    setIsMounted(true);
     
-    // Log to verify the session is being set in localStorage
-    if (typeof window !== 'undefined') {
-      console.log('localStorage next-auth.session-token:', 
-        localStorage.getItem('next-auth.session-token'));
+    if (isMounted) {
+      console.group('SessionDebugger - Session Update');
+      console.log('Session status:', status);
+      console.log('Session data:', session);
+      
+      // Only access localStorage on the client side
+      if (typeof window !== 'undefined') {
+        console.log('localStorage next-auth.session-token:', 
+          localStorage.getItem('next-auth.session-token'));
+      }
+      
+      console.groupEnd();
     }
-  }, [session, status]);
+  }, [session, status, isMounted]);
   
   return null;
 }

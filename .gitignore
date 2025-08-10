@@ -28,7 +28,7 @@ yarn-debug.log*
 yarn-error.log*
 
 # Local env files
-.env*.local
+#.env*.local
 
 # IDE
 .idea/
@@ -82,7 +82,7 @@ ENV/
 *.swo
 
 # Environment variables
-.env
+#.env
 
 # Logs and databases
 *.log

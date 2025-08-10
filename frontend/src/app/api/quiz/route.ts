@@ -8,7 +8,7 @@ export async function POST(request: Request) {
     
     // Use backend URL from env or default to localhost
     const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
-    const response = await fetch(`${backendUrl}/api/quiz/generate`, {
+    const response = await fetch(`${backendUrl}/generate_quiz`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

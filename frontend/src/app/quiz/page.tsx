@@ -6,7 +6,7 @@ import { useSession } from 'next-auth/react';
 import Link from 'next/link';
 import VideoPlayer from '@/components/VideoPlayer';
 import Header from '@/components/Header';
-import type { Quiz, VideoItem } from '@/types/quiz';
+import type { VideoItem } from '@/types/quiz';
 
 interface QuizQuestion {
   id: string;
@@ -41,8 +41,9 @@ interface QuizAnswer {
 }
 
 export default function QuizPage() {
-  const { data: session } = useSession();
+  const { data: _session } = useSession();
   const router = useRouter();
+  const [isClient, setIsClient] = useState(false);
   const [topic, setTopic] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isGeneratingVideo, setIsGeneratingVideo] = useState(false);
@@ -52,9 +53,17 @@ export default function QuizPage() {
   const [answers, setAnswers] = useState<QuizAnswer>({});
   const [result, setResult] = useState<QuizResult | null>(null);
 
+  // Set isClient to true after component mounts (client-side only)
   useEffect(() => {
-    // This effect ensures the user is redirected if not authenticated
-  }, [router]);
+    setIsClient(true);
+  }, []);
+
+  // Handle authentication and redirect if needed
+  useEffect(() => {
+    if (_session === null) {
+      router.push('/auth/signin');
+    }
+  }, [_session, router]);
 
   // Generate quiz based on topic
   const generateQuiz = useCallback(async () => {
@@ -81,6 +90,40 @@ export default function QuizPage() {
       }
 
       const data: QuizData = await response.json();
+      // Normalize options for all questions
+      if (data.questions) {
+        data.questions = data.questions.map((q: Partial<QuizQuestion> & { options?: Record<string, string> }, idx: number) => {
+          const opts = q.options || q.opts || {};
+          // Find the key whose value matches q.a or q.correctAnswer (case-insensitive)
+          let correctKey = '';
+          if (q.a) {
+            correctKey = Object.entries(opts).find(
+              ([, value]) => String(value).toLowerCase() === String(q.a).toLowerCase()
+            )?.[0] || '';
+          } else if (q.correctAnswer) {
+            correctKey = Object.entries(opts).find(
+              ([, value]) => String(value).toLowerCase() === String(q.correctAnswer).toLowerCase()
+            )?.[0] || '';
+          }
+          // Always set all required fields, fallback if missing
+          const questionId = q.id || `q-${idx}`;
+          const questionText = q.q || q.question || `Question ${idx + 1}`;
+          const answerText = q.a || q.correctAnswer || (correctKey ? opts[correctKey] : '');
+          
+          const normalizedQuestion: QuizQuestion = {
+            id: questionId,
+            question: questionText,
+            correctAnswer: correctKey,
+            options: opts,
+            q: questionText,
+            a: answerText,
+            opts: opts,
+            explanation: q.explanation
+          };
+          
+          return normalizedQuestion;
+        });
+      }
       setQuiz(data);
     } catch (err) {
       const error = err as Error;
@@ -97,10 +140,10 @@ export default function QuizPage() {
   }, [generateQuiz]);
 
   // Handle answer selection
-  const handleAnswer = useCallback((questionId: string, answer: string) => {
+  const handleAnswer = useCallback((questionIdx: number, answer: string) => {
     setAnswers((prev: QuizAnswer) => ({
       ...prev,
-      [questionId]: answer
+      [questionIdx]: answer
     }));
   }, []);
 
@@ -113,16 +156,10 @@ export default function QuizPage() {
     setError(null);
 
     try {
-      // Prepare answers in the format expected by the backend
-      const formattedAnswers: Record<string, string> = {};
+      // Prepare answers as a list in order of questions
+      const answerList = quiz.questions.map((q, idx) => answers[idx] || '');
 
-      // Process answers to ensure they match the backend's expectations
-      Object.entries(answers).forEach(([questionId, answer]) => {
-        if (answer !== undefined && answer !== null) {
-          formattedAnswers[questionId] = answer;
-        }
-      });
-
+      // Send the original questions array as-is
       const response = await fetch('/api/generate-video', {
         method: 'POST',
         headers: {
@@ -130,14 +167,8 @@ export default function QuizPage() {
         },
         body: JSON.stringify({
           topic,
-          answers: formattedAnswers,
-          questions: quiz.questions.map(q => ({
-            id: q.id,
-            question: q.question,
-            options: q.options,
-            correctAnswer: q.correctAnswer,
-            explanation: q.explanation
-          }))
+          answers: answerList,
+          questions: quiz.questions // send full objects for backend grading/slidegen
         }),
       });
 
@@ -146,7 +177,7 @@ export default function QuizPage() {
         throw new Error(errorData.message || 'Failed to generate video');
       }
 
-      const data: { videos?: VideoItem[]; error?: string; details?: string } = await response.json();
+      const data: { videos?: VideoItem[]; error?: string; details?: string; message?: string } = await response.json();
       console.log('Video generation response:', data);
 
       if (data.videos?.length) {
@@ -171,79 +202,59 @@ export default function QuizPage() {
     }
   }, [result, isGeneratingVideo, quiz, answers, topic]);
 
-  // Submit quiz and calculate results
+  // Submit quiz and get results from backend
   const submitQuiz = useCallback(async () => {
     if (!quiz) return;
-    
-    let score = 0;
-    const wrongAnswers: Array<{
-      question: string;
-      userAnswer: string;
-      correctAnswer: string;
-      explanation: string;
-    }> = [];
-    
-    quiz.questions.forEach((question: QuizQuestion, index: number) => {
-      const questionId = question.id || index.toString();
-      const userAnswerKey = answers[questionId]?.toLowerCase();
-      const correctAnswerKey = question.correctAnswer?.toLowerCase() || '';
-      
-      // Safely get option values with type checking
-      const getOptionValue = (key: string) => {
-        const optionKey = key.toUpperCase();
-        return question.options[optionKey as keyof typeof question.options] || '';
-      };
-      
-      const correctAnswerText = getOptionValue(correctAnswerKey) || 'No correct answer found';
-      const userAnswerText = userAnswerKey ? getOptionValue(userAnswerKey) || 'Invalid answer' : 'No answer';
-      
-      // Normalize both keys to lowercase for comparison
-      const isCorrect = userAnswerKey === correctAnswerKey;
-      
-      console.log(`Question ${index + 1}:`, {
-        question: question.question,
-        userAnswerKey,
-        userAnswerText,
-        correctAnswerKey: correctAnswerKey.toLowerCase(),
-        correctAnswerText,
-        isCorrect,
-        options: question.options
+    setIsLoading(true);
+    setError(null);
+    try {
+      // Prepare answers as a list in order of questions
+      const answerList = quiz.questions.map((q, idx) => {
+        const id = q.id || idx.toString();
+        // Default to empty string if not answered
+        return answers[id] || '';
       });
-      
-      if (isCorrect) {
-        score++;
-      } else {
-        wrongAnswers.push({
-          question: question.question,
-          userAnswer: userAnswerText,
-          correctAnswer: correctAnswerText,
-          explanation: question.explanation || 'No explanation available'
-        });
+      const response = await fetch('/api/grade_quiz', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ answers: answerList, questions: quiz.questions }),
+      });
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.message || 'Failed to grade quiz');
       }
-    });
-    
-    console.log('Final score:', score, 'out of', quiz.questions.length);
-    console.log('Wrong answers:', wrongAnswers);
-
-    const quizResult: QuizResult = {
-      score,
-      total: quiz.questions.length,
-      wrongAnswers
-    };
-    
-    setResult(quizResult);
-    
-    // Only generate video if there are wrong answers
-    if (wrongAnswers.length > 0) {
-      console.log('Generating video for wrong answers...');
-      await generateVideo();
-    } else {
-      console.log('All answers correct! No video needed.');
+      const data = await response.json();
+      // Map backend result to frontend QuizResult
+      const quizResult: QuizResult = {
+        score: data.score,
+        total: data.total_questions,
+        wrongAnswers: (data.wrong_questions || []).map((wq: Record<string, string>) => ({
+          question: wq.question,
+          userAnswer: wq.user_answer_text || wq.user_answer,
+          correctAnswer: wq.correct_answer_text || wq.correct_answer,
+          explanation: wq.explanation || '',
+        })),
+      };
+      setResult(quizResult);
+      // Only generate video if there are wrong answers
+      if (quizResult.wrongAnswers.length > 0) {
+        console.log('Generating video for wrong answers...');
+        await generateVideo();
+      } else {
+        console.log('All answers correct! No video needed.');
+      }
+    } catch (err) {
+      const error = err as Error;
+      setError(error.message || 'Failed to grade quiz. Please try again.');
+    } finally {
+      setIsLoading(false);
     }
   }, [answers, generateVideo, quiz]);
 
-  // Check video accessibility when videos change
+  // Check video accessibility when videos change (client-side only)
   useEffect(() => {
+    if (!isClient) return;
+    
     console.log('Videos updated:', videos);
     
     // Check accessibility for each video
@@ -263,7 +274,7 @@ export default function QuizPage() {
           });
       }
     });
-  }, [videos]);
+  }, [videos, isClient]);
 
 if (result) {
   return (
@@ -378,14 +389,7 @@ if (result) {
                 />
               </div>
               
-              <div className="mt-4 text-sm text-gray-600">
-                <p className="font-medium mb-2">How to use these videos:</p>
-                <ul className="list-disc pl-5 space-y-1">
-                  <li>Start with Level 1 for a basic introduction</li>
-                  <li>Progress through levels as you understand each concept</li>
-                  <li>Use the highest level for a comprehensive review</li>
-                </ul>
-              </div>
+
             </div>
           )}
         </div>
@@ -412,8 +416,8 @@ if (result) {
                         type="radio"
                         name={`question-${index}`}
                         className="mr-2"
-                        checked={answers[index.toString()] === key}
-                        onChange={() => handleAnswer(index.toString(), key)}
+                        checked={answers[index] === key}
+                        onChange={() => handleAnswer(index, key)}
                       />
                       {value as string}
                     </label>

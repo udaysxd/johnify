@@ -3,6 +3,9 @@ import subprocess
 import time
 import re
 import unicodedata
+from PIL import Image, ImageDraw, ImageFont
+import textwrap
+import math
 import urllib.parse
 import json
 import asyncio
@@ -83,6 +86,131 @@ app = FastAPI(title="Johnify API")
 @app.get("/")
 def root():
     return {"message": "Backend is running"}
+
+def clean_markdown_text(text):
+    """Clean and format markdown text for display."""
+    if not text:
+        return ""
+    
+    # Remove YAML front matter (e.g., marp: true, theme: default)
+    text = re.sub(r'^---\n.*?\n---\n', '', text, flags=re.DOTALL)
+    
+    # Remove HTML comments (narration)
+    text = re.sub(r'<!--.*?-->', '', text, flags=re.DOTALL)
+    
+    # Remove markdown image syntax
+    text = re.sub(r'!\[.*?\]\(.*?\)', '', text)
+    
+    # Replace markdown bold with plain text
+    text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
+    
+    # Remove any remaining markdown links
+    text = re.sub(r'\[(.*?)\]\(.*?\)', r'\1', text)
+    
+    # Clean up any multiple newlines
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    
+    return text.strip()
+
+def create_simple_slide(text, output_path, width=1920, height=1080, bg_color=(255, 255, 255), 
+                      text_color=(0, 0, 0), padding=50, title_size=60, body_size=40, title=None):
+    """
+    Create a simple slide image with the given text.
+    
+    Args:
+        text: The content to display on the slide (markdown format)
+        output_path: Where to save the generated image
+        width: Width of the slide in pixels
+        height: Height of the slide in pixels
+        bg_color: Background color as RGB tuple
+        text_color: Text color as RGB tuple
+        padding: Padding from edges in pixels
+        title_size: Font size for slide title
+        body_size: Font size for body text
+        title: Optional title for the slide (if None, will be extracted from first line)
+    """
+    try:
+        # Clean and format the markdown
+        text = clean_markdown_text(text)
+        
+        # Create a new image with white background
+        img = Image.new('RGB', (width, height), color=bg_color)
+        draw = ImageDraw.Draw(img)
+        
+        # Try to load a nice font, fall back to default if not available
+        try:
+            title_font = ImageFont.truetype("arialbd.ttf", title_size)
+            body_font = ImageFont.truetype("arial.ttf", body_size)
+        except IOError:
+            # Fall back to default font if Arial is not available
+            title_font = ImageFont.load_default()
+            body_font = ImageFont.load_default()
+        
+        # If title is not provided, try to extract it from the first line
+        if title is None:
+            lines = [line for line in text.strip().split('\n') if line.strip()]
+            title = lines[0] if lines else ""
+            content = '\n'.join(lines[1:]) if len(lines) > 1 else text
+        else:
+            content = text
+        
+        # Draw title
+        if title:
+            title_lines = textwrap.wrap(title, width=40)  # Wrap long titles
+            y = padding
+            for line in title_lines:
+                # Get text size for centering
+                _, _, w, h = draw.textbbox((0, 0), line, font=title_font)
+                x = (width - w) // 2
+                draw.text((x, y), line, font=title_font, fill=text_color)
+                y += h + 10
+            
+            # Add a line under the title
+            line_y = y + 10  # Add space after title
+            draw.line([(width//4, line_y), (3*width//4, line_y)], fill=(200, 200, 200), width=2)
+            y = line_y + 30  # Add more space after the line
+        else:
+            y = padding
+        
+        # Draw content
+        if content:
+            # Split content into lines and process each line
+            lines = [line.strip() for line in content.split('\n') if line.strip()]
+            bullet_indent = 30  # Indent for bullet points
+            
+            for line in lines:
+                # Handle bullet points
+                is_bullet = line.startswith('- ')
+                line = line[2:] if is_bullet else line
+                
+                # Split long lines into multiple lines if needed
+                wrapped_lines = textwrap.wrap(line, width=60)
+                
+                for i, wrapped_line in enumerate(wrapped_lines):
+                    x = padding + (bullet_indent if (is_bullet and i == 0) else 0)
+                    
+                    # Draw bullet for the first line of a bullet point
+                    if is_bullet and i == 0:
+                        bullet_x = padding + 10
+                        bullet_y = y + body_size // 2 - 2
+                        draw.ellipse([bullet_x-4, bullet_y-4, bullet_x+4, bullet_y+4], fill=text_color)
+                    
+                    # Draw the text
+                    draw.text((x, y), wrapped_line, font=body_font, fill=text_color)
+                    
+                    # Move to next line position
+                    y += body_size + 5
+                
+                # Add extra space after each logical line (not wrapped lines)
+                y += 10
+        
+        # Save the image
+        img.save(output_path)
+        return True
+        
+    except Exception as e:
+        print(f"❌ Error generating simple slide: {str(e)}")
+        return False
 
 # Initialize database tables
 init_db()
@@ -182,13 +310,23 @@ app.include_router(auth.auth_router, prefix="/api")
 from . import videos
 app.include_router(videos.router)
 
-# Configure CORS
+# Configure CORS with specific allowed origins and credentials
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:3000",  # Default Next.js dev server
+        "http://localhost:8000",  # FastAPI server
+    ],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=[
+        "Content-Type",
+        "Authorization",
+        "Accept",
+        "X-Requested-With",
+        "Access-Control-Allow-Credentials",
+    ],
+    expose_headers=["Content-Range", "X-Total-Count"],
 )
 
 # Include routers
@@ -263,9 +401,10 @@ class LearnVideoTask:
             for i, (slide, narration) in enumerate(zip(slides, narrations)):
                 # Ensure slide has proper heading and content
                 slide = slide.strip()
-                if not slide.startswith('##'):
-                    # Add a default heading if none exists
-                    slide = f"## {'Introduction' if i == 0 else f'Slide {i+1}'}\n{slide}"
+                # Only add a default heading if the slide is completely empty or has no heading
+                if slide and not any(line.strip().startswith('#') for line in slide.split('\n')[:3]):
+                    # Add a default heading if no heading is found in the first few lines
+                    slide = f"## {'Introduction' if i == 0 else f'Key Concepts'}\n{slide}"
                 
                 # Ensure we have bullet points
                 if not any(line.strip().startswith('-') for line in slide.split('\n')):
@@ -304,34 +443,90 @@ class LearnVideoTask:
                 raise FileNotFoundError(f"Failed to save slides to {md_file}")
             print(f"✅ Saved slides to {md_file}")
             
-            # Convert to PPTX (without narration metadata)
-            print("\n4️⃣ Converting to PPTX...")
-            pptx_file = os.path.join(self.output_dir, "presentation.pptx")
+            # Generate images using Python fallback
+            print("\n4️⃣ Generating slide images using Python fallback...")
+            image_dir = os.path.join(self.output_dir, "images")
+            os.makedirs(image_dir, exist_ok=True)
+            
             try:
-                # Create a temporary markdown file without narration metadata for PPTX conversion
-                temp_md_file = os.path.join(self.output_dir, "temp_slides.md")
-                with open(temp_md_file, 'w', encoding='utf-8') as f:
-                    for slide in slides:
-                        f.write(f"{slide}\n---\n")
+                # Read the markdown file content
+                with open(md_file, 'r', encoding='utf-8') as f:
+                    markdown_content = f.read()
                 
-                subprocess.run([
-                    "npx", "@marp-team/marp-cli",
-                    str(temp_md_file),
-                    "--pptx",
-                    "--output", str(pptx_file)
-                ], check=True, shell=True)
+                # First, remove the YAML front matter if it exists
+                markdown_content = re.sub(r'^---\n.*?\n---\n', '', markdown_content, flags=re.DOTALL)
                 
-                # Clean up temporary file
-                if os.path.exists(temp_md_file):
-                    os.remove(temp_md_file)
+                # Split into slides (separated by ---)
+                slide_contents = [s.strip() for s in markdown_content.split('---') if s.strip()]
+                
+                # Generate an image for each slide
+                for i, slide_content in enumerate(slide_contents, 1):
+                    # Clean up the slide content
+                    slide_content = slide_content.strip()
+                    if not slide_content:
+                        continue
+                        
+                    # Debug: Print the raw slide content
+                    print(f"\n🔄 Processing slide {i} content:")
+                    print("--- RAW CONTENT START ---")
+                    print(slide_content)
+                    print("--- RAW CONTENT END ---")
+                        
+                    # Remove any remaining HTML comments (narration)
+                    slide_content = re.sub(r'<!--.*?-->', '', slide_content, flags=re.DOTALL)
                     
-                if not os.path.exists(pptx_file):
-                    raise FileNotFoundError(f"Failed to create PPTX file")
-                print(f"✅ Created PPTX: {pptx_file}")
-            except subprocess.CalledProcessError as e:
-                print(f"❌ Error converting to PPTX. Make sure Node.js and npm are installed.")
-                print(f"You can install Marp CLI with: npm install -g @marp-team/marp-cli")
-                raise
+                    # Default title in case none is found
+                    title = f"Slide {i}"
+                    content_lines = []
+                    
+                    # Split into lines and process each one
+                    for line in slide_content.split('\n'):
+                        line = line.strip()
+                        if not line:
+                            continue
+                            
+                        # Check for markdown header (## ) at the start of the line
+                        if line.startswith('## '):
+                            print(f"\n🔍 Found potential title: {line}")
+                            # If we haven't found a title yet, use this as the title
+                            if title == f"Slide {i}":
+                                title = line[3:].strip()
+                                print(f"✅ Using as title: {title}")
+                                continue
+                                
+                        # Add non-title lines to content
+                        content_lines.append(line)
+                    
+                    # Join the content lines back together
+                    slide_content = '\n'.join(content_lines)
+                    
+                    # Debug: Print the final title and content
+                    print(f"\n📝 Final for slide {i}:")
+                    print(f"Title: {title}")
+                    print("Content:")
+                    print(slide_content)
+                    print("-" * 40)
+                    
+                    # Generate output path
+                    output_path = os.path.join(image_dir, f"slide_{i:03d}.png")
+                    
+                    # Create the slide image with the extracted title
+                    try:
+                        create_simple_slide(slide_content, output_path, title=title)
+                    except Exception as e:
+                        raise RuntimeError(f"Failed to generate slide {i}")
+                
+                # Verify images were created
+                image_files = sorted([str(f) for f in Path(image_dir).glob("*.png")])
+                if not image_files:
+                    raise FileNotFoundError("No slide images were generated")
+                    
+                print(f"✅ Generated {len(image_files)} slide images using Python fallback")
+                
+            except Exception as e:
+                print(f"❌ Error in Python fallback slide generation: {str(e)}")
+                raise RuntimeError("All slide generation methods failed")
+                
             
             # Generate audio for all narrations at once
             print("\n5️⃣ Creating audio files...")
@@ -351,23 +546,19 @@ class LearnVideoTask:
                     
                 print(f"✅ Generated {len(audio_files)} audio files in {audio_dir}")
                 
-            except Exception as e:
-                print(f"❌ Error generating audio files: {str(e)}")
-                raise
-            
-            # Convert PPTX to images
-            print("\n6️⃣ Converting slides to images...")
-            image_dir = os.path.join(self.output_dir, "images")
-            os.makedirs(image_dir, exist_ok=True)
-            
-            try:
-                pptx_gen.convert_pptx_to_images(pptx_file, image_dir, Path(md_file))
+                # Get the list of image files that were generated
                 image_files = sorted([str(f) for f in Path(image_dir).glob("*.png")])
-                if not image_files:
-                    raise FileNotFoundError("No slide images were generated")
-                print(f"✅ Generated {len(image_files)} slide images")
+                
+                # Ensure we have matching number of images and audio files
+                min_length = min(len(image_files), len(audio_files))
+                if min_length == 0:
+                    raise ValueError("No valid slides or audio files found")
+                    
+                image_files = image_files[:min_length]
+                audio_files = audio_files[:min_length]
+                
             except Exception as e:
-                print(f"❌ Error converting PPTX to images: {str(e)}")
+                print(f"❌ Error in audio generation or file matching: {str(e)}")
                 raise
             
             # Generate video
@@ -579,6 +770,7 @@ async def learn_topic(learn_request: LearnRequest):
 
 class QuizAnswerRequest(BaseModel):
     answers: list[str]  # list of 10 letters a/b/c/d
+    questions: list[dict]  # list of original quiz question dicts
 
 def generate_narration(slides: List[str]) -> List[str]:
     """Generate narration script for slides using DeepSeek."""
@@ -633,7 +825,16 @@ def generate(req: QuizAnswerRequest, bg: BackgroundTasks):
     print(f"\n🔍 Received answers: {req.answers}")
     
     # Grade the answers and get detailed results
-    result = quiz.administer(req.answers)
+    # Debug: Print the incoming answers and questions structure
+    print(f"[DEBUG] Incoming answers: {req.answers}")
+    if hasattr(req, 'questions'):
+        print(f"[DEBUG] Incoming questions: {getattr(req, 'questions')}")
+    else:
+        print(f"[DEBUG] No questions attribute in request object.")
+    result = quiz.administer(req.answers, req.questions)
+    print(f"[DEBUG] Grading result: {result}")
+    if 'wrong_questions' in result:
+        print(f"[DEBUG] Wrong questions: {result['wrong_questions']}")
     score = result["score"]
     total_questions = result["total_questions"]
     wrong_questions = result["wrong_questions"]
@@ -646,15 +847,43 @@ def generate(req: QuizAnswerRequest, bg: BackgroundTasks):
     
     print(f"📝 Will generate slides for {len(wrong_questions)} wrong questions")
     
-    # Create output directories
-    output_dir = Path("output")
-    output_dir.mkdir(exist_ok=True)
+    # Create per-topic output directory (mirroring learn pipeline)
+    import time
+    from .pptx_gen import export_slides_to_png_with_marp
+    from .utils import sanitize_filename
+    safe_topic = sanitize_filename(req.questions[0]['q'] if req.questions and 'q' in req.questions[0] else 'quiz')
+    timestamp = int(time.time())
+    output_dir = Path(f"generated/Quiz_Results/{safe_topic}_{timestamp}")
+    output_dir.mkdir(exist_ok=True, parents=True)
+    images_dir = output_dir / "images"
+    images_dir.mkdir(exist_ok=True)
+    audio_dir = output_dir / "audio"
+    audio_dir.mkdir(exist_ok=True)
     
     # heavy stuff in background so request returns fast
     def pipeline():
         try:
             print("\n1️⃣ Generating slides...")
-            slides = slidegen.generate_slide_markdown(wrong_questions)
+            # Transform wrong_questions to expected schema for slidegen
+            def extract_correct_answer(qobj):
+                opts = qobj.get("opts", [])
+                correct_key = qobj.get("a")
+                if isinstance(opts, list) and correct_key:
+                    idx = ord(correct_key.lower()) - ord('a')
+                    if 0 <= idx < len(opts):
+                        # Remove "a) " etc.
+                        return opts[idx].split(")", 1)[-1].strip() if ")" in opts[idx] else opts[idx]
+                return "Unknown"
+
+            slide_inputs = []
+            for q in wrong_questions:
+                slide_inputs.append({
+                    "question": q.get("q", ""),
+                    "correct_answer": extract_correct_answer(q),
+                    "explanation": q.get("explanation", "No explanation available")
+                })
+
+            slides = slidegen.generate_slide_markdown(slide_inputs)
             if not slides:
                 raise ValueError("No slides were generated")
                 
@@ -722,27 +951,20 @@ def generate(req: QuizAnswerRequest, bg: BackgroundTasks):
             print(f"✅ Audio files saved to {audio_dir}")
             
             print("\n6️⃣ Converting slides to PNGs...")
-            png_dir = output_dir / "slides_png"
-            png_dir.mkdir(exist_ok=True)
-            
-            # Use npx to run marp-cli for image export
+            print(f"[DEBUG] About to export PNGs with Marp CLI: md_file={md_file}, images_dir={images_dir}")
+            # Use robust Marp CLI PNG export helper (mirroring learn pipeline)
             try:
-                subprocess.run([
-                    "npx", "@marp-team/marp-cli",
-                    str(md_file),
-                    "--images", "png",
-                    "--output", str(png_dir / "slide.png")
-                ], check=True, shell=True)
-            except subprocess.CalledProcessError as e:
-                print(f"❌ Error exporting slide images: {e.stderr}")
-                print(f"Marp output: {e.stdout}")
+                export_slides_to_png_with_marp(md_file, images_dir)
+            except Exception as e:
+                print(f"❌ Error exporting slide images with Marp CLI: {e}")
                 raise RuntimeError(f"Failed to export slide images: {e}")
+            print(f"✅ PNG slides exported to {images_dir}")
             
             print("\n7️⃣ Stitching video...")
             video_file = output_dir / "lesson_video.mp4"
             
             # Get list of all PNGs and MP3s
-            png_files = sorted(png_dir.glob("*.png"))
+            png_files = sorted(images_dir.glob("*.png"))
             mp3_files = sorted(audio_dir.glob("*.mp3"))
             
             if not png_files:
@@ -993,6 +1215,20 @@ async def generate_video_endpoint(request: VideoRequest):
 
         wrong_questions = []
         for idx, question in enumerate(request.questions):
+            opts = question.get('opts')
+            # If opts is a dict, convert to list for slidegen, and keep dict for answer lookup
+            if isinstance(opts, dict):
+                opts_list = [f"{k}) {v}" for k, v in opts.items()]
+                opts_dict = opts
+            elif isinstance(opts, list):
+                opts_list = opts
+                # If opts is a list, create a dict mapping 'a'...'d' to elements for answer lookup
+                opts_dict = {chr(ord('a')+i): v for i, v in enumerate(opts) if i < 26}
+            else:
+                opts_list = []
+                opts_dict = {}
+            question = {**question, 'opts': opts_list, '_opts_dict': opts_dict}
+            # Now use opts_list for slidegen, opts_dict for answer lookup
             question_idx = str(idx)
             user_answer_key = request.answers.get(question_idx)
             correct_answer_key = question.get('a', '').lower()
@@ -1026,7 +1262,7 @@ async def generate_video_endpoint(request: VideoRequest):
             print(f"Available options: {question.get('opts', {})}")
             
             # Get the actual answer texts using the original keys from options
-            option_keys = list(question.get('opts', {}).keys())
+            option_keys = list(question.get('_opts_dict', {}).keys())
             
             # Find the correct answer key
             correct_option_key = next((k for k in option_keys if normalize_key(k) == correct_key), '')
@@ -1042,11 +1278,11 @@ async def generate_video_endpoint(request: VideoRequest):
                 print(f"After normalization, user option key: '{user_option_key}'")
             
             # Get the answer texts
-            correct_answer = question['opts'].get(correct_option_key, f'No correct answer found for key: {correct_key}')
+            correct_answer = question['_opts_dict'].get(correct_option_key, f'No correct answer found for key: {correct_key}')
             
             # Handle user answer - if not found, show the raw answer
             if user_option_key:
-                user_answer = question['opts'].get(user_option_key, str(user_answer_key))
+                user_answer = question['_opts_dict'].get(user_option_key, str(user_answer_key))
                 print(f"Found user answer in options: '{user_answer}'")
             else:
                 # If we can't find the option, show the raw answer key
@@ -1060,10 +1296,12 @@ async def generate_video_endpoint(request: VideoRequest):
             # Add to wrong questions if answer is incorrect
             if user_key != correct_key:
                 wrong_questions.append({
-                    'question': question['q'],
-                    'correct_answer': correct_answer,
-                    'user_answer': user_answer,
-                    'explanation': question.get('explanation', 'No explanation available')
+                    "question": question.get('q', ''),
+                    "correct_answer": correct_answer,
+                    "user_answer": user_answer,
+                    "options": question.get('opts', {}),
+                    "explanation": question.get('explanation', ''),
+                    "question_number": idx + 1
                 })
 
         total_questions = len(request.questions)
@@ -1124,18 +1362,19 @@ async def generate_video_endpoint(request: VideoRequest):
             # 2. Generate narration
             narrations = sg.generate_narration(slides)
             
-            # 3. Convert markdown to PPTX
+            # 3. Convert markdown to PPTX (optional, keep if PPTX is needed elsewhere)
             from . import pptx_gen
             pptx_gen.markdown_to_pptx(md_path, pptx_path)
-            
-            # 4. Convert PPTX to images
-            pptx_gen.convert_pptx_to_images(pptx_path, images_dir)
-            
+
+            # 4. Export PNGs from markdown using Marp CLI (robust, no fallback)
+            pptx_gen.export_slides_to_png_with_marp(md_path, images_dir)
+
             # 5. Generate audio for each slide
             tts.narrations_to_mp3(narrations, str(audio_dir))
             
             # 6. Stitch everything together
-            video.stitch_images_and_audio_to_video(
+            from .video_quiz import stitch_images_and_audio_to_video_quiz
+            stitch_images_and_audio_to_video_quiz(
                 img_dir=images_dir,
                 aud_dir=audio_dir,
                 out_mp4=video_path
@@ -1150,11 +1389,16 @@ async def generate_video_endpoint(request: VideoRequest):
         video_filename = f"{sanitized_topic}/{sanitized_topic}_explanation.mp4"
         video_path = output_dir / f"{sanitized_topic}_explanation.mp4"
         
+        # Return in the format expected by the frontend
         return {
-            "video_url": f"/videos/{video_filename}",
+            "videos": [{
+                "url": f"/videos/{video_filename}",
+                "title": f"{request.topic} Explanation"
+            }],
             "score": score,
             "total": total_questions,
-            "wrong_answers": wrong_count
+            "wrong_answers": wrong_count,
+            "message": "Video generated successfully"
         }
         
     except Exception as e:

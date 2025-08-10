@@ -73,9 +73,9 @@ const token = getAccessToken(session);
           return;
         }
         
-        console.log('Fetching videos from /api/videos...');
+        console.log('Fetching videos from /api/videos/my-videos...');
         
-        const response = await fetch('/api/videos', {
+        const response = await fetch('/api/videos/my-videos', {
           method: 'GET',
           headers: {
             'Content-Type': 'application/json',

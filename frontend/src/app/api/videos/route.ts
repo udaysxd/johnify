@@ -48,60 +48,62 @@ function createErrorResponse(message: string, status: number, details?: unknown)
 
 export async function GET(req: Request): Promise<NextResponse> {
   try {
-    // Verify the token from the Authorization header
-    const authHeader = req.headers.get('authorization');
-    if (!authHeader?.startsWith('Bearer ')) {
-      return createErrorResponse('No token provided', 401);
-    }
-    
     if (!secret) {
       return createErrorResponse('Server configuration error', 500, 'Authentication is not properly configured');
     }
     
+    // Get the session token from cookies
     const session = await getToken({ req, secret }) as SessionWithToken | null;
+    const accessToken = session?.accessToken;
     
-    if (!session) {
-      return createErrorResponse('Unauthorized', 401);
-    }
-
-    const accessToken = session.accessToken;
     if (!accessToken) {
-      return createErrorResponse('No access token found in session', 401);
+      console.error('No access token in session');
+      return createErrorResponse('Unauthorized - No session token', 401);
     }
 
     try {
-      // Fetch user's videos from the backend
-      const response = await fetch(`${API_BASE_URL}/api/videos/my-videos`, {
+      // Call the backend API with the user's access token
+      const backendResponse = await fetch(`${API_BASE_URL}/api/videos/my-videos`, {
+        method: 'GET',
         headers: {
           'Authorization': `Bearer ${accessToken}`,
-          'Accept': 'application/json',
+          'Content-Type': 'application/json',
         },
-        cache: 'no-store',
+        credentials: 'include',
       });
 
-      if (!response.ok) {
-        const error = await response.json().catch(() => ({}));
-        console.error('Error fetching videos from backend:', error);
+      if (!backendResponse.ok) {
+        const errorData = await backendResponse.json().catch(() => ({}));
+        console.error('Error fetching videos from backend:', errorData);
         return createErrorResponse(
-          'Failed to fetch videos', 
-          response.status, 
-          error.detail || 'Backend returned an error'
+          errorData.detail || 'Failed to fetch videos',
+          backendResponse.status
         );
       }
 
-      const videos = await response.json();
+      const data = await backendResponse.json();
       
-      // Transform the backend response to match the frontend's expected format
-      const transformedVideos = Array.isArray(videos) ? videos.map(video => ({
+      // Define the expected shape of video data from the backend
+      interface BackendVideoItem {
+        id?: string;
+        title?: string;
+        url?: string;
+        thumbnail?: string;
+        duration?: number;
+        created_at?: string;
+      }
+      
+      // Transform the response to match the expected format
+      const videos: VideoItem[] = Array.isArray(data) ? data.map((video: BackendVideoItem) => ({
         id: video.id || '',
         title: video.title || 'Untitled Video',
-        thumbnailUrl: video.thumbnail_url || '',
-        videoUrl: video.video_url || '',
+        url: video.url || '',
+        thumbnail: video.thumbnail || '',
+        duration: video.duration || 0,
         createdAt: video.created_at || new Date().toISOString(),
-        status: 'completed' // Default status since the backend doesn't provide it
       })) : [];
       
-      return NextResponse.json(transformedVideos);
+      return NextResponse.json(videos);
       
     } catch (error) {
       console.error('Error in videos API route:', error);

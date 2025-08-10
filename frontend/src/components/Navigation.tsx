@@ -50,7 +50,7 @@ export default function Navigation({ children }: NavigationProps) {
                   Hello, {session?.user?.name || 'User'}
                 </span>
                 <button
-                  onClick={() => signOut({ callbackUrl: '/auth/login' })}
+                  onClick={() => signOut({ callbackUrl: '/auth/signin' })}
                   className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-md hover:bg-indigo-700 transition-colors"
                 >
                   Sign out
@@ -59,7 +59,7 @@ export default function Navigation({ children }: NavigationProps) {
             ) : (
               <div className="flex space-x-4">
                 <Link
-                  href="/auth/login"
+                  href="/auth/signin"
                   className="px-4 py-2 text-sm font-medium text-gray-700 hover:text-indigo-600 transition-colors"
                 >
                   Sign in

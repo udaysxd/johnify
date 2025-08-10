@@ -282,18 +282,19 @@ def save_slides_to_md(slides: List[str], output_path: str) -> None:
         "marp: true\n"
         "theme: default\n"
         "paginate: true\n"
-        "---\n\n"
+        "---\n"
     )
 
     slide_blocks = []
     for slide in slides:
-        slide_clean = slide.strip()
+        # Remove any existing YAML frontmatter from individual slides
+        slide_clean = re.sub(r'^---[\s\S]*?---\s*', '', slide.strip())
         if not slide_clean:
             continue
-        # Ensure each slide is separated properly
         slide_blocks.append(slide_clean)
 
-    full_md = frontmatter + "\n\n---\n\n".join(slide_blocks) + "\n"
+    # Join slides with proper separators
+    full_md = frontmatter + "\n---\n\n".join(slide_blocks) + "\n"
 
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(full_md)
@@ -420,6 +421,7 @@ def generate_learn_slides(topic: str, complexity_level: int = 3) -> List[str]:
         slides = []
         
         # Slide 1: Introduction
+        slide_title = f"Introduction to {topic}"
         intro_prompt = f"""
         Create an introduction slide about: {topic}
         
@@ -439,9 +441,10 @@ def generate_learn_slides(topic: str, complexity_level: int = 3) -> List[str]:
                 f"- Why {topic} matters in daily life",
                 f"- Key consideration about {topic}"
             ][:3 - len(bullet_points)])
-        slides.append(f"## Introduction to {topic}\n" + '\n'.join(bullet_points[:3]))
+        slides.append(f"## {slide_title}\n" + '\n'.join(bullet_points[:3]))
         
         # Slide 2: Key Concepts
+        slide_title = f"Key Concepts About {topic}"
         concepts_prompt = f"""
         List 3 key concepts about: {topic}
         
@@ -460,7 +463,9 @@ def generate_learn_slides(topic: str, complexity_level: int = 3) -> List[str]:
                 f"- Important aspect of {topic} and its impact",
                 f"- Critical consideration regarding {topic}"
             ][:3 - len(bullet_points)])
-        slides.append(f"## Key Concepts About {topic}\n" + '\n'.join(bullet_points[:3]))
+        
+        # Ensure we have exactly 3 bullet points
+        slides.append(f"## {slide_title}\n" + '\n'.join(bullet_points[:3]))
         
         # Slide 3: How It Works
         process_prompt = f"""

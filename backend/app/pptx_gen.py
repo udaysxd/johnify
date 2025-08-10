@@ -36,11 +36,24 @@ def markdown_to_pptx(md_path: Path, pptx_path: Path):
         md_path: Path to the markdown file
         pptx_path: Path where the PowerPoint file should be saved
     """
+    import subprocess, sys, os, shutil
     try:
         # Ensure paths are absolute
         md_path = md_path.absolute()
         pptx_path = pptx_path.absolute()
-        
+
+        # Debug: Print Node.js version, Marp CLI path, and CWD
+        try:
+            print("[DEBUG] Node.js version:")
+            print(subprocess.check_output(["node", "--version"], shell=True).decode())
+        except Exception as e:
+            print(f"[DEBUG] Could not get Node.js version: {e}")
+        try:
+            print(f"[DEBUG] Marp CLI path: {shutil.which('marp.cmd') or shutil.which('marp')}")
+        except Exception as e:
+            print(f"[DEBUG] Could not get Marp CLI path: {e}")
+        print(f"[DEBUG] Working directory: {os.getcwd()}")
+
         print(f"\n🔧 Starting PPTX generation")
         print(f"  Input MD: {md_path}")
         print(f"  Output PPTX: {pptx_path}")
@@ -72,6 +85,7 @@ def markdown_to_pptx(md_path: Path, pptx_path: Path):
             '--allow-local-files',
             '--theme', 'default',
             '--pptx',
+            '--timeout', '120000',  # 2 minutes timeout
             '--output', str(pptx_path)
         ]
         
@@ -126,62 +140,164 @@ def markdown_to_pptx(md_path: Path, pptx_path: Path):
     except Exception as e:
         raise RuntimeError(f"Error converting markdown to PPTX: {str(e)}") from e
 
-def export_slides_to_png_with_marp(md_path: Path, out_dir: Path):
+def export_slides_to_png_with_marp(md_path: Path, out_dir: Path, timeout_seconds: int = 60):
     """
     Export slide images as PNGs using Marp CLI from markdown file.
     This works on both Windows and Linux as long as Marp CLI is installed.
+    
+    Args:
+        md_path: Path to the markdown file
+        out_dir: Directory to save the output PNG files
+        timeout_seconds: Maximum time to wait for Marp CLI to complete
     """
     md_path = Path(md_path).absolute()
     out_dir = Path(out_dir).absolute()
     out_dir.mkdir(parents=True, exist_ok=True)
+    pngs = []
 
     try:
         MARP = find_marp_cli()
     except Exception as e:
-        raise RuntimeError(f"Marp CLI not found: {e}")
+        print(f"⚠️  Marp CLI not found: {e}")
+        return pngs
 
     # Always run Marp CLI in the markdown's directory, output to local 'images' folder
-    cmd = [MARP, md_path.name, "--images", "png", "--output", "images"]
-    print("\n🚀 Running Marp CLI for PNG export (cwd=md_path.parent):")
-    print("  " + " ".join(f'\"{arg}\"' if ' ' in arg else arg for arg in cmd))
+    cmd = [
+        MARP, 
+        md_path.name, 
+        "--images", "png", 
+        "--output", "images",
+        "--allow-local-files",  # Allow local file access
+        "--html"  # Generate HTML first which is generally more stable
+    ]
+    
+    print("\n🚀 Running Marp CLI for PNG export:")
+    print(f"  Working directory: {md_path.parent}")
+    print("  Command: " + " ".join(f'"{arg}"' if ' ' in arg else arg for arg in cmd))
 
-    result = subprocess.run(
-        cmd,
-        cwd=str(md_path.parent),
-        capture_output=True,
-        text=True,
-        encoding='utf-8',
-        errors='replace'
-    )
-    # Move/rename Marp output images (images.001, images.002, ...) to out_dir/slide_001.png, ...
-    for i in range(1, 100):  # Assume max 99 slides
-        src = md_path.parent / f"images.{i:03d}"
-        if not src.exists():
-            break
-        dst = out_dir / f"slide_{i:03d}.png"
-        src.replace(dst)
-    # Optionally clean up any leftover images.* files
-    for f in md_path.parent.glob("images.*"):
-        try:
-            f.unlink()
-        except Exception:
-            pass
-    if result.stdout:
+    try:
+        # Run with timeout to prevent hanging
+        result = subprocess.run(
+            cmd,
+            cwd=str(md_path.parent),
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+            timeout=timeout_seconds
+        )
+    except subprocess.TimeoutExpired:
+        print(f"⚠️  Marp CLI timed out after {timeout_seconds} seconds")
+        return pngs
+    except Exception as e:
+        print(f"⚠️  Error running Marp CLI: {e}")
+        return pngs
+    # Look for output files in the expected locations
+    work_dir = md_path.parent
+    
+    # Debug: List all files in the working directory
+    print("\n🔍 Files in working directory:")
+    for f in work_dir.glob('*'):
+        print(f"  - {f.name} (size: {f.stat().st_size if f.is_file() else 'dir'})")
+    
+    # Marp CLI can output in different formats:
+    # 1. images.001, images.002, etc. (no extension)
+    # 2. images.001.png, images.002.png, etc.
+    # 3. In an 'images' subdirectory
+    # 4. Directly as 001.png, 002.png, etc.
+    image_files = []
+    
+    # First, check for files like 001.png, 002.png, etc. (direct output)
+    for f in work_dir.glob('[0-9][0-9][0-9].png'):
+        if f.is_file() and f.stat().st_size > 0:
+            image_files.append(f)
+            print(f"Found direct PNG file: {f}")
+    
+    # Then check for files like images.001, images.002, etc.
+    for f in work_dir.glob('images.[0-9][0-9][0-9]'):
+        if f.is_file() and f.stat().st_size > 0:
+            image_files.append(f)
+            print(f"Found numbered file: {f}")
+    
+    # Then check for files like images.001.png, images.002.png, etc.
+    for f in work_dir.glob('images.[0-9][0-9][0-9].png'):
+        if f.is_file() and f.stat().st_size > 0 and f not in image_files:
+            image_files.append(f)
+            print(f"Found numbered PNG file: {f}")
+    
+    # Then check the images subdirectory
+    images_dir = work_dir / 'images'
+    if images_dir.exists() and images_dir.is_dir():
+        print(f"\n🔍 Files in {images_dir}:")
+        for f in images_dir.glob('*'):
+            print(f"  - {f.name} (size: {f.stat().st_size if f.is_file() else 'dir'})")
+            if f.is_file() and (f.suffix.lower() == '.png' or not f.suffix) and f.stat().st_size > 0:
+                image_files.append(f)
+                print(f"Found file in images directory: {f}")
+    
+    # Also check for any PNG files in the root directory
+    for f in work_dir.glob('*.png'):
+        if f.is_file() and f.stat().st_size > 0 and f not in image_files:
+            image_files.append(f)
+            print(f"Found PNG file in root: {f}")
+            
+    # If we still don't have any images, try one more pattern that Marp might use
+    if not image_files:
+        for f in work_dir.glob('*.png'):
+            if f.is_file() and f.stat().st_size > 0 and f not in image_files:
+                image_files.append(f)
+                print(f"Found additional PNG file: {f}")
+                
+    # Debug output
+    if result and result.stdout:
         print("\n📋 Marp PNG export stdout:")
-        print(result.stdout)
-    if result.stderr:
+        print(result.stdout.strip())
+    if result and result.stderr:
         print("\n⚠️  Marp PNG export stderr:")
-        print(result.stderr)
-    if result.returncode != 0:
-        error_msg = f"Marp PNG export failed with exit code {result.returncode}"
-        if result.stderr:
-            error_msg += f"\n{result.stderr}"
-        raise RuntimeError(error_msg)
-    # Check if PNGs were created
-    pngs = list(out_dir.glob("*.png"))
+        print(result.stderr.strip())
+    
+    # Process found images
+    if image_files:
+        print(f"\n🔍 Found {len(image_files)} potential slide images")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Sort files by name to maintain order
+        def sort_key(f):
+            name = f.stem
+            try:
+                # Extract number from filenames like images.001 or images.001.png
+                num = ''.join(c for c in name if c.isdigit())
+                return int(num) if num else 0
+            except:
+                return 0
+        
+        image_files.sort(key=sort_key)
+        
+        # Move and rename files
+        for i, imgfile in enumerate(image_files, 1):
+            if not imgfile.is_file():
+                continue
+                
+            new_name = out_dir / f"slide_{i:03d}.png"
+            try:
+                # Verify it's actually a PNG file
+                if imgfile.suffix.lower() == '.png' or imgfile.read_bytes()[:8] == b'\x89PNG\r\n\x1a\n':
+                    # Use copy + unlink instead of replace for better error handling
+                    shutil.copy2(imgfile, new_name)
+                    imgfile.unlink()
+                    pngs.append(new_name)
+                    print(f"✅ Saved slide {i}: {new_name}")
+                else:
+                    print(f"⚠️  Skipping non-PNG file: {imgfile}")
+            except Exception as e:
+                print(f"⚠️  Failed to process {imgfile}: {e}")
+    
     if not pngs:
-        raise FileNotFoundError(f"No PNG files were created in {out_dir}")
-    print(f"✅ Exported {len(pngs)} PNG slides to {out_dir}")
+        print("⚠️  No valid slide images were generated. The presentation may be empty or there may be an issue with Marp CLI.")
+    else:
+        print(f"✅ Successfully exported {len(pngs)} slides to {out_dir}")
+    
+    return pngs
     return pngs
 
 def convert_pptx_to_images(pptx_path: Path, out_dir: Path, markdown_path: Path = None):
@@ -199,24 +315,17 @@ def convert_pptx_to_images(pptx_path: Path, out_dir: Path, markdown_path: Path =
     try:
         # Prefer Marp CLI with markdown if available
         if markdown_path is not None:
-            try:
-                export_slides_to_png_with_marp(markdown_path, out_dir)
-                print(f"[convert_pptx_to_images] Used Marp CLI to export PNGs from markdown: {markdown_path}")
-                return out_dir
-            except Exception as e:
-                print(f"[convert_pptx_to_images] Marp CLI PNG export failed: {e}. Falling back to python-pptx.")
-        # Fallback to python-pptx and Pillow
-        from PIL import Image, ImageDraw
-        prs = Presentation(pptx_path)
-        for i, slide in enumerate(prs.slides):
-            # Render slide as blank (no text rendering)
-            img = Image.new('RGB', (1280, 720), color='white')
-            d = ImageDraw.Draw(img)
-            d.text((10,10), f"Slide {i+1}", fill=(0,0,0))
-            img_path = out_dir / f"slide_{i+1:03d}.png"
-            img.save(img_path)
-        print(f"[convert_pptx_to_images] Exported {len(prs.slides)} slides as images to {out_dir} (fallback mode)")
-        return out_dir
+            export_slides_to_png_with_marp(markdown_path, out_dir)
+            print(f"[convert_pptx_to_images] Used Marp CLI to export PNGs from markdown: {markdown_path}")
+            return out_dir
+        else:
+            import traceback
+            from datetime import datetime
+            print("\n[convert_pptx_to_images] Fallback error triggered!")
+            print(f"[convert_pptx_to_images] Time: {datetime.now().isoformat()}")
+            print("[convert_pptx_to_images] Full stack trace:")
+            traceback.print_stack()
+            raise RuntimeError("Marp CLI PNG export is required. No fallback to Pillow/python-pptx allowed.")
     except Exception as e:
         print(f"Error in convert_pptx_to_images: {e}")
         raise
