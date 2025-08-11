@@ -1,9 +1,8 @@
 'use client';
 
-import dynamic from 'next/dynamic';
-import { signIn } from 'next-auth/react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { useState, useEffect, Suspense } from 'react';
+import { useState, useEffect } from 'react';
+import { useAuth } from '@/hooks/useAuth';
 
 // Disable SSR for this component to prevent hydration issues
 const NoSSRWrapper = ({ children }: { children: React.ReactNode }) => {
@@ -23,18 +22,13 @@ const NoSSRWrapper = ({ children }: { children: React.ReactNode }) => {
 export default function SignInPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const { login, isLoading: isAuthLoading } = useAuth();
   const [error, setError] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
-  const [isMounted, setIsMounted] = useState(false);
-
-  useEffect(() => {
-    setIsMounted(true);
-    return () => setIsMounted(false);
-  }, []);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    setIsLoading(true);
+    setIsSubmitting(true);
     setError('');
 
     try {
@@ -59,33 +53,11 @@ export default function SignInPage() {
 
       console.log('Attempting sign in with:', { username, callbackUrl });
       
-      // Use NextAuth's signIn function directly
-      const result = await signIn('credentials', {
-        redirect: false,
-        username,
-        password,
-        callbackUrl,
-      });
-
-      console.log('Sign in result:', result);
-
-      if (result?.error) {
-        // Check if the error is a string that contains HTML
-        if (typeof result.error === 'string' && result.error.includes('<!DOCTYPE')) {
-          console.error('Received HTML response instead of JSON. This might indicate a server-side error page is being returned.');
-          throw new Error('Authentication server returned an error page. Please try again later.');
-        }
-        throw new Error(result.error);
-      }
-
-      // If we get here, authentication was successful
-      if (result?.url) {
-        // Use the URL provided by NextAuth if available
-        window.location.href = result.url;
-      } else {
-        // Fallback to the callback URL
-        window.location.href = callbackUrl;
-      }
+      // Use the login function from our auth hook
+      await login(username, password);
+      
+      // If login is successful, redirect to the callback URL
+      window.location.href = callbackUrl;
     } catch (error) {
       let errorMessage = 'An unexpected error occurred. Please try again.';
       
@@ -100,7 +72,7 @@ export default function SignInPage() {
       setError(errorMessage);
       console.error('Sign in error:', error);
     } finally {
-      setIsLoading(false);
+      setIsSubmitting(false);
     }
   };
 
@@ -113,39 +85,39 @@ export default function SignInPage() {
               Sign in to your account
             </h2>
           </div>
-          {error && (
-            <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative" role="alert">
-              <span className="block sm:inline">{error}</span>
-            </div>
-          )}
-          <form className="mt-8 space-y-6" onSubmit={handleSubmit}>
-            <div className="rounded-md shadow-sm -space-y-px">
-              <div>
-                <label htmlFor="username" className="sr-only">
-                  Email address
-                </label>
+          <form onSubmit={handleSubmit} className="space-y-6">
+            {error && (
+              <div className="bg-red-50 text-red-700 p-4 rounded-md">
+                {error}
+              </div>
+            )}
+            <div>
+              <label htmlFor="username" className="block text-sm font-medium text-gray-700">
+                Username
+              </label>
+              <div className="mt-1">
                 <input
                   id="username"
                   name="username"
-                  type="email"
-                  autoComplete="email"
+                  type="text"
                   required
-                  className="appearance-none rounded-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-t-md focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 focus:z-10 sm:text-sm"
-                  placeholder="Email address"
+                  className="appearance-none block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
                 />
               </div>
-              <div>
-                <label htmlFor="password" className="sr-only">
-                  Password
-                </label>
+            </div>
+
+            <div>
+              <label htmlFor="password" className="block text-sm font-medium text-gray-700">
+                Password
+              </label>
+              <div className="mt-1">
                 <input
                   id="password"
                   name="password"
                   type="password"
                   autoComplete="current-password"
                   required
-                  className="appearance-none rounded-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-b-md focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 focus:z-10 sm:text-sm"
-                  placeholder="Password"
+                  className="appearance-none block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
                 />
               </div>
             </div>
@@ -153,10 +125,10 @@ export default function SignInPage() {
             <div>
               <button
                 type="submit"
-                disabled={isLoading}
-                className="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                disabled={isSubmitting || isAuthLoading}
+                className={`w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 ${isSubmitting || isAuthLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
               >
-                {isLoading ? 'Signing in...' : 'Sign in'}
+                {isSubmitting || isAuthLoading ? 'Signing in...' : 'Sign in'}
               </button>
             </div>
           </form>

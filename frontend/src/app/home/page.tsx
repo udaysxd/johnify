@@ -1,12 +1,11 @@
 'use client';
 
 import { useEffect, useState, useRef } from 'react';
-import { useSession } from 'next-auth/react';
-import type { Session } from 'next-auth';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import Header from '@/components/Header';
 import Image from 'next/image';
+import { useAuth } from '@/hooks/useAuth';
 
 
 type Video = {
@@ -21,7 +20,7 @@ type Video = {
 
 
 export default function HomePage() {
-  const { data: session, status } = useSession();
+  const { user, isAuthenticated, isLoading: isAuthLoading } = useAuth();
   const router = useRouter();
   const [videos, setVideos] = useState<Video[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -32,18 +31,18 @@ export default function HomePage() {
 
   // Handle unauthenticated state - this needs to be the first effect
   useEffect(() => {
-    if (status === 'unauthenticated' && !window.location.pathname.startsWith('/auth/signin')) {
+    if (!isAuthLoading && !isAuthenticated && !window.location.pathname.startsWith('/auth/signin')) {
       console.log('Redirecting to signin');
       router.push('/auth/signin');
     }
-  }, [status, router]);
+  }, [isAuthenticated, isAuthLoading, router]);
 
   // Fetch user's videos - this is the second effect
   useEffect(() => {
     const fetchVideos = async () => {
       // Only proceed if we have a valid session
-      if (status !== 'authenticated' || !session) {
-        console.log('Not authenticated or no session, waiting for auth...');
+      if (isAuthLoading || !isAuthenticated) {
+        console.log('Not authenticated or still loading, waiting for auth...');
         setIsLoading(false);
         return;
       }
@@ -52,19 +51,8 @@ export default function HomePage() {
         setIsLoading(true);
         setError(null);
         
-        // Get the token from the session
-function getAccessToken(session: Session | null | undefined): string | undefined {
-  if (!session) return undefined;
-  if ('accessToken' in session && typeof (session as { accessToken?: unknown }).accessToken === 'string') {
-    return (session as { accessToken: string }).accessToken;
-  }
-  if ('user' in session && session.user && 'accessToken' in session.user && typeof (session.user as { accessToken?: unknown }).accessToken === 'string') {
-    return (session.user as { accessToken: string }).accessToken;
-  }
-  return undefined;
-}
-
-const token = getAccessToken(session);
+        // Get the token from sessionStorage
+        const token = sessionStorage.getItem('access_token');
         
         if (!token) {
           console.error('No access token found in session');
@@ -116,10 +104,10 @@ const token = getAccessToken(session);
     };
 
     // Only fetch videos if we're authenticated
-    if (status === 'authenticated') {
+    if (isAuthenticated) {
       fetchVideos();
     }
-  }, [status, session]);
+  }, [isAuthenticated, isAuthLoading]);
 
   // Close modal when clicking outside
   useEffect(() => {
@@ -143,7 +131,7 @@ const token = getAccessToken(session);
   }, [selectedVideo]);
 
   // Show loading state while checking auth status or fetching videos
-  if (status === 'loading' || (status === 'authenticated' && isLoading)) {
+  if (isAuthLoading || (isAuthenticated && isLoading)) {
     return (
       <div className="min-h-screen bg-gray-100">
         <Header />

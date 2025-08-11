@@ -2,11 +2,11 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { useSession } from 'next-auth/react';
 import Header from '@/components/Header';
+import { useAuth } from '@/hooks/useAuth';
 
 export default function LearnPage() {
-  const { data: session, status } = useSession();
+  const { user, isAuthenticated, isLoading: isAuthLoading } = useAuth();
   const [topic, setTopic] = useState('');
   const complexity = 3; // Fixed intermediate complexity level
   const [isLoading, setIsLoading] = useState(false);
@@ -16,12 +16,12 @@ export default function LearnPage() {
 
   // Redirect to login if not authenticated
   useEffect(() => {
-    if (status === 'unauthenticated') {
+    if (!isAuthLoading && !isAuthenticated) {
       router.push('/auth/signin');
     }
-  }, [status, router]);
+  }, [isAuthenticated, isAuthLoading, router]);
 
-  if (status === 'loading') {
+  if (isAuthLoading) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
         <div className="text-center">
@@ -41,8 +41,8 @@ export default function LearnPage() {
     
     try {
       const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
-      // Get the user's email from the session
-      const userEmail = session?.user?.email;
+      // Get the user's email from the auth state
+      const userEmail = user?.email;
       
       const response = await fetch(`${backendUrl}/learn`, {
         method: 'POST',

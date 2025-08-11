@@ -2,8 +2,6 @@
 
 import { createContext, useContext, useEffect, useState, ReactNode, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
-import { signIn, signOut as nextAuthSignOut, useSession } from 'next-auth/react';
-import { User as AuthUser } from '@/types/auth';
 
 interface AppUser {
   user_id: string;
@@ -25,94 +23,129 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AppUser | null>(null);
   const [loading, setLoading] = useState(true);
-  const { data: session, status, update: updateSession } = useSession();
   const router = useRouter();
 
-  // Update user when session changes
-  const updateUserFromSession = useCallback(async () => {
+  // Update user from session storage
+  const updateUserFromStorage = useCallback(() => {
     setLoading(true);
     try {
-      if (status === 'authenticated' && session?.user) {
-        // Map the session user to our AppUser type
-        const userData: AppUser = {
-          user_id: session.user.id || '',
-          user_email: session.user.email || '',
-          user_name: session.user.name || '',
-          is_verified: false // You might want to get this from your session
-        };
-        setUser(userData);
-      } else {
-        setUser(null);
+      if (typeof window !== 'undefined') {
+        const userData = sessionStorage.getItem('user');
+        if (userData) {
+          const parsedUser = JSON.parse(userData);
+          const appUser: AppUser = {
+            user_id: parsedUser.id || '',
+            user_email: parsedUser.email || '',
+            user_name: parsedUser.name || '',
+            is_verified: true // Assuming the user is verified if they have a valid session
+          };
+          setUser(appUser);
+          return;
+        }
       }
+      setUser(null);
     } catch (error) {
-      console.error('Error updating user from session:', error);
+      console.error('Error updating user from storage:', error);
       setUser(null);
     } finally {
       setLoading(false);
     }
-  }, [status, session]);
+  }, []);
 
-  useEffect(() => {
-    updateUserFromSession();
-  }, [updateUserFromSession, status]);
-
-  const handleSignIn = async (email: string, password: string) => {
+  // Handle sign in
+  const handleSignIn = useCallback(async (email: string, password: string) => {
     try {
-      const result = await signIn('credentials', {
-        redirect: false,
-        username: email,
-        password,
+      setLoading(true);
+      
+      const formData = new URLSearchParams();
+      formData.append('username', email);
+      formData.append('password', password);
+      
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/auth/login`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Accept': 'application/json',
+        },
+        body: formData.toString(),
+        credentials: 'include',
       });
 
-      if (result?.error) {
-        return { error: result.error, ok: false };
+      const data = await response.json();
+      
+      if (!response.ok) {
+        return { error: data.detail || 'Login failed', ok: false };
       }
 
+      // Store user data in session storage
+      const userInfo = {
+        id: data.user_id || '1',
+        name: data.username || email,
+        email: data.email || email,
+      };
+      
+      sessionStorage.setItem('user', JSON.stringify(userInfo));
+      sessionStorage.setItem('access_token', data.access_token);
+      
+      // Update user state
+      const appUser: AppUser = {
+        user_id: userInfo.id,
+        user_email: userInfo.email,
+        user_name: userInfo.name,
+        is_verified: true
+      };
+      
+      setUser(appUser);
       return { ok: true };
     } catch (error) {
       console.error('Sign in error:', error);
       return { error: 'An error occurred during sign in', ok: false };
+    } finally {
+      setLoading(false);
     }
-  };
+  }, []);
 
-  const handleSignOut = async () => {
+  // Handle sign out
+  const handleSignOut = useCallback(async () => {
     try {
-      await nextAuthSignOut({ redirect: false });
+      setLoading(true);
+      // Clear session storage
+      sessionStorage.removeItem('user');
+      sessionStorage.removeItem('access_token');
       setUser(null);
       router.push('/auth/signin');
     } catch (error) {
       console.error('Sign out error:', error);
+    } finally {
+      setLoading(false);
     }
+  }, [router]);
+
+  // Refresh user data
+  const refreshUser = useCallback(async () => {
+    updateUserFromStorage();
+  }, [updateUserFromStorage]);
+
+  // Update user when component mounts
+  useEffect(() => {
+    updateUserFromStorage();
+  }, [updateUserFromStorage]);
+
+  const value = {
+    user,
+    loading,
+    signIn: handleSignIn,
+    signOut: handleSignOut,
+    refreshUser,
   };
 
-  const refreshUser = async () => {
-    try {
-      // This will trigger a session refresh
-      await signIn('credentials', { redirect: false });
-    } catch (error) {
-      console.error('Error refreshing user:', error);
-    }
-  };
-
-  return (
-    <AuthContext.Provider
-      value={{
-        user,
-        loading,
-        signIn: handleSignIn,
-        signOut: handleSignOut,
-        refreshUser,
-      }}
-    >
-      {children}
-    </AuthContext.Provider>
-  );
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 
-export function useAuth() {
+export const useAuth = () => {
   const context = useContext(AuthContext);
   if (context === undefined) {
     throw new Error('useAuth must be used within an AuthProvider');
   }
   return context;
-}
+};

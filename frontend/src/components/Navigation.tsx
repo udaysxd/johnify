@@ -3,19 +3,17 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { useSession, signOut } from 'next-auth/react';
+import { useAuth } from '@/hooks/useAuth';
 
 interface NavigationProps {
   children?: React.ReactNode;
 }
 
 export default function Navigation({ children }: NavigationProps) {
-  const { data: session, status } = useSession();
+  const { user, isAuthenticated, isLoading, logout } = useAuth();
   const pathname = usePathname();
   const router = useRouter();
   const [isClient, setIsClient] = useState(false);
-  const isAuthenticated = status === 'authenticated';
-  const isLoading = status === 'loading';
 
   useEffect(() => {
     setIsClient(true);
@@ -47,10 +45,10 @@ export default function Navigation({ children }: NavigationProps) {
             {isAuthenticated ? (
               <div className="flex items-center space-x-4">
                 <span className="text-gray-700">
-                  Hello, {session?.user?.name || 'User'}
+                  Hello, {user?.name || 'User'}
                 </span>
                 <button
-                  onClick={() => signOut({ callbackUrl: '/auth/signin' })}
+                  onClick={logout}
                   className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-md hover:bg-indigo-700 transition-colors"
                 >
                   Sign out

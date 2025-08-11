@@ -1,20 +1,25 @@
 'use client';
 
-import { useSession, signIn, signOut } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
+import { useAuth } from '@/providers/AuthProvider';
 
 export default function TestAuth() {
-  const { data: session, status } = useSession();
+  const { user, isAuthenticated, isLoading, logout } = useAuth();
   const router = useRouter();
+  const [isClient, setIsClient] = useState(false);
 
   useEffect(() => {
-    console.log('Session status:', status);
-    console.log('Session data:', session);
-  }, [session, status]);
+    setIsClient(true);
+    console.log('Auth state:', { isAuthenticated, user, isLoading });
+  }, [isAuthenticated, user, isLoading]);
 
-  if (status === 'loading') {
-    return <div>Loading...</div>;
+  if (isLoading || !isClient) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-indigo-500"></div>
+      </div>
+    );
   }
 
   return (
@@ -22,32 +27,40 @@ export default function TestAuth() {
       <h1 className="text-2xl font-bold mb-6">Authentication Test Page</h1>
       
       <div className="mb-6 p-4 border rounded-lg bg-gray-50">
-        <h2 className="text-xl font-semibold mb-2">Session Status</h2>
+        <h2 className="text-xl font-semibold mb-2">Authentication State</h2>
         <pre className="bg-white p-4 rounded overflow-auto">
-          {JSON.stringify({ status, session }, null, 2)}
+          {JSON.stringify({ 
+            isAuthenticated, 
+            isLoading, 
+            user,
+            accessToken: isClient ? sessionStorage.getItem('access_token') : 'Loading...'
+          }, null, 2)}
         </pre>
       </div>
 
       <div className="space-y-4">
-        {status === 'authenticated' ? (
+        {isAuthenticated ? (
           <>
             <button
-              onClick={() => signOut()}
+              onClick={() => {
+                logout();
+                router.push('/auth/signin');
+              }}
               className="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600"
             >
               Sign Out
             </button>
             <div className="mt-4 p-4 bg-green-100 text-green-800 rounded">
-              You are signed in as {session.user?.email}
+              You are signed in as {user?.email || user?.name || 'User'}
             </div>
           </>
         ) : (
           <>
             <button
-              onClick={() => signIn()}
+              onClick={() => router.push('/auth/signin')}
               className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
             >
-              Sign In
+              Go to Sign In
             </button>
             <div className="mt-4 p-4 bg-yellow-100 text-yellow-800 rounded">
               You are not signed in

@@ -2,61 +2,36 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { signOut, useSession } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
+import { useAuth } from '@/providers/AuthProvider';
 
 export default function Header() {
   const router = useRouter();
-  const { data: session, status } = useSession();
-  const [isMounted, setIsMounted] = useState(false);
+  const { user, isAuthenticated, isLoading, logout } = useAuth();
+  const [isClient, setIsClient] = useState(false);
   
-  // Set mounted state to avoid hydration issues
+  // Set client state to avoid hydration issues
   useEffect(() => {
-    setIsMounted(true);
+    setIsClient(true);
   }, []);
   
-  // Log session state for debugging (client-side only)
+  // Log auth state for debugging (client-side only)
   useEffect(() => {
-    if (isMounted) {
-      console.log('Session status:', status);
-      console.log('Session data:', session);
-      console.log('Cookies:', document.cookie);
+    if (isClient) {
+      console.log('Auth state:', { isAuthenticated, user, isLoading });
     }
-  }, [session, status, isMounted]);
-  
-  const isAuthenticated = status === 'authenticated' && session?.user;
-  const isLoading = status === 'loading' && !isMounted;
+  }, [user, isAuthenticated, isLoading, isClient]);
 
-  const handleSignOut = async () => {
+  const handleSignOut = () => {
     try {
-      // First, clear all auth-related data from the client
-      if (typeof window !== 'undefined') {
-        // Clear localStorage and sessionStorage
-        ['nextauth.message', 'nextauth.user', 'nextauth.tokens'].forEach(key => {
-          localStorage.removeItem(key);
-          sessionStorage.removeItem(key);
-        });
-      }
-      
-      // Call the signout API
-      const signoutResponse = await fetch('/api/auth/signout', { 
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        credentials: 'include' // Important for cookies to be sent
-      });
-      
-      if (!signoutResponse.ok) {
-        throw new Error('Failed to sign out');
-      }
-      
-      // Force a hard refresh to ensure all state is cleared
-      window.location.href = '/';
+      // Clear auth data using our logout function
+      logout();
+      // Redirect to home page
+      router.push('/');
     } catch (error) {
       console.error('Error during sign out:', error);
       // Still redirect even if there's an error
-      window.location.href = '/';
+      router.push('/');
     }
   };
 
@@ -68,12 +43,12 @@ export default function Header() {
         </Link>
         
         <nav className="flex items-center space-x-4">
-          {isLoading ? (
+          {!isClient || isLoading ? (
             <div className="h-8 w-24 bg-gray-200 rounded animate-pulse"></div>
           ) : isAuthenticated ? (
             <div className="flex items-center space-x-4">
               <span className="text-sm text-gray-600">
-                {session?.user?.email || 'User'}
+                {user?.email || user?.name || 'User'}
               </span>
               <button
                 onClick={handleSignOut}

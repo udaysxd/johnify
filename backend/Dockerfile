@@ -4,7 +4,7 @@ FROM python:3.11-slim
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
-    PORT=8080
+    PORT=8000
 
 # Set work directory
 WORKDIR /app
@@ -32,7 +32,7 @@ COPY . .
 RUN cat /app/app/pptx_gen.py
 
 # Expose port
-EXPOSE 8080
+EXPOSE 8000
 
 # Start with Gunicorn
-CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-b", ":8080", "app.main:app"]
+CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-b", ":8000", "app.main:app"]

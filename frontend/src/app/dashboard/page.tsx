@@ -2,20 +2,20 @@
 
 import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { useSession } from 'next-auth/react';
 import Link from 'next/link';
+import { useAuth } from '@/hooks/useAuth';
 
 export default function DashboardPage() {
-  const { data: session, status } = useSession();
+  const { user, isAuthenticated, isLoading } = useAuth();
   const router = useRouter();
 
   useEffect(() => {
-    if (status === 'unauthenticated') {
+    if (!isLoading && !isAuthenticated) {
       router.push('/auth/signin');
     }
-  }, [status, router]);
+  }, [isAuthenticated, isLoading, router]);
 
-  if (status === 'loading') {
+  if (isLoading) {
     return (
       <div className="flex items-center justify-center min-h-screen">
         <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-indigo-500"></div>
@@ -23,7 +23,7 @@ export default function DashboardPage() {
     );
   }
 
-  if (status === 'unauthenticated') {
+  if (!isAuthenticated) {
     return null; // Will be redirected by the useEffect
   }
 
@@ -32,7 +32,7 @@ export default function DashboardPage() {
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="text-center">
           <h1 className="text-3xl font-bold text-gray-900 mb-6">
-            Welcome back, {session?.user?.name || 'User'}!
+            Welcome back, {user?.name || 'User'}!
           </h1>
           <p className="text-lg text-gray-600 mb-8">
             What would you like to do today?

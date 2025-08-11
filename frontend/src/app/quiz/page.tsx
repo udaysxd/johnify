@@ -2,10 +2,10 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
-import { useSession } from 'next-auth/react';
 import Link from 'next/link';
 import VideoPlayer from '@/components/VideoPlayer';
 import Header from '@/components/Header';
+import { useAuth } from '@/hooks/useAuth';
 import type { VideoItem } from '@/types/quiz';
 
 interface QuizQuestion {
@@ -41,29 +41,40 @@ interface QuizAnswer {
 }
 
 export default function QuizPage() {
-  const { data: _session } = useSession();
+  const { isAuthenticated, isLoading: isAuthLoading } = useAuth();
   const router = useRouter();
   const [isClient, setIsClient] = useState(false);
   const [topic, setTopic] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isGeneratingVideo, setIsGeneratingVideo] = useState(false);
   const [videos, setVideos] = useState<VideoItem[]>([]);
-  const [error, setError] = useState<string | null>(null);
+
+  // Redirect to login if not authenticated
+  useEffect(() => {
+    if (!isAuthLoading && !isAuthenticated) {
+      router.push('/auth/signin');
+    }
+  }, [isAuthenticated, isAuthLoading, router]);
+
+  if (isAuthLoading) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="text-center">
+          <div className="w-16 h-16 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto"></div>
+          <p className="mt-4 text-gray-600">Loading...</p>
+        </div>
+      </div>
+    );
+  }
   const [quiz, setQuiz] = useState<QuizData | null>(null);
   const [answers, setAnswers] = useState<QuizAnswer>({});
   const [result, setResult] = useState<QuizResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   // Set isClient to true after component mounts (client-side only)
   useEffect(() => {
     setIsClient(true);
   }, []);
-
-  // Handle authentication and redirect if needed
-  useEffect(() => {
-    if (_session === null) {
-      router.push('/auth/signin');
-    }
-  }, [_session, router]);
 
   // Generate quiz based on topic
   const generateQuiz = useCallback(async () => {
