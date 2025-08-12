@@ -6,23 +6,18 @@ const publicPaths = [
   '/',
   '/about',
   '/auth/signin',
-  '/auth/signup',
+  '/auth/register',
   '/auth/error',
   '/_next',
   '/favicon.ico',
-  '/api/auth',
   '/test-auth',  // Add any test or public API endpoints here
 ];
 
 // List of API routes that don't require authentication
 const publicApiRoutes = [
-  '/api/auth',
   '/api/health',
   '/api/public',
-  '/api/auth/session',  // Keep for backward compatibility
-  '/api/auth/csrf',     // Keep for backward compatibility
-  '/api/auth/signin',   // Keep for backward compatibility
-  '/api/auth/signout',  // Keep for backward compatibility
+  // Add any other public API endpoints here
 ];
 
 // Helper function to check if a path is public

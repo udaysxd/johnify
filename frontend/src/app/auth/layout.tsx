@@ -12,8 +12,8 @@ export default function AuthLayout({
   const [mounted, setMounted] = useState(false);
   const pathname = usePathname();
   
-  // Only show navigation on signin/signup pages
-  const showNav = pathname === '/auth/signin' || pathname === '/auth/signup';
+  // Only show navigation on signin/register pages
+  const showNav = pathname === '/auth/signin' || pathname === '/auth/register';
 
   // Only render navigation after mounting to prevent hydration mismatch
   useEffect(() => {

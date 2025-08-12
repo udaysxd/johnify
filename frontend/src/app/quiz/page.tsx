@@ -2,21 +2,16 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
-import Link from 'next/link';
-import VideoPlayer from '@/components/VideoPlayer';
-import Header from '@/components/Header';
-import { useAuth } from '@/hooks/useAuth';
-import type { VideoItem } from '@/types/quiz';
+import { useAuth } from '@/providers/AuthProvider';
+import LoadingState from '@/components/LoadingState';
 
+// Define types
 interface QuizQuestion {
   id: string;
   question: string;
   correctAnswer: string;
   options: Record<string, string>;
   explanation?: string;
-  q?: string;
-  a?: string;
-  opts?: Record<string, string>;
 }
 
 interface QuizData {
@@ -24,59 +19,42 @@ interface QuizData {
   topic: string;
 }
 
-interface WrongAnswer {
-  question: string;
-  correctAnswer: string;
-  userAnswer: string;
-}
-
 interface QuizResult {
   score: number;
   total: number;
-  wrongAnswers: WrongAnswer[];
+  wrongAnswers: Array<{
+    question: string;
+    correctAnswer: string;
+    userAnswer: string;
+    explanation?: string;
+  }>;
 }
 
-interface QuizAnswer {
-  [key: string]: string;
-}
-
-export default function QuizPage() {
-  const { isAuthenticated, isLoading: isAuthLoading } = useAuth();
+function QuizPageContent() {
   const router = useRouter();
-  const [isClient, setIsClient] = useState(false);
-  const [topic, setTopic] = useState('');
+  const { user } = useAuth();
+  const isAuthenticated = !!user;
   const [isLoading, setIsLoading] = useState(false);
   const [isGeneratingVideo, setIsGeneratingVideo] = useState(false);
-  const [videos, setVideos] = useState<VideoItem[]>([]);
-
-  // Redirect to login if not authenticated
-  useEffect(() => {
-    if (!isAuthLoading && !isAuthenticated) {
-      router.push('/auth/signin');
-    }
-  }, [isAuthenticated, isAuthLoading, router]);
-
-  if (isAuthLoading) {
-    return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <div className="text-center">
-          <div className="w-16 h-16 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto"></div>
-          <p className="mt-4 text-gray-600">Loading...</p>
-        </div>
-      </div>
-    );
-  }
+  const [videoError, setVideoError] = useState<string | null>(null);
+  const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [topic, setTopic] = useState('');
   const [quiz, setQuiz] = useState<QuizData | null>(null);
-  const [answers, setAnswers] = useState<QuizAnswer>({});
+  const [answers, setAnswers] = useState<Record<string, string>>({});
   const [result, setResult] = useState<QuizResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [isClient, setIsClient] = useState(false);
 
-  // Set isClient to true after component mounts (client-side only)
   useEffect(() => {
     setIsClient(true);
   }, []);
 
-  // Generate quiz based on topic
+  useEffect(() => {
+    if (isClient && !isAuthenticated) {
+      router.push('/auth/signin');
+    }
+  }, [isClient, isAuthenticated, router]);
+
   const generateQuiz = useCallback(async () => {
     if (!topic.trim()) return;
 
@@ -89,9 +67,7 @@ export default function QuizPage() {
     try {
       const response = await fetch('/api/quiz', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ topic, numQuestions: 3 }),
       });
 
@@ -100,159 +76,234 @@ export default function QuizPage() {
         throw new Error(errorData.message || 'Failed to generate quiz');
       }
 
-      const data: QuizData = await response.json();
-      // Normalize options for all questions
-      if (data.questions) {
-        data.questions = data.questions.map((q: Partial<QuizQuestion> & { options?: Record<string, string> }, idx: number) => {
-          const opts = q.options || q.opts || {};
-          // Find the key whose value matches q.a or q.correctAnswer (case-insensitive)
-          let correctKey = '';
-          if (q.a) {
-            correctKey = Object.entries(opts).find(
-              ([, value]) => String(value).toLowerCase() === String(q.a).toLowerCase()
-            )?.[0] || '';
-          } else if (q.correctAnswer) {
-            correctKey = Object.entries(opts).find(
-              ([, value]) => String(value).toLowerCase() === String(q.correctAnswer).toLowerCase()
-            )?.[0] || '';
-          }
-          // Always set all required fields, fallback if missing
-          const questionId = q.id || `q-${idx}`;
-          const questionText = q.q || q.question || `Question ${idx + 1}`;
-          const answerText = q.a || q.correctAnswer || (correctKey ? opts[correctKey] : '');
-          
-          const normalizedQuestion: QuizQuestion = {
-            id: questionId,
-            question: questionText,
-            correctAnswer: correctKey,
-            options: opts,
-            q: questionText,
-            a: answerText,
-            opts: opts,
-            explanation: q.explanation
-          };
-          
-          return normalizedQuestion;
+      const responseData = await response.json();
+      console.log('Raw API response:', responseData);
+      
+      // Log the structure of the first question if it exists
+      if (responseData.questions && responseData.questions.length > 0) {
+        console.log('First question structure:', {
+          id: responseData.questions[0].id,
+          question: responseData.questions[0].question,
+          options: responseData.questions[0].options,
+          optionsType: typeof responseData.questions[0].options,
+          optionsKeys: responseData.questions[0].options ? Object.keys(responseData.questions[0].options) : 'no options',
+          entries: responseData.questions[0].options ? Object.entries(responseData.questions[0].options) : 'no entries'
         });
       }
-      setQuiz(data);
+      
+      // Transform the data to match our QuizData interface
+      const quizData: QuizData = {
+        topic: responseData.topic || 'General Knowledge',
+        questions: (responseData.questions || []).map((q: any, index: number) => {
+          console.log('Processing question:', q);
+          return {
+            id: q.id || `question-${index}`,
+            question: q.q || `Question ${index + 1}`,
+            correctAnswer: q.a || '',
+            options: q.opts || {},
+            explanation: q.explanation
+          };
+        })
+      };
+      
+      console.log('Processed quiz data:', JSON.stringify(quizData, null, 2));
+      setQuiz(quizData);
     } catch (err) {
       const error = err as Error;
-      console.error('Error generating quiz:', error);
       setError(error.message || 'Failed to generate quiz. Please try again.');
     } finally {
       setIsLoading(false);
     }
   }, [topic]);
 
-  // Alias for generateQuiz for better readability
-  const startQuiz = useCallback(() => {
-    return generateQuiz();
-  }, [generateQuiz]);
-
-  // Handle answer selection
-  const handleAnswer = useCallback((questionIdx: number, answer: string) => {
-    setAnswers((prev: QuizAnswer) => ({
-      ...prev,
-      [questionIdx]: answer
-    }));
-  }, []);
-
-  // Generate video based on quiz results
-  const generateVideo = useCallback(async () => {
-    if (!result || isGeneratingVideo || !quiz) return;
-
+  const generateVideo = async () => {
+    if (!quiz) return;
+    
+    // Check if we have a result with wrong answers
+    if (result) {
+      // If there are no wrong answers, no need to generate a video
+      if (result.wrongAnswers.length === 0) {
+        setVideoError('Great job! All answers are correct. No video needed.');
+        return;
+      }
+    }
+    
     setIsGeneratingVideo(true);
-    setVideos([]);
-    setError(null);
-
+    setVideoError(null);
+    setVideoUrl(null);
+    
     try {
-      // Prepare answers as a list in order of questions
-      const answerList = quiz.questions.map((q, idx) => answers[idx] || '');
-
-      // Send the original questions array as-is
+      // Format answers as an object with question indices as keys
+      const formattedAnswers: Record<string, string> = {};
+      
+      // Format questions to match backend expectations
+      const formattedQuestions = quiz.questions.map((q, index) => {
+        // Format options as { A: 'option1', B: 'option2', ... }
+        const formattedOpts: Record<string, string> = {};
+        if (q.options && typeof q.options === 'object') {
+          Object.entries(q.options).forEach(([key, value], idx) => {
+            const optionKey = String.fromCharCode(65 + idx); // A, B, C, etc.
+            formattedOpts[optionKey] = String(value);
+          });
+        }
+        
+        // Store the answer for this question
+        const answerKey = answers[q.id];
+        if (answerKey !== undefined) {
+          // Convert answer to letter (0->'a', 1->'b', etc.)
+          const letterAnswer = String.fromCharCode(97 + parseInt(answerKey, 10));
+          formattedAnswers[index] = letterAnswer;
+        }
+        
+        // Return formatted question
+        return {
+          q: q.question || 'No question text',
+          a: q.correctAnswer || '',
+          opts: formattedOpts,
+          explanation: q.explanation || `Explanation for question ${index + 1}`
+        };
+      });
+      
+      console.log('Sending to generate-video API:', {
+        topic: quiz.topic,
+        questions: formattedQuestions,
+        answers: formattedAnswers
+      });
+      
       const response = await fetch('/api/generate-video', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          topic,
-          answers: answerList,
-          questions: quiz.questions // send full objects for backend grading/slidegen
+          topic: quiz.topic,
+          questions: formattedQuestions,
+          answers: formattedAnswers
         }),
       });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.message || 'Failed to generate video');
-      }
-
-      const data: { videos?: VideoItem[]; error?: string; details?: string; message?: string } = await response.json();
-      console.log('Video generation response:', data);
-
-      if (data.videos?.length) {
-        setVideos(data.videos);
-      } else if (data.error) {
-        throw new Error(data.details || data.error || 'Failed to generate videos');
-      } else {
-        throw new Error('No videos were generated. Please try again.');
-      }
-    } catch (err) {
-      const error = err as Error;
-      console.error('Error generating video:', error);
-      setError(error.message || 'Failed to generate video. Please try again.');
       
-      // If we have a 504 Gateway Timeout, suggest the user to wait
-      const errorMessage = error.message || '';
-      if (errorMessage.includes('504') || errorMessage.includes('timeout')) {
-        setError('The video generation is taking longer than expected. Your videos are still being processed and will be available shortly.');
+      const data = await response.json();
+      console.log('Video generation response:', data);
+      
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to generate video');
       }
+      
+      // If the response indicates all answers are correct, handle it gracefully
+      if (data.message && data.message.includes('All answers are correct')) {
+        setVideoError('Great job! All answers are correct. No video needed.');
+        return;
+      }
+      
+      // Handle different possible response formats
+      if (data.videos && Array.isArray(data.videos) && data.videos.length > 0) {
+        // New format: { videos: [{ url: string, type: string }] }
+        const video = data.videos[0];
+        if (video && video.url) {
+          setVideoUrl(video.url);
+          return;
+        }
+      }
+      
+      // Fallback formats for backward compatibility
+      if (data.videoUrl || data.video_url) {
+        setVideoUrl(data.videoUrl || data.video_url);
+        return;
+      }
+      
+      // If we get here, no valid video URL was found
+      console.error('No video URL found in response:', data);
+      throw new Error('No video URL was provided in the response. Please try again or contact support if the issue persists.');
+    } catch (err) {
+      console.error('Error generating video:', err);
+      setVideoError(err instanceof Error ? err.message : 'Failed to generate video');
     } finally {
       setIsGeneratingVideo(false);
     }
-  }, [result, isGeneratingVideo, quiz, answers, topic]);
+  };
 
-  // Submit quiz and get results from backend
+  const handleAnswer = useCallback((questionId: string, answer: string) => {
+    setAnswers(prev => ({
+      ...prev,
+      [questionId]: answer
+    }));
+  }, []);
+
   const submitQuiz = useCallback(async () => {
     if (!quiz) return;
+    
     setIsLoading(true);
     setError(null);
+    
     try {
-      // Prepare answers as a list in order of questions
-      const answerList = quiz.questions.map((q, idx) => {
-        const id = q.id || idx.toString();
-        // Default to empty string if not answered
-        return answers[id] || '';
-      });
+      // Convert answers from {questionId: answer} to array of answers in order
+      const answerArray = quiz.questions.map(question => answers[question.id] || '');
+      
+      // Format questions for the backend
+      const formattedQuestions = quiz.questions.map(q => ({
+        q: q.question,
+        a: q.correctAnswer, // The backend expects 'a' for correct answer
+        opts: Object.entries(q.options).map(([key, value]) => `${key}) ${value}`),
+        explanation: q.explanation || ''
+      }));
+      
       const response = await fetch('/api/grade_quiz', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ answers: answerList, questions: quiz.questions }),
+        body: JSON.stringify({ 
+          answers: answerArray, 
+          questions: formattedQuestions 
+        }),
       });
+      
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
         throw new Error(errorData.message || 'Failed to grade quiz');
       }
+      
       const data = await response.json();
-      // Map backend result to frontend QuizResult
-      const quizResult: QuizResult = {
-        score: data.score,
-        total: data.total_questions,
-        wrongAnswers: (data.wrong_questions || []).map((wq: Record<string, string>) => ({
-          question: wq.question,
-          userAnswer: wq.user_answer_text || wq.user_answer,
-          correctAnswer: wq.correct_answer_text || wq.correct_answer,
-          explanation: wq.explanation || '',
-        })),
-      };
-      setResult(quizResult);
-      // Only generate video if there are wrong answers
-      if (quizResult.wrongAnswers.length > 0) {
-        console.log('Generating video for wrong answers...');
-        await generateVideo();
+      console.log('Quiz grading response:', data);
+      
+      // Handle different response formats
+      if (data.wrong_answers !== undefined) {
+        // New format with wrong_answers count
+        setResult({
+          score: data.score,
+          total: data.total || 3, // Default to 3 if not provided
+          wrongAnswers: data.wrong_answers === 0 ? [] : [
+            // If there are wrong answers but no details, create a generic message
+            {
+              question: 'Some questions were answered incorrectly',
+              userAnswer: 'Incorrect',
+              correctAnswer: 'Correct',
+              explanation: 'Please review the material and try again.'
+            }
+          ]
+        });
+      } else if (data.wrong_questions) {
+        // Old format with detailed wrong questions
+        setResult({
+          score: data.score,
+          total: data.total_questions,
+          wrongAnswers: data.wrong_questions.map((wq: any) => ({
+            question: wq.question,
+            userAnswer: wq.user_answer_text || wq.user_answer,
+            correctAnswer: wq.correct_answer_text || wq.correct_answer,
+            explanation: wq.explanation || '',
+          })),
+        });
       } else {
-        console.log('All answers correct! No video needed.');
+        // Fallback for any other format
+        setResult({
+          score: 0,
+          total: 3,
+          wrongAnswers: [{
+            question: 'Error processing results',
+            userAnswer: 'Error',
+            correctAnswer: 'Unknown',
+            explanation: 'There was an issue processing your quiz results.'
+          }]
+        });
       }
     } catch (err) {
       const error = err as Error;
@@ -260,241 +311,270 @@ export default function QuizPage() {
     } finally {
       setIsLoading(false);
     }
-  }, [answers, generateVideo, quiz]);
+  }, [answers, quiz]);
 
-  // Check video accessibility when videos change (client-side only)
-  useEffect(() => {
-    if (!isClient) return;
-    
-    console.log('Videos updated:', videos);
-    
-    // Check accessibility for each video
-    videos.forEach(video => {
-      if (video.url) {
-        fetch(video.url, { method: 'HEAD' })
-          .then(res => {
-            console.log(`Video ${video.level} accessibility check:`, {
-              status: res.status,
-              statusText: res.statusText,
-              contentType: res.headers.get('content-type'),
-              contentLength: res.headers.get('content-length')
-            });
-          })
-          .catch(err => {
-            console.error(`Error accessing video ${video.level}:`, err);
-          });
-      }
-    });
-  }, [videos, isClient]);
+  // Show loading state when not on client or when loading data
+  if (!isClient || isLoading) {
+    return <LoadingState />;
+  }
 
-if (result) {
+  // Show loading state when not on client or when loading data
+  if (!isClient || isLoading) {
+    return <LoadingState />;
+  }
+
+  // Redirect to signin if not authenticated
+  if (!isAuthenticated) {
+    router.push('/auth/signin');
+    return <LoadingState />;
+  }
+
   return (
-    <div className="min-h-screen bg-gray-50 py-8 px-4 sm:px-6 lg:px-8">
-      <div className="max-w-3xl mx-auto">
-        {error && (
-          <div className="bg-red-50 border-l-4 border-red-500 p-4 mb-6 rounded">
-            <div className="flex">
-              <div className="flex-shrink-0">
-                <svg className="h-5 w-5 text-red-500" viewBox="0 0 20 20" fill="currentColor">
-                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
-                </svg>
-              </div>
-              <div className="ml-3">
-                <p className="text-sm text-red-700">{error}</p>
-              </div>
-            </div>
-          </div>
-        )}
-        
-        <div className="bg-white p-6 rounded-lg shadow-md mb-8">
-          <h2 className="text-2xl font-bold text-center mb-6">Assessment Results</h2>
-          <div className="text-center mb-6">
-            <p className="text-4xl font-bold text-indigo-600 mb-2">
-              {result.score} / {result.total}
-            </p>
-            <p className="text-gray-600">
-              {Math.round((result.score / result.total) * 100)}% Correct
-            </p>
-          </div>
-            
-            {result.wrongAnswers.length > 0 ? (
-              <div className="mb-6">
-                <h3 className="text-lg font-medium mb-3">Areas for Improvement:</h3>
-                <ul className="space-y-2 text-sm text-gray-700">
-                  {result.wrongAnswers.map((wrong: WrongAnswer, index: number) => (
-                    <li key={index} className="flex items-start">
-                      <span className="text-red-500 mr-2">•</span>
-                      <span>{wrong.question}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ) : (
-              <div className="mb-6 p-4 bg-green-50 text-green-700 rounded-md">
-                <p className="font-medium">🎉 Perfect score! You&apos;ve mastered this topic.</p>
-                <p className="text-sm mt-1">Would you like to explore more advanced content?</p>
-              </div>
-            )}
-            
-            <button
-              onClick={generateVideo}
-              disabled={isGeneratingVideo || videos.length > 0}
-              className={`w-full bg-blue-600 text-white py-3 px-4 rounded-md hover:bg-blue-700 transition flex items-center justify-center ${
-                isGeneratingVideo || videos.length > 0 ? 'opacity-50 cursor-not-allowed' : ''
-              }`}
-            >
-              {isGeneratingVideo ? (
-                <>
-                  <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                  </svg>
-                  Generating learning videos...
-                </>
-              ) : videos.length > 0 ? (
-                'Videos Ready!'
-              ) : (
-                'Generate Learning Videos'
-              )}
-            </button>
-            
-            <div className="mt-4 flex space-x-3">
-              <button
-                onClick={() => {
-                  setQuiz(null);
-                  setResult(null);
-                  setAnswers({});
-                  setVideos([]);
-                }}
-                className="flex-1 bg-indigo-600 text-white py-2 px-4 rounded-md hover:bg-indigo-700 transition"
-              >
-                Try Another Assessment
-              </button>
-              
-              <Link
-                href="/"
-                className="flex-1 text-center bg-white border border-gray-300 text-gray-700 py-2 px-4 rounded-md hover:bg-gray-50 transition"
-              >
-                Back to Home
-              </Link>
-            </div>
-          </div>
-
-          {/* Video Player Section */}
-          {videos.length > 0 && (
-            <div className="bg-white p-6 rounded-lg shadow-md">
-              <div className="flex justify-between items-center mb-4">
-                <h2 className="text-xl font-bold">Your AI Tutor Videos</h2>
-                <div className="text-sm text-gray-500">
-                  {videos.length} video{videos.length !== 1 ? 's' : ''} available
-                </div>
-              </div>
-              
-              <div className="bg-gray-50 p-4 rounded-lg">
-                <VideoPlayer 
-                  videos={videos}
-                  initialLevel={Math.min(3, videos.length)} // Default to level 3 or highest available
-                  onVideoChange={(video: { url: string; level: number; title: string }) => {
-                    console.log('Video changed:', video);
-                  }}
-                />
-              </div>
-              
-
+    <div className="min-h-screen bg-gray-50 p-4">
+      {!quiz ? (
+        <div className="max-w-2xl mx-auto bg-white rounded-lg shadow-md p-6">
+          <h1 className="text-2xl font-bold text-gray-800 mb-6">Create a personalised tutor for me</h1>
+          {error && (
+            <div className="mb-4 p-4 bg-red-50 text-red-700 rounded-md">
+              {error}
             </div>
           )}
-        </div>
-      </div>
-    );
-  }
-
-  if (quiz) {
-    return (
-      <div className="min-h-screen bg-gray-50 py-12 px-4 sm:px-6 lg:px-8">
-        <div className="max-w-3xl mx-auto">
-          <h1 className="text-3xl font-bold text-center mb-8">Assessment: {topic}</h1>
-          
-          <div className="space-y-8">
-            {quiz.questions.map((q: QuizQuestion, index: number) => (
-              <div key={index} className="bg-white p-6 rounded-lg shadow">
-                <h3 className="text-lg font-medium mb-4">
-                  {index + 1}. {q.q}
-                </h3>
-                <div className="space-y-2">
-                  {Object.entries(q.opts || {}).map(([key, value]) => (
-                    <label key={key} className="block">
-                      <input
-                        type="radio"
-                        name={`question-${index}`}
-                        className="mr-2"
-                        checked={answers[index] === key}
-                        onChange={() => handleAnswer(index, key)}
-                      />
-                      {value as string}
-                    </label>
-                  ))}
-                </div>
-              </div>
-            ))}
+          <div className="mb-6">
+            <label htmlFor="topic" className="block text-sm font-medium text-gray-700 mb-2">
+              Enter a topic you would like to be assessed on:
+            </label>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                id="topic"
+                value={topic}
+                onChange={(e) => setTopic(e.target.value)}
+                placeholder="e.g., Jazz Music, Ancient Rome, World History"
+                className="flex-1 px-4 py-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+              />
+              <button
+                onClick={generateQuiz}
+                disabled={!topic.trim() || isLoading}
+                className="px-6 py-2 bg-blue-600 text-white font-medium rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isLoading ? 'Generating...' : 'Start Assessment'}
+              </button>
+            </div>
           </div>
-
-          <div className="mt-8 flex justify-end">
+        </div>
+      ) : !result ? (
+        <div className="max-w-3xl mx-auto bg-white rounded-lg shadow-md overflow-hidden">
+          <div className="p-6 border-b border-gray-200">
+            <h1 className="text-2xl font-bold text-gray-800">Quiz: {quiz.topic}</h1>
+          </div>
+          
+          {error && (
+            <div className="bg-red-50 text-red-700 p-4">
+              {error}
+            </div>
+          )}
+          
+          <div className="divide-y divide-gray-200">
+            {quiz.questions.map((question, index) => {
+              // Ensure question has an id, fallback to index if not
+              const questionKey = question.id || `question-${index}`;
+              
+              return (
+                <div key={questionKey} className="p-6">
+                  <h3 className="text-lg font-medium text-gray-900 mb-4">
+                    {index + 1}. {question.question}
+                  </h3>
+                  
+                  <div className="space-y-3">
+                    {(() => {
+                      console.log(`Rendering options for question ${questionKey}:`, question.options);
+                      
+                      // Handle case where options is an array
+                      if (Array.isArray(question.options)) {
+                        console.log('Options is an array, mapping with indices');
+                        return question.options.map((option: string, idx: number) => {
+                          const optionKey = `option-${idx}`;
+                          const inputId = `${questionKey}-${optionKey}`;
+                          
+                          return (
+                            <div key={inputId} className="flex items-center">
+                              <input
+                                id={inputId}
+                                name={`question-${questionKey}`}
+                                type="radio"
+                                checked={answers[questionKey] === optionKey}
+                                onChange={() => handleAnswer(questionKey, optionKey)}
+                                className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300"
+                              />
+                              <label 
+                                htmlFor={inputId}
+                                className="ml-3 block text-gray-700"
+                              >
+                                {option}
+                              </label>
+                            </div>
+                          );
+                        });
+                      }
+                      
+                      // Handle case where options is an object
+                      if (question.options && typeof question.options === 'object') {
+                        console.log('Options is an object, mapping entries');
+                        return Object.entries(question.options).map(([key, value]) => {
+                          const optionKey = key || `option-${Object.keys(question.options).indexOf(key)}`;
+                          const inputId = `${questionKey}-${optionKey}`;
+                          
+                          return (
+                            <div key={inputId} className="flex items-center">
+                              <input
+                                id={inputId}
+                                name={`question-${questionKey}`}
+                                type="radio"
+                                checked={answers[questionKey] === key}
+                                onChange={() => handleAnswer(questionKey, key)}
+                                className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300"
+                              />
+                              <label 
+                                htmlFor={inputId}
+                                className="ml-3 block text-gray-700"
+                              >
+                                {String(value)}
+                              </label>
+                            </div>
+                          );
+                        });
+                      }
+                      
+                      // Fallback if options is not in expected format
+                      console.warn('Unexpected options format:', question.options);
+                      return (
+                        <div className="text-red-500">
+                          Error: Could not display options for this question.
+                        </div>
+                      );
+                    })()}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          
+          <div className="px-6 py-4 bg-gray-50 border-t border-gray-200 flex justify-end">
             <button
               onClick={submitQuiz}
-              className="bg-indigo-600 text-white py-2 px-6 rounded-md hover:bg-indigo-700 transition"
-              disabled={Object.keys(answers).length !== quiz.questions.length}
+              disabled={Object.keys(answers).length < quiz.questions.length || isLoading}
+              className="px-6 py-2 bg-blue-600 text-white font-medium rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              Submit
+              {isLoading ? 'Submitting...' : 'Submit Quiz'}
             </button>
           </div>
         </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="min-h-screen bg-gray-50">
-      <Header />
-      <div className="flex items-center justify-center p-4 pt-20">
-        <div className="bg-white p-8 rounded-lg shadow-md max-w-md w-full">
-          <h1 className="text-2xl font-bold text-center mb-6">Create your personal AI tutor</h1>
-          
-          <div className="mb-6">
-            <label htmlFor="topic" className="block text-sm font-medium text-gray-700 mb-1">
-              What do you need help with?
-            </label>
-            <input
-              type="text"
-              id="topic"
-              value={topic}
-              onChange={(e) => setTopic(e.target.value)}
-              placeholder="e.g., Python programming, World History, etc."
-              className="w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-indigo-500 focus:border-indigo-500"
-              onKeyDown={(e) => e.key === 'Enter' && startQuiz()}
-            />
+      ) : (
+        <div className="max-w-3xl mx-auto">
+          <div className="bg-white rounded-lg shadow-md overflow-hidden mb-8">
+            <div className="p-6 bg-gradient-to-r from-blue-600 to-blue-700 text-white">
+              <h1 className="text-2xl font-bold">Quiz Results</h1>
+              <p className="mt-2 opacity-90">
+                You scored {result.score} out of {result.total}&#33;
+              </p>
+            </div>
+            
+            <div className="p-6">
+              {result.wrongAnswers.length > 0 ? (
+                <div>
+                  <div className="flex justify-between items-center mb-6">
+                    <h2 className="text-lg font-medium text-gray-900">
+                      Areas for Improvement
+                    </h2>
+                    <button
+                      onClick={generateVideo}
+                      disabled={isGeneratingVideo}
+                      className={`px-4 py-2 bg-green-600 text-white text-sm font-medium rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 ${isGeneratingVideo ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    >
+                      {isGeneratingVideo ? 'Generating...' : 'Generate Video'}
+                    </button>
+                  </div>
+                  <div className="space-y-3">
+                    {result.wrongAnswers.map((wrong, index) => (
+                      <div 
+                        key={`wrong-${index}`} 
+                        className="flex items-center p-3 bg-gray-50 rounded-md border border-gray-200"
+                      >
+                        <div className="flex-shrink-0 h-5 w-5 text-red-500">
+                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+                            <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.28 7.22a.75.75 0 00-1.06 1.06L8.94 10l-1.72 1.72a.75.75 0 101.06 1.06L10 11.06l1.72 1.72a.75.75 0 101.06-1.06L11.06 10l1.72-1.72a.75.75 0 00-1.06-1.06L10 8.94 8.28 7.22z" clipRule="evenodd" />
+                          </svg>
+                        </div>
+                        <p className="ml-3 text-sm font-medium text-gray-700">
+                          {wrong.question}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="text-center py-8">
+                  <div className="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-green-100">
+                    <svg className="h-6 w-6 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                    </svg>
+                  </div>
+                  <h3 className="mt-3 text-lg font-medium text-gray-900">Perfect Score!</h3>
+                  <p className="mt-2 text-sm text-gray-500">You got all the questions right. Great job!</p>
+                  <div className="mt-6">
+                    <button
+                      onClick={generateVideo}
+                      disabled={isGeneratingVideo}
+                      className={`inline-flex items-center px-4 py-2 bg-green-600 text-white text-sm font-medium rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 ${isGeneratingVideo ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    >
+                      <svg className="-ml-1 mr-2 h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                      {isGeneratingVideo ? 'Generating Video...' : 'Generate Video'}
+                    </button>
+                    {videoError && (
+                      <div className="mt-2 text-sm text-red-600">
+                        {videoError}
+                      </div>
+                    )}
+                    {videoUrl && (
+                      <div className="mt-4">
+                        <p className="text-sm text-green-600 mb-2">Video generated successfully!</p>
+                        <a 
+                          href={videoUrl} 
+                          target="_blank" 
+                          rel="noopener noreferrer"
+                          className="text-blue-600 hover:underline text-sm"
+                        >
+                          Watch Video
+                        </a>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
-
-          <button
-            onClick={startQuiz}
-            disabled={!topic.trim() || isLoading}
-            className={`w-full bg-indigo-600 text-white py-3 px-4 rounded-md hover:bg-indigo-700 transition flex items-center justify-center ${
-              !topic.trim() || isLoading ? 'opacity-50 cursor-not-allowed' : ''
-            }`}
-          >
-            {isLoading ? (
-              <>
-                <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                </svg>
-                Generating Quick Assessment...
-              </>
-            ) : (
-              'Start'
-            )}
-          </button>
         </div>
-      </div>
+      )}
     </div>
   );
+}
+
+export default function QuizPage() {
+  const { user, isAuthenticated, isLoading } = useAuth();
+  const router = useRouter();
+
+  useEffect(() => {
+    if (!isLoading && !isAuthenticated) {
+      router.push('/login');
+    }
+  }, [isAuthenticated, isLoading, router]);
+
+  if (isLoading || !isAuthenticated) {
+    return <LoadingState />;
+  }
+
+  return <QuizPageContent />;
 }

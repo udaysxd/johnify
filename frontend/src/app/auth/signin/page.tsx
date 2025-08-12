@@ -2,7 +2,7 @@
 
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useState, useEffect } from 'react';
-import { useAuth } from '@/hooks/useAuth';
+import { useAuth } from '@/providers/AuthProvider';
 
 // Disable SSR for this component to prevent hydration issues
 const NoSSRWrapper = ({ children }: { children: React.ReactNode }) => {
@@ -20,7 +20,6 @@ const NoSSRWrapper = ({ children }: { children: React.ReactNode }) => {
 };
 
 export default function SignInPage() {
-  const router = useRouter();
   const searchParams = useSearchParams();
   const { login, isLoading: isAuthLoading } = useAuth();
   const [error, setError] = useState<string | null>(null);
@@ -42,7 +41,7 @@ export default function SignInPage() {
         // Ensure the callback URL is a relative path
         const url = new URL(callbackUrl, window.location.origin);
         callbackUrl = url.pathname + url.search + url.hash;
-      } catch (e) {
+      } catch {
         console.warn('Invalid callback URL, using default');
         callbackUrl = '/dashboard';
       }

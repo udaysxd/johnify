@@ -1,11 +1,8 @@
-import Image from "next/image";
-import Header from "@/components/Header";
 import HeroVideo from '@/components/HeroVideo';
 
 export default function Home() {
   return (
     <div className="min-h-screen bg-white dark:bg-gray-900">
-      <Header />
       {/* Hero Section */}
       <section className="py-20 px-4 sm:px-6 lg:px-8 max-w-7xl mx-auto">
         <div className="text-center">
@@ -28,7 +25,7 @@ export default function Home() {
 
         {/* Hero Video */}
         <div className="mt-16 rounded-xl overflow-hidden shadow-2xl">
-          <HeroVideo src="https://storage.googleapis.com/assets-johnify/homepage/learn_ancient_slovenia_1754779344.mp4" />
+          <HeroVideo src="https://storage.googleapis.com/assets-johnify/homepage/learn_ancient_rome_1754906885.mp4" />
         </div>
       </section>
 
@@ -74,9 +71,12 @@ export default function Home() {
         <p className="text-xl text-gray-600 dark:text-gray-300 mb-8 max-w-2xl mx-auto">
           Join thousands of students who are already using our personalised AI tutor to bridge the gap between learning and success.
         </p>
-        <button className="bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 px-8 rounded-lg text-lg transition-colors">
+        <a 
+          href="/quiz"
+          className="bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 px-8 rounded-lg text-lg transition-colors inline-block"
+        >
           Start Learning for Free
-        </button>
+        </a>
       </section>
     </div>
   );

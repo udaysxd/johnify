@@ -57,11 +57,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       setLoading(true);
       
+      // First, get the access token
       const formData = new URLSearchParams();
       formData.append('username', email);
       formData.append('password', password);
       
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/auth/login`, {
+      const loginResponse = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/auth/login`, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/x-www-form-urlencoded',
@@ -71,28 +72,43 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         credentials: 'include',
       });
 
-      const data = await response.json();
+      const tokenData = await loginResponse.json();
       
-      if (!response.ok) {
-        return { error: data.detail || 'Login failed', ok: false };
+      if (!loginResponse.ok) {
+        return { error: tokenData.detail || 'Login failed', ok: false };
       }
 
+      // Now fetch the user data using the token
+      const userResponse = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/users/me`, {
+        headers: {
+          'Authorization': `Bearer ${tokenData.access_token}`,
+          'Accept': 'application/json',
+        },
+        credentials: 'include',
+      });
+
+      if (!userResponse.ok) {
+        throw new Error('Failed to fetch user data');
+      }
+
+      const userData = await userResponse.json();
+      
       // Store user data in session storage
       const userInfo = {
-        id: data.user_id || '1',
-        name: data.username || email,
-        email: data.email || email,
+        id: userData.user_id || '1',
+        name: userData.user_name || email,
+        email: userData.user_email || email,
       };
       
       sessionStorage.setItem('user', JSON.stringify(userInfo));
-      sessionStorage.setItem('access_token', data.access_token);
+      sessionStorage.setItem('access_token', tokenData.access_token);
       
       // Update user state
       const appUser: AppUser = {
         user_id: userInfo.id,
         user_email: userInfo.email,
         user_name: userInfo.name,
-        is_verified: true
+        is_verified: userData.is_verified || true
       };
       
       setUser(appUser);

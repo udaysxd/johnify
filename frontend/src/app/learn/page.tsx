@@ -2,8 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import Header from '@/components/Header';
-import { useAuth } from '@/hooks/useAuth';
+import { useAuth } from '@/providers/AuthProvider';
 
 export default function LearnPage() {
   const { user, isAuthenticated, isLoading: isAuthLoading } = useAuth();
@@ -91,7 +90,6 @@ export default function LearnPage() {
 
   return (
     <div className="min-h-screen bg-gray-50">
-      <Header />
       <div className="py-12 px-4 sm:px-6 lg:px-8">
         <div className="max-w-3xl mx-auto">
           <div className="text-center mb-8">

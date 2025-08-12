@@ -18,11 +18,11 @@ class User(Base):
     user_email = Column(String(255), nullable=True)
     user_password = Column(String(255), nullable=True)
     active = Column(String(50), default='true', nullable=True)
-    is_verified = Column(Boolean, default=False, nullable=True)
-    verification_token = Column(String(100), nullable=True)
+    is_verified = Column(Boolean, default=True, nullable=True)
+    verification_token = None  # Not used anymore
     created_on = Column(DateTime, default=datetime.utcnow, nullable=True)
     updated_on = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=True)
-    verification_token_expires = Column(DateTime, nullable=True)
+    verification_token_expires = None  # Not used anymore
     uuid = Column(UUID(as_uuid=True), default=uuid4, nullable=False, unique=True)
     
     # Relationship to user_posts
@@ -37,11 +37,10 @@ class User(Base):
         """Check if the provided password matches the stored hash"""
         return bcrypt.checkpw(password.encode('utf-8'), self.user_password.encode('utf-8'))
     
+    # Email verification is disabled
     def generate_verification_token(self, expires_in_hours: int = 24) -> str:
-        """Generate a verification token that expires in the specified hours"""
-        self.verification_token = secrets.token_urlsafe(32)
-        self.verification_token_expires = datetime.utcnow() + timedelta(hours=expires_in_hours)
-        return self.verification_token
+        """Email verification is disabled"""
+        return ""
 
 
 class UserPost(Base):

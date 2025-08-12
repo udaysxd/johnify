@@ -101,11 +101,32 @@ def generate_concept_slides(question: str, correct_answer: str, explanation: str
     Generate detailed slides for a single concept with up to 5 slides.
     Uses simplified prompts for better reliability.
     """
+    if not question or not correct_answer or not explanation:
+        return []
+        
     slides = []
-    concept = question.split('?')[0].strip() if '?' in question else question.strip()
+    
+    # Clean and format the inputs
+    question = question.strip()
+    correct_answer = correct_answer.strip()
+    explanation = explanation.strip()
+    
+    # Clean and format the question for use in titles
+    def clean_title(text):
+        # Remove question marks and other punctuation
+        text = re.sub(r'[?.,;:!]', '', text)
+        # Take first 6 words or first 40 chars, whichever comes first
+        words = text.split()
+        short = ' '.join(words[:6])
+        if len(short) > 40:
+            short = short[:40].rsplit(' ', 1)[0]  # Don't cut words in middle
+        return short.strip()
+        
+    # Generate a clean title for the concept
+    concept = clean_title(question)
     
     # Generate a simple concept name for image prompts
-    concept_words = [w for w in concept.lower().split() if len(w) > 3][:2]
+    concept_words = [w.lower() for w in concept.split() if len(w) > 2][:3]
     concept_name = ' '.join(concept_words) if concept_words else 'learning concept'
     
     # Extract key points from the explanation
@@ -114,48 +135,83 @@ def generate_concept_slides(question: str, correct_answer: str, explanation: str
     # Generate example steps
     example_steps = generate_example_steps(question, correct_answer)
     
-    # Slide 1: Concept Introduction
-    slide1 = f"## Understanding: {concept}\n\n"
-    slide1 += f"![{concept}]({get_image_url(concept_name, 800, 300)})\n\n"
-    slide1 += f"**Question:** {question}\n\n"
-    slide1 += f"**Correct Answer:** {correct_answer}"
-    slides.append(slide1)
+    # Only add the first slide if we have a valid question and answer
+    if question and correct_answer:
+        slide1 = f"---\n"
+        slide1 += f"## {concept}\n\n"
+        slide1 += f"![{concept}]({get_image_url(concept_name, 800, 300)})\n\n"
+        slide1 += f"**Question:** {question}\n\n"
+        slide1 += f"**Correct Answer:** {correct_answer}"
+        slides.append(slide1)
     
     # Slide 2: Core Concept Explanation
-    slide2 = f"## {concept}: Core Concept\n\n"
-    slide2 += f"![{concept} Concept]({get_image_url(f'{concept_name} concept', 800, 300)})\n\n"
-    slide2 += f"{explanation}\n\n"
-    slide2 += "*Key points to remember:*\n"
-    for i, point in enumerate(key_points, 1):
-        slide2 += f"- {point}\n"
-    slides.append(slide2)
+    if explanation:
+        slide2 = f"---\n"
+        slide2 += f"## {concept}: Core Concept\n\n"
+        slide2 += f"![{concept} Concept]({get_image_url(f'{concept_name} concept', 800, 300)})\n\n"
+        slide2 += f"{explanation}\n\n"
+        
+        if key_points:
+            slide2 += "*Key points to remember:*\n"
+            for point in key_points:
+                if point.strip():
+                    slide2 += f"- {point}\n"
+        slides.append(slide2)
     
-    # Slide 3: Example Scenario
-    slide3 = f"## {concept}: Example\n\n"
-    slide3 += f"![{concept} Example]({get_image_url(f'example {concept_name}', 800, 300)})\n\n"
-    slide3 += "**Let's break this down:**\n\n"
-    for i, step in enumerate(example_steps, 1):
-        slide3 += f"{i}. {step}\n"
-    slides.append(slide3)
+    # Slide 3: Example Scenario (only if we have steps)
+    if example_steps and any(step.strip() for step in example_steps):
+        slide3 = f"---\n"
+        slide3 += f"## {concept}: Example\n\n"
+        slide3 += f"![{concept} Example]({get_image_url(f'example {concept_name}', 800, 300)})\n\n"
+        slide3 += "**Let's break this down:**\n\n"
+        for i, step in enumerate(example_steps, 1):
+            if step.strip():
+                slide3 += f"{i}. {step}\n"
+        slides.append(slide3)
     
-    # Slide 4: Common Misconceptions
-    slide4 = f"## {concept}: Common Pitfalls\n\n"
-    slide4 += f"![Common Mistakes]({get_image_url(f'mistakes {concept_name}', 800, 300)})\n\n"
-    slide4 += "**Things to watch out for:**\n\n"
-    slide4 += f"- Misinterpreting the question: {question.split('?')[0]}?\n"
-    slide4 += f"- Confusing {correct_answer} with other similar concepts\n"
-    slide4 += "- Overcomplicating the answer - sometimes the most straightforward answer is correct"
-    slides.append(slide4)
+    # Slide 4: Common Misconceptions (only if we have a valid question and answer)
+    if question and correct_answer:
+        slide4 = f"---\n"
+        slide4 += f"## {concept}: Common Pitfalls\n\n"
+        slide4 += f"![Common Mistakes]({get_image_url(f'mistakes {concept_name}', 800, 300)})\n\n"
+        slide4 += "**Things to watch out for:**\n\n"
+        
+        # Only add this point if we have a question
+        if '?' in question:
+            question_text = question.split('?')[0].strip()
+            if question_text:
+                slide4 += f"- Misinterpreting the question: {question_text}?\n"
+        
+        # Only add this point if we have a correct answer
+        if correct_answer and correct_answer.lower() != 'no correct answer found':
+            slide4 += f"- Confusing {correct_answer} with similar concepts\n"
+        
+        # Always add this general tip
+        slide4 += "- Overcomplicating the answer - sometimes the most straightforward answer is correct"
+        
+        slides.append(slide4)
     
-    # Slide 5: Summary and Practice
-    slide5 = f"## {concept}: Summary\n\n"
-    slide5 += f"![Summary]({get_image_url(f'summary {concept_name}', 800, 300)})\n\n"
-    slide5 += "**Key Takeaways:**\n\n"
-    for i, point in enumerate(key_points, 1):
-        slide5 += f"- {point}\n"
-    slide5 += "\n**Try it yourself:**\n"
-    slide5 += f"Think of another example where {concept_name.split(' ')[0]} applies in a different context."
-    slides.append(slide5)
+    # Slide 5: Summary and Practice (only if we have key points)
+    if key_points and any(point.strip() for point in key_points):
+        slide5 = f"---\n"
+        slide5 += f"## {concept}: Summary\n\n"
+        slide5 += f"![Summary]({get_image_url(f'summary {concept_name}', 800, 300)})\n\n"
+        
+        # Only add the key takeaways section if we have valid points
+        valid_key_points = [p for p in key_points if p.strip()]
+        if valid_key_points:
+            slide5 += "**Key Takeaways:**\n\n"
+            for point in valid_key_points:
+                slide5 += f"- {point}\n"
+        
+        # Add a practice prompt if we have a concept name
+        if concept_name and concept_name.strip() != 'learning concept':
+            first_word = concept_name.split(' ')[0]
+            if first_word and len(first_word) > 2:  # Only add if we have a meaningful word
+                slide5 += "\n**Try it yourself:**\n"
+                slide5 += f"Think of another example where {first_word} applies in a different context."
+        
+        slides.append(slide5)
     
     return slides
 
@@ -175,19 +231,6 @@ def generate_slide_markdown(wrong_questions: List[dict]) -> List[str]:
             return []
             
         slides = []
-        
-        # Add a title slide
-        title_slide = (
-            "---\n"
-            "marp: true\n"
-            "theme: default\n"
-            "paginate: true\n"
-            "---\n\n"
-            "# Learning Materials\n\n"
-            "Comprehensive review of key concepts based on your quiz results\n"
-            "---\n"
-        )
-        slides.append(title_slide)
         
         # Process questions in parallel
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
@@ -287,14 +330,19 @@ def save_slides_to_md(slides: List[str], output_path: str) -> None:
 
     slide_blocks = []
     for slide in slides:
-        # Remove any existing YAML frontmatter from individual slides
+        # Remove any existing YAML frontmatter and leading/trailing dashes
         slide_clean = re.sub(r'^---[\s\S]*?---\s*', '', slide.strip())
-        if not slide_clean:
+        slide_clean = slide_clean.strip('\n-')  # Remove any leading/trailing newlines or dashes
+        if not slide_clean.strip():
             continue
-        slide_blocks.append(slide_clean)
+        slide_blocks.append(slide_clean.strip())
 
-    # Join slides with proper separators
-    full_md = frontmatter + "\n---\n\n".join(slide_blocks) + "\n"
+    # Join slides with proper separators (single separator between slides)
+    full_md = frontmatter + "\n---\n\n".join(slide_blocks)
+    
+    # Ensure we end with a newline
+    if not full_md.endswith('\n'):
+        full_md += '\n'
 
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(full_md)

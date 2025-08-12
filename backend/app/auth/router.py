@@ -37,7 +37,7 @@ async def send_verification_email(email: str, token: str, username: str):
     #     context={"username": username, "verification_url": verification_url}
     # )
 
-@router.post("/register", response_model=schemas.UserResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/register", status_code=status.HTTP_201_CREATED)
 async def register_user(
     user_in: schemas.UserCreate, 
     db: Session = Depends(get_db),
@@ -59,23 +59,34 @@ async def register_user(
     )
     user.set_password(user_in.password)
     
-    # Generate verification token
-    verification_token = user.generate_verification_token()
-    
     db.add(user)
     db.commit()
     db.refresh(user)
     
-    # Send verification email in background
-    if background_tasks:
-        background_tasks.add_task(
-            send_verification_email,
-            email=user.user_email,
-            token=verification_token,
-            username=user.user_name
-        )
+    # No email verification needed, user is immediately active
+    user.is_verified = True
+    db.commit()
+    db.refresh(user)
     
-    return user
+    # Generate access token for immediate login
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user.user_email}, expires_delta=access_token_expires
+    )
+    
+    # Return the token and user data in the expected format
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user_email": user.user_email,
+        "user_name": user.user_name,
+        "user_id": user.user_id,
+        "uuid": user.uuid,
+        "is_verified": user.is_verified,
+        "created_on": user.created_on,
+        "updated_on": user.updated_on,
+        "active": user.active
+    }
 
 @router.post("/login", response_model=schemas.Token)
 async def login_for_access_token(
@@ -90,12 +101,6 @@ async def login_for_access_token(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
             headers={"WWW-Authenticate": "Bearer"},
-        )
-    
-    if not user.is_verified:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Please verify your email before logging in"
         )
     
     # Create access token with expiration

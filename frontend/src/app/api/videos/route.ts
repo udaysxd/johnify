@@ -1,12 +1,7 @@
 import { NextResponse } from 'next/server';
-import { getToken } from 'next-auth/jwt';
+import { cookies } from 'next/headers';
 
-// Define types for our session and API response
-interface SessionWithToken {
-  accessToken?: string;
-  [key: string]: unknown;
-}
-
+// Define types for our video response
 interface VideoItem {
   id: string;
   title: string;
@@ -17,19 +12,12 @@ interface VideoItem {
   [key: string]: unknown;
 }
 
-// Get the secret from environment variables
-const secret = process.env.NEXTAUTH_SECRET;
-if (!secret) {
-  console.error('NEXTAUTH_SECRET is not set in environment variables');
-}
-
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 // Helper function to handle errors
 function createErrorResponse(message: string, status: number, details?: unknown): NextResponse {
   console.error(`[API Error] ${message}`, details || '');
   
-  // Create the response object without spread
   const responseBody: { error: string; details?: unknown } = { error: message };
   if (details !== undefined) {
     responseBody.details = details;
@@ -46,20 +34,18 @@ function createErrorResponse(message: string, status: number, details?: unknown)
   );
 }
 
-export async function GET(req: Request): Promise<NextResponse> {
+export async function GET(): Promise<NextResponse> {
   try {
-    if (!secret) {
-      return createErrorResponse('Server configuration error', 500, 'Authentication is not properly configured');
+    // Get the auth token from cookies
+    const cookieStore = await cookies();
+    const authToken = cookieStore.get('auth_token')?.value;
+    
+    if (!authToken) {
+      return createErrorResponse('Authentication required', 401);
     }
     
-    // Get the session token from cookies
-    const session = await getToken({ req, secret }) as SessionWithToken | null;
-    const accessToken = session?.accessToken;
-    
-    if (!accessToken) {
-      console.error('No access token in session');
-      return createErrorResponse('Unauthorized - No session token', 401);
-    }
+    // Use the auth token as the access token
+    const accessToken = authToken;
 
     try {
       // Call the backend API with the user's access token

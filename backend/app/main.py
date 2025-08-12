@@ -306,6 +306,10 @@ async def test_files():
 # Include authentication routes
 app.include_router(auth.auth_router, prefix="/api")
 
+# Include users routes
+from .users.router import router as users_router
+app.include_router(users_router, prefix="/api/users")
+
 # Include videos routes
 from . import videos
 app.include_router(videos.router)
@@ -877,10 +881,12 @@ def generate(req: QuizAnswerRequest, bg: BackgroundTasks):
 
             slide_inputs = []
             for q in wrong_questions:
+                # Map the properties to match what generate_slide_markdown expects
                 slide_inputs.append({
-                    "question": q.get("q", ""),
-                    "correct_answer": extract_correct_answer(q),
-                    "explanation": q.get("explanation", "No explanation available")
+                    "question": q.get("question", q.get("q", "No question provided")),
+                    "correct_answer": q.get("correctAnswer", q.get("a", "No answer provided")),
+                    "explanation": q.get("explanation", "No explanation available"),
+                    "options": q.get("options", [])  # Add options if needed for the slides
                 })
 
             slides = slidegen.generate_slide_markdown(slide_inputs)

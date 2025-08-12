@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { Question, VideoRequest, VideoResponse, QuestionOption } from '@/types/video';
+import { Question, VideoRequest, VideoResponse } from '@/types/video';
 
 // Helper function to get backend URL
 function getBackendUrl(): string {

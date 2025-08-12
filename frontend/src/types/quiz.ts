@@ -1,8 +1,11 @@
 export interface QuizQuestion {
   id: string;
-  question: string;
+  q: string; // Question text (matches backend)
+  question: string; // Alias for q
   options: Record<string, string>; // e.g., { A: 'Option 1', B: 'Option 2' }
-  correctAnswer: string; // The key of the correct option (e.g., 'A')
+  opts?: Record<string, string>; // Alias for options (matches backend)
+  a: string; // Correct answer key (matches backend)
+  correctAnswer: string; // Alias for a
   explanation: string;
 }
 
