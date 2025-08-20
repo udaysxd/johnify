@@ -6,6 +6,8 @@ interface BackendVideoItem {
   title?: string;
   video_url?: string;
   thumbnail_url?: string;
+  url?: string;        // fallback name used by some handlers
+  thumbnail?: string;  // fallback name used by some handlers
   duration?: number;
   created_at?: string;
   status?: 'processing' | 'completed' | 'failed' | string;
@@ -34,6 +36,10 @@ function createErrorResponse(message: string, status: number, details?: unknown)
   const body: { error: string; details?: unknown } = { error: message };
   if (details !== undefined) body.details = details;
   return new NextResponse(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+}
+
+function isValidStatus(s: unknown): s is 'processing' | 'completed' | 'failed' {
+  return s === 'processing' || s === 'completed' || s === 'failed';
 }
 
 export async function GET(request: Request): Promise<NextResponse> {
@@ -66,8 +72,9 @@ export async function GET(request: Request): Promise<NextResponse> {
     const videos: FrontendVideoItem[] = Array.isArray(data)
       ? data
           .map((v) => {
-            const videoUrl = absoluteUrl((v as any).video_url || (v as any).url);
-            const thumbnailUrl = absoluteUrl((v as any).thumbnail_url || (v as any).thumbnail);
+            const videoUrl = absoluteUrl(v.video_url ?? v.url);
+            const thumbnailUrl = absoluteUrl(v.thumbnail_url ?? v.thumbnail);
+            const status: FrontendVideoItem['status'] = isValidStatus(v.status) ? v.status : 'completed';
             return {
               id: String(v.id ?? ''),
               title: v.title || 'Untitled Video',
@@ -75,8 +82,8 @@ export async function GET(request: Request): Promise<NextResponse> {
               thumbnailUrl,
               duration: typeof v.duration === 'number' ? v.duration : undefined,
               createdAt: v.created_at || new Date().toISOString(),
-              status: (v.status as any) || 'completed',
-            } as FrontendVideoItem;
+              status,
+            };
           })
           // Filter out entries with no video URL
           .filter((v) => !!v.videoUrl)
