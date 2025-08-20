@@ -114,6 +114,16 @@ def clean_markdown_text(text):
     
     return text.strip()
 
+def _find_ttf_font(preferred: list) -> Optional[str]:
+    """Return the first existing TTF path from a list of candidates."""
+    for p in preferred:
+        try:
+            if p and os.path.exists(p):
+                return p
+        except Exception:
+            continue
+    return None
+
 def create_simple_slide(text, output_path, width=1920, height=1080, bg_color=(255, 255, 255), 
                       text_color=(0, 0, 0), padding=50, title_size=60, body_size=40, title=None):
     """
@@ -139,17 +149,73 @@ def create_simple_slide(text, output_path, width=1920, height=1080, bg_color=(25
         img = Image.new('RGB', (width, height), color=bg_color)
         draw = ImageDraw.Draw(img)
         
-        # Try to load a nice font, fall back to default if not available
+        # Try to load a TrueType font across platforms; avoid tiny default bitmap font
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        bundled_regular = repo_root / "backend" / "app" / "assets" / "fonts" / "DejaVuSans.ttf"
+        bundled_bold = repo_root / "backend" / "app" / "assets" / "fonts" / "DejaVuSans-Bold.ttf"
+
+        linux_regular = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+        linux_bold = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+
+        # Common Windows fonts
+        win_regular_opts = [
+            r"C:\\Windows\\Fonts\\segoeui.ttf",
+            r"C:\\Windows\\Fonts\\arial.ttf",
+            r"C:\\Windows\\Fonts\\Calibri.ttf",
+        ]
+        win_bold_opts = [
+            r"C:\\Windows\\Fonts\\segoeuib.ttf",
+            r"C:\\Windows\\Fonts\\arialbd.ttf",
+            r"C:\\Windows\\Fonts\\Calibrib.ttf",
+        ]
+
+        # Common macOS fonts
+        mac_regular_opts = [
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/System/Library/Fonts/Supplemental/Helvetica.ttc",
+        ]
+        mac_bold_opts = [
+            "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        ]
+
+        regular_candidates = [
+            str(bundled_regular),
+            linux_regular,
+        ]
+        # Extend with OS lists safely
+        regular_candidates.extend(win_regular_opts)
+        regular_candidates.extend(mac_regular_opts)
+
+        bold_candidates = [
+            str(bundled_bold),
+            linux_bold,
+        ]
+        bold_candidates.extend(win_bold_opts)
+        bold_candidates.extend(mac_bold_opts)
+
+        regular_path = _find_ttf_font(regular_candidates)
+        bold_path = _find_ttf_font(bold_candidates)
+
         try:
-            # Prefer DejaVu fonts available in Debian Slim runtime
-            title_font = ImageFont.truetype(
-                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", title_size
-            )
-            body_font = ImageFont.truetype(
-                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", body_size
-            )
-        except IOError:
-            # Fall back to default font if DejaVu isn't available (e.g., local env without package)
+            # Debug which fonts were selected
+            print(f"[FONT DEBUG] regular_candidates tried: {regular_candidates}")
+            print(f"[FONT DEBUG] bold_candidates tried: {bold_candidates}")
+            print(f"[FONT DEBUG] selected regular={regular_path} bold={bold_path}")
+            if bold_path:
+                title_font = ImageFont.truetype(bold_path, title_size)
+            elif regular_path:
+                title_font = ImageFont.truetype(regular_path, title_size)
+            else:
+                raise IOError("No TTF font found for title")
+
+            if regular_path:
+                body_font = ImageFont.truetype(regular_path, body_size)
+            elif bold_path:
+                body_font = ImageFont.truetype(bold_path, body_size)
+            else:
+                raise IOError("No TTF font found for body")
+        except Exception:
+            # Final fallback
             title_font = ImageFont.load_default()
             body_font = ImageFont.load_default()
         

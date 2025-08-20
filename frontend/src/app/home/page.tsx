@@ -3,7 +3,6 @@
 import { useEffect, useState, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import Header from '@/components/Header';
 import Image from 'next/image';
 import { useAuth } from '@/contexts/AuthContext';
 
@@ -51,24 +50,13 @@ export default function HomePage() {
       try {
         setIsLoading(true);
         setError(null);
-        
-        // Get the token from sessionStorage
-        const token = sessionStorage.getItem('access_token');
-        
-        if (!token) {
-          console.error('No access token found in session');
-          setError('Authentication required. Please sign in again.');
-          setIsLoading(false);
-          return;
-        }
-        
+        // Use cookie-based auth via Next.js API route; no header token required
         console.log('Fetching videos from /api/videos/my-videos...');
         
         const response = await fetch('/api/videos/my-videos', {
           method: 'GET',
           headers: {
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`,
           },
           cache: 'no-store',
         });
@@ -135,7 +123,6 @@ export default function HomePage() {
   if (isAuthLoading || (isAuthenticated && isLoading)) {
     return (
       <div className="min-h-screen bg-gray-100">
-        <Header />
         <div className="container mx-auto px-4 py-8">
           <h1 className="text-2xl font-bold mb-6">My Videos</h1>
           <div className="flex justify-center items-center h-64">
@@ -150,7 +137,6 @@ export default function HomePage() {
   if (error) {
     return (
       <div className="min-h-screen bg-gray-100">
-        <Header />
         <div className="container mx-auto px-4 py-8">
           <h1 className="text-2xl font-bold mb-6">My Videos</h1>
           <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative" role="alert">
@@ -171,13 +157,12 @@ export default function HomePage() {
   }
 
   // Don't render anything if not authenticated - the effect will handle redirect
-  if (status !== 'authenticated') {
+  if (!isAuthenticated) {
     return null;
   }
 
   return (
     <div className="min-h-screen bg-gray-50">
-      <Header />
       <div className="py-8 px-4 sm:px-6 lg:px-8">
         <div className="max-w-7xl mx-auto">
           <div className="flex justify-between items-center mb-8">
