@@ -8,7 +8,7 @@ export default function Footer() {
           {/* Brand */}
           <div className="text-center md:text-left">
             <span className="text-lg font-semibold text-gray-900 dark:text-white">johnify</span>
-            <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">Learn anything with AI.</p>
+            <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">Learn anything with your own personalised tutor</p>
           </div>
 
           {/* Nav (two lines) */}
@@ -30,7 +30,7 @@ export default function Footer() {
           <div className="flex items-center gap-4">
             {/* Social icons */}
             <a
-              href="https://twitter.com/"
+              href="https://x.com/johnifyAI"
               target="_blank"
               rel="noopener noreferrer"
               aria-label="Twitter"

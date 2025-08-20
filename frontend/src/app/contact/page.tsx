@@ -8,8 +8,8 @@ export default function ContactPage() {
         </p>
         <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl p-6 shadow-sm">
           <ul className="space-y-3 text-gray-700 dark:text-gray-300">
-            <li><span className="font-medium">Email:</span> support@johnify.ai</li>
-            <li><span className="font-medium">Twitter:</span> <a href="https://twitter.com/" className="text-blue-600 dark:text-blue-400 hover:underline">@johnify</a></li>
+            <li><span className="font-medium">Email:</span> hello@johnify.com</li>
+            <li><span className="font-medium">Twitter:</span> <a href="https://x.com/johnifyAI" className="text-blue-600 dark:text-blue-400 hover:underline">@johnify</a></li>
             <li><span className="font-medium">LinkedIn:</span> <a href="https://www.linkedin.com/" className="text-blue-600 dark:text-blue-400 hover:underline">johnify</a></li>
           </ul>
         </div>
