@@ -22,9 +22,23 @@ def create_slide_video(img: Path, mp3: Path, out_mp4: Path):
     """Create video segment from image and audio."""
     try:
         subprocess.run([
-            "ffmpeg", "-y", "-loop", "1", "-i", str(img), "-i", str(mp3),
-            "-t", str(get_audio_duration(mp3)), "-c:v", "libx264",
-            "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(out_mp4)
+            "ffmpeg", "-y",
+            "-loop", "1",
+            "-i", str(img),
+            "-i", str(mp3),
+            "-t", str(get_audio_duration(mp3)),
+            # Video encoding: prioritize low memory/CPU
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-tune", "stillimage",
+            "-crf", "28",
+            "-threads", "1",
+            "-pix_fmt", "yuv420p",
+            # Audio encoding
+            "-c:a", "aac",
+            # Finish when the shortest stream ends
+            "-shortest",
+            str(out_mp4)
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         print(f" Created video segment: {out_mp4}")
         return out_mp4
@@ -83,8 +97,18 @@ def stitch_images_and_audio_to_video(img_dir: Path, aud_dir: Path, out_mp4: Path
         
         # Use a more compatible encoding for the final video
         subprocess.run([
-            "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat),
-            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart",
+            "ffmpeg", "-y",
+            "-f", "concat", "-safe", "0", "-i", str(concat),
+            # Video encoding: prioritize low memory/CPU
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-crf", "28",
+            "-threads", "1",
+            "-pix_fmt", "yuv420p",
+            # Audio encoding
+            "-c:a", "aac",
+            # Optimize for web playback
+            "-movflags", "+faststart",
             str(out_mp4)
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         

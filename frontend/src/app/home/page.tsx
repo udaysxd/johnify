@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import Header from '@/components/Header';
 import Image from 'next/image';
-import { useAuth } from '@/providers/AuthProvider';
+import { useAuth } from '@/contexts/AuthContext';
 
 
 type Video = {
@@ -20,7 +20,8 @@ type Video = {
 
 
 export default function HomePage() {
-  const { isAuthenticated, isLoading: isAuthLoading } = useAuth();
+  const { user, loading: isAuthLoading } = useAuth();
+  const isAuthenticated = !!user;
   const router = useRouter();
   const [videos, setVideos] = useState<Video[]>([]);
   const [isLoading, setIsLoading] = useState(true);

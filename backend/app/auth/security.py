@@ -1,8 +1,9 @@
 from datetime import datetime, timedelta
+SECURITY_IMPL_VERSION = "auth-security-v2-2025-08-17-1450"
 from typing import Optional
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 
@@ -18,15 +19,46 @@ from dotenv import load_dotenv
 env_path = Path(__file__).resolve().parents[2] / '.env'
 load_dotenv(dotenv_path=env_path)
 
+# Get environment
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
+IS_PRODUCTION = ENVIRONMENT == "production"
+
 # Get secret key from environment - this must match between frontend and backend
-SECRET_KEY = os.getenv("JWT_SECRET") or "12345abcde12345"  # Fallback to match .env file
+SECRET_KEY = os.getenv("JWT_SECRET") or "12345abcde12345"  # In production, this should be a strong secret
 print(f"🔑 Using JWT_SECRET: {SECRET_KEY[:5]}...{SECRET_KEY[-5:]}" if SECRET_KEY else "⚠️  No JWT_SECRET set")
 
+# Token configuration
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days for testing
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
+REFRESH_TOKEN_EXPIRE_DAYS = 30
+
+# Cookie configuration
+COOKIE_DOMAIN = os.getenv("COOKIE_DOMAIN", "localhost")
+COOKIE_SECURE = IS_PRODUCTION
+COOKIE_HTTP_ONLY = True
+COOKIE_SAME_SITE = "lax" if IS_PRODUCTION else "lax"  # or "none" if you need cross-site cookies
+
+print(f"🔒 Security config - Environment: {ENVIRONMENT}, Secure Cookies: {COOKIE_SECURE}, Domain: {COOKIE_DOMAIN}")
+print(f"🧩 Auth security module version: {SECURITY_IMPL_VERSION}")
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token", auto_error=False)
+
+async def get_token_from_cookie(request: Request) -> Optional[str]:
+    # Debug: log incoming cookie header and parsed cookie
+    try:
+        raw_cookie = request.headers.get('cookie')
+        if raw_cookie:
+            print(f"🍪 Incoming Cookie header: {raw_cookie[:200]}{'...' if len(raw_cookie) > 200 else ''}")
+    except Exception as e:
+        print(f"⚠️  Error reading cookie header: {e}")
+
+    token = request.cookies.get("access_token")
+    if token:
+        print(f"🍪 Parsed access_token from cookies: {token[:10]}...")
+    else:
+        print("❌ No access_token cookie found on request")
+    return token
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(plain_password, hashed_password)
@@ -34,17 +66,55 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 def get_password_hash(password: str) -> str:
     return pwd_context.hash(password)
 
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    """
+    Create a JWT access token with the given data.
+    
+    Args:
+        data: Dictionary containing the JWT claims
+        expires_delta: Optional timedelta for token expiration
+        
+    Returns:
+        str: Encoded JWT token
+    """
     to_encode = data.copy()
     if expires_delta:
         expire = datetime.utcnow() + expires_delta
     else:
         expire = datetime.utcnow() + timedelta(minutes=15)
-    to_encode.update({"exp": expire})
+    
+    to_encode.update({
+        "exp": expire,
+        "iat": datetime.utcnow(),  # Issued at
+        "iss": "johnify-backend",  # Issuer
+        "aud": "johnify-frontend",  # Audience
+        "env": "production" if IS_PRODUCTION else "development"
+    })
+    
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+async def get_current_user(
+    db: Session = Depends(get_db),
+    token_from_header: Optional[str] = Depends(oauth2_scheme),
+    token_from_cookie: Optional[str] = Depends(get_token_from_cookie)
+):
+    print(f"🛂 Enter get_current_user() | {SECURITY_IMPL_VERSION}")
+    token = token_from_header or token_from_cookie
+
+    if token is None:
+        try:
+            auth_hdr = None
+            # In FastAPI/Starlette, Request isn't directly here, so log hints only
+            # OAuth2PasswordBearer already attempted to parse Authorization header.
+            print("❌ No token from header or cookie. Authorization or Cookie missing/invalid.")
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     print(f"🔑 Validating token: {token[:10]}...")  # Log first 10 chars of token
     
     credentials_exception = HTTPException(
@@ -54,34 +124,72 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
     )
     
     try:
-        # Verify the token with the secret key
+        # First, decode without verification to see the raw payload
+        unverified_payload = jwt.get_unverified_claims(token)
+        print(f"🔍 Unverified token payload: {unverified_payload}")
+        print(f"🔍 Token algorithm: {jwt.get_unverified_header(token).get('alg')}")
+        
+        # Now verify the token with the secret key
         payload = jwt.decode(
-            token, 
-            SECRET_KEY, 
+            token,
+            SECRET_KEY,
             algorithms=[ALGORITHM],
-            options={"verify_exp": True}  # Ensure expiration is checked
+            options={"verify_exp": True, "verify_aud": False}
         )
         
         print(f"✅ Verified token payload: {payload}")
-        
-        user_id = payload.get("sub")
-        if not user_id:
-            print("❌ No 'sub' claim in token")
+
+        # Prefer 'sub' as subject; support both email and numeric IDs. Also accept explicit 'user_id'.
+        subject = payload.get("sub")
+        explicit_user_id = payload.get("user_id")
+
+        if not subject and not explicit_user_id:
+            print("❌ No 'sub' or 'user_id' claim in token")
             raise credentials_exception
-            
-        # Try to get the user from the database
-        user = db.query(models.User).filter(models.User.user_id == user_id).first()
+
+        user = None
+
+        # Always try email lookup first if sub looks like an email
+        user = None
+        subj_str = str(subject) if subject is not None else None
+        
+        # 1. First try email lookup if sub looks like an email
+        if subj_str and ('@' in subj_str or any(not ch.isdigit() for ch in subj_str)):
+            print(f"🔎 [auth] sub looks like email -> lookup by email: {subj_str}")
+            user = db.query(models.User).filter(models.User.user_email == subj_str).first()
+            if user:
+                print(f"✅ Found user by email: id={user.user_id}")
+                return user
+        
+        # 2. If not found by email and sub is numeric, try user_id
+        if not user and subj_str and subj_str.isdigit():
+            try:
+                uid_int = int(subj_str)
+                print(f"🔎 [auth] sub is numeric -> lookup by user_id: {uid_int}")
+                user = db.query(models.User).filter(models.User.user_id == uid_int).first()
+                if user:
+                    print(f"✅ Found user by numeric sub (user_id): {user.user_id}")
+                    return user
+            except ValueError as ve:
+                print(f"⚠️ [auth] Error converting sub to int: {ve}")
+        
+        # 3. If still not found, try explicit user_id from token if it exists
+        if not user and explicit_user_id is not None:
+            try:
+                uid_int = int(str(explicit_user_id))
+                print(f"🔎 [auth] explicit user_id claim provided -> lookup by user_id: {uid_int}")
+                user = db.query(models.User).filter(models.User.user_id == uid_int).first()
+                if user:
+                    print(f"✅ Found user by explicit user_id: {user.user_id}")
+                    return user
+            except ValueError as ve:
+                print(f"⚠️ [auth] explicit user_id claim not an integer: {explicit_user_id}, error: {ve}")
+
         if not user:
-            print(f"❌ User not found in database: {user_id}")
-            # For now, we'll allow the request to proceed even if user not in DB
-            print("⚠️  User not found in database, but allowing request for testing")
-            return models.User(
-                user_id=user_id, 
-                user_email=f"{user_id}@temp.user",
-                is_verified=True  # Mark as verified for testing
-            )
-            
-        print(f"✅ Found user: {user.user_email}")
+            print(f"❌ User not found with provided token claims. sub={subject}, user_id={explicit_user_id}")
+            raise credentials_exception
+
+        print(f"✅ Found user: id={user.user_id}, email={user.user_email}")
         return user
         
     except JWTError as e:
@@ -113,6 +221,14 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=detail,
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except Exception as e:
+        # Any other error during token processing should not 500; treat as auth failure
+        print(f"❌ Unexpected auth error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication. Please log in again.",
             headers={"WWW-Authenticate": "Bearer"},
         )
 

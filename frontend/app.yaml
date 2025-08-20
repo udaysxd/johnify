@@ -5,6 +5,7 @@ instance_class: F2
 env_variables:
   NODE_ENV: production
   NODE_OPTIONS: --max_old_space_size=1024
+  NEXT_PUBLIC_BACKEND_URL: https://johnify-backend-873155673176.us-central1.run.app
 
 # Basic scaling for cost efficiency
 basic_scaling:

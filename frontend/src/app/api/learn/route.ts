@@ -5,14 +5,16 @@ interface LearnRequest {
   complexity_level?: number;
 }
 
-// Helper function to get backend URL
+// Helper function to get backend URL with safe production fallback
 function getBackendUrl() {
-  // Check for environment variable first
-  if (process.env.NEXT_PUBLIC_BACKEND_URL) {
-    return process.env.NEXT_PUBLIC_BACKEND_URL;
+  const isProduction = process.env.NODE_ENV === 'production';
+  const envUrl = process.env.NEXT_PUBLIC_BACKEND_URL;
+  if (envUrl && envUrl.trim()) return envUrl;
+  // Never point to localhost in production
+  if (isProduction) {
+    return 'https://johnify-backend-873155673176.us-central1.run.app';
   }
-  
-  // Default to local development URL
+  // Development default
   return 'http://localhost:8000';
 }
 
@@ -47,18 +49,60 @@ export async function POST(request: Request) {
       clearTimeout(timeoutId);
 
       if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        return NextResponse.json(
-          { 
-            error: 'Failed to generate learning video',
-            details: errorData.message || response.statusText
-          },
-          { status: response.status }
-        );
+        const contentType = response.headers.get('content-type') || '';
+        if (contentType.includes('application/json')) {
+          const errorData = await response.json().catch(() => ({}));
+          return NextResponse.json(
+            {
+              error: 'Failed to generate learning video',
+              details: errorData.message || response.statusText
+            },
+            { status: response.status }
+          );
+        } else {
+          const textBody = await response.text().catch(() => '');
+          return NextResponse.json(
+            {
+              error: 'Backend returned non-JSON error',
+              status: response.status,
+              details: response.statusText,
+              body: textBody?.slice(0, 500) || ''
+            },
+            { status: response.status }
+          );
+        }
       }
 
-      const data = await response.json();
-      return NextResponse.json(data);
+      // Success path: be robust to non-JSON success bodies in production
+      const successContentType = response.headers.get('content-type') || '';
+      let data: unknown;
+      if (successContentType.includes('application/json')) {
+        data = await response.json();
+      } else {
+        const textBody = await response.text();
+        try {
+          data = JSON.parse(textBody);
+        } catch {
+          return NextResponse.json(
+            {
+              error: 'Backend returned non-JSON success body',
+              body: textBody?.slice(0, 500) || ''
+            },
+            { status: 502 }
+          );
+        }
+      }
+      // Ensure video_url is absolute if present
+      if (data && typeof data === 'object' && data !== null) {
+        const d = data as { video_url?: unknown };
+        if (typeof d.video_url === 'string') {
+          const v = d.video_url as string;
+          if (!v.startsWith('http')) {
+            (d as Record<string, unknown>).video_url = `${backendUrl}${v.startsWith('/') ? '' : '/'}${v}`;
+          }
+        }
+      }
+      return NextResponse.json(data as Record<string, unknown>);
       
     } catch (error: unknown) {
       clearTimeout(timeoutId);

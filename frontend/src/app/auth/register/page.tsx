@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { useAuth } from '@/providers/AuthProvider';
+import { useAuth } from '@/contexts/AuthContext';
 
 export default function RegisterPage() {
   const [formData, setFormData] = useState({
@@ -15,7 +15,7 @@ export default function RegisterPage() {
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const router = useRouter();
-  const { login } = useAuth();
+  const { signIn, setUser } = useAuth();
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value } = e.target;
@@ -26,6 +26,8 @@ export default function RegisterPage() {
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
+    console.log('[RegisterPage] handleSubmit called', e, formData);
+
     e.preventDefault();
     setError('');
     
@@ -42,37 +44,63 @@ export default function RegisterPage() {
 
     try {
       setIsLoading(true);
+      
+      // Register the user
       const response = await fetch('/api/auth/register', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          user_name: formData.user_name,
-          user_email: formData.user_email,
+          user_name: formData.user_name.trim(),
+          user_email: formData.user_email.trim(),
           password: formData.password,
         }),
+        credentials: 'include',
       });
 
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.detail || 'Registration failed');
+        throw new Error(data.error || data.detail || 'Registration failed');
       }
 
-      // Log in with the new credentials
-      const { success, error } = await login(formData.user_email, formData.password);
-      
-      if (!success) {
-        throw new Error(error || 'Registration succeeded but automatic login failed');
+      // The registration API now automatically logs the user in and returns the user data
+      if (data.access_token) {
+        // Update the auth state with the user data
+        setUser({
+          user_id: data.user?.user_id || '',
+          user_email: data.user?.user_email || formData.user_email.trim(),
+          user_name: data.user?.user_name || formData.user_name.trim(),
+          is_verified: data.user?.is_verified ?? false,
+        });
+
+        // Store the token in localStorage for API requests
+        if (typeof window !== 'undefined') {
+          localStorage.setItem('auth_token', data.access_token);
+        }
+
+        // Redirect to the home page
+        window.location.href = '/';
+      } else {
+        // Fallback: Try to log in manually if auto-login didn't work
+        const { error: loginError } = await signIn(
+          formData.user_email.trim(),
+          formData.password
+        );
+        
+        if (loginError) {
+          console.error('Error during login after registration:', loginError);
+          // Still redirect to home as the registration was successful
+          window.location.href = '/';
+        }
       }
-      
-      // Redirect to the root page
-      router.push('/');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Registration failed');
+      console.error('[RegisterPage] Registration error:', err);
     } finally {
       setIsLoading(false);
+      console.log('[RegisterPage] handleSubmit finished');
     }
   };
 
@@ -119,6 +147,7 @@ export default function RegisterPage() {
                 placeholder="Full Name"
                 value={formData.user_name}
                 onChange={handleChange}
+                suppressHydrationWarning
               />
             </div>
             <div>
@@ -133,6 +162,7 @@ export default function RegisterPage() {
                 placeholder="Email address"
                 value={formData.user_email}
                 onChange={handleChange}
+                suppressHydrationWarning
               />
             </div>
             <div>
@@ -147,6 +177,7 @@ export default function RegisterPage() {
                 placeholder="Password"
                 value={formData.password}
                 onChange={handleChange}
+                suppressHydrationWarning
               />
             </div>
             <div>
@@ -161,6 +192,7 @@ export default function RegisterPage() {
                 placeholder="Confirm Password"
                 value={formData.confirmPassword}
                 onChange={handleChange}
+                suppressHydrationWarning
               />
             </div>
           </div>
@@ -170,6 +202,7 @@ export default function RegisterPage() {
               type="submit"
               disabled={isLoading}
               className={`group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
+              suppressHydrationWarning
             >
               {isLoading ? 'Creating account...' : 'Create Account'}
             </button>

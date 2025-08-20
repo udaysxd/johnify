@@ -5,29 +5,21 @@ const nextConfig = {
   images: {
     unoptimized: true, // Disable image optimization for static export
   },
-  // Environment variables
+  // Environment variables are automatically loaded from:
+  // - .env.local (for local development)
+  // - .env.production (for production build)
+  // - Environment variables set in Cloud Run
   env: {
-    NEXT_PUBLIC_BACKEND_URL: process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000',
+    // This ensures the variable is available at build time
+    NEXT_PUBLIC_BACKEND_URL: process.env.NEXT_PUBLIC_BACKEND_URL,
   },
-  // Disable static export since we have API routes
-  // output: 'export', // Commented out to disable static export
+  // Configure server external packages (moved from experimental)
+  serverExternalPackages: ['@prisma/client'],
   // Optional: Add a trailing slash to all paths
   trailingSlash: true,
-  // Configure API routes to work with standalone output
-  async rewrites() {
-    return [
-      // Don't rewrite NextAuth.js API routes
-      {
-        source: '/api/auth/:path*',
-        destination: '/api/auth/:path*',
-      },
-      // Rewrite other API requests to the backend
-      {
-        source: '/api/:path*',
-        destination: `${process.env.NEXT_PUBLIC_BACKEND_URL}/api/:path*`,
-      },
-    ];
-  },
+  // Note: Avoid catch-all API rewrites so local App Router API routes
+  // (e.g., /api/quiz, /api/learn) are handled by Next.js instead of being
+  // proxied to the backend.
 }
 
 module.exports = nextConfig

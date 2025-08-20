@@ -2,19 +2,20 @@
 
 import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
-import { useAuth } from '@/providers/AuthProvider';
+import { useAuth } from '@/contexts/AuthContext';
 
 export default function TestAuth() {
-  const { user, isAuthenticated, isLoading, logout } = useAuth();
+  const { user, loading, signOut } = useAuth();
+  const isAuthenticated = !!user;
   const router = useRouter();
   const [isClient, setIsClient] = useState(false);
 
   useEffect(() => {
     setIsClient(true);
-    console.log('Auth state:', { isAuthenticated, user, isLoading });
-  }, [isAuthenticated, user, isLoading]);
+    console.log('Auth state:', { isAuthenticated, user, loading });
+  }, [isAuthenticated, user, loading]);
 
-  if (isLoading || !isClient) {
+  if (loading || !isClient) {
     return (
       <div className="min-h-screen flex items-center justify-center">
         <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-indigo-500"></div>
@@ -31,9 +32,8 @@ export default function TestAuth() {
         <pre className="bg-white p-4 rounded overflow-auto">
           {JSON.stringify({ 
             isAuthenticated, 
-            isLoading, 
-            user,
-            accessToken: isClient ? sessionStorage.getItem('access_token') : 'Loading...'
+            isLoading: loading, 
+            user
           }, null, 2)}
         </pre>
       </div>
@@ -42,8 +42,8 @@ export default function TestAuth() {
         {isAuthenticated ? (
           <>
             <button
-              onClick={() => {
-                logout();
+              onClick={async () => {
+                await signOut();
                 router.push('/auth/signin');
               }}
               className="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600"
@@ -51,7 +51,7 @@ export default function TestAuth() {
               Sign Out
             </button>
             <div className="mt-4 p-4 bg-green-100 text-green-800 rounded">
-              You are signed in as {user?.email || user?.name || 'User'}
+              You are signed in as {user?.user_email || user?.user_name || 'User'}
             </div>
           </>
         ) : (

@@ -66,7 +66,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       formData.append('username', username);
       formData.append('password', password);
       
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/auth/login`, {
+      // For production, we'll use the production backend URL directly
+      // since environment variables might not be available at runtime in Cloud Run
+      const isProduction = process.env.NODE_ENV === 'production';
+      const backendUrl = isProduction 
+        ? 'https://johnify-backend-873155673176.us-central1.run.app'
+        : process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+        
+      console.log(`AuthProvider - Running in ${isProduction ? 'production' : 'development'} mode`);
+      console.log('AuthProvider - Using backend URL:', backendUrl);
+      
+      if (!backendUrl) {
+        console.error('Backend URL is not configured');
+        throw new Error('Backend URL is not configured');
+      }
+      
+      const response = await fetch(`${backendUrl}/api/auth/login`, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/x-www-form-urlencoded',

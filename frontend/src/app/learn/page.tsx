@@ -2,10 +2,11 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { useAuth } from '@/providers/AuthProvider';
+import { useAuth } from '@/contexts/AuthContext';
 
 export default function LearnPage() {
-  const { user, isAuthenticated, isLoading: isAuthLoading } = useAuth();
+  const { user, loading: isAuthLoading } = useAuth();
+  const isAuthenticated = !!user;
   const [topic, setTopic] = useState('');
   const complexity = 3; // Fixed intermediate complexity level
   const [isLoading, setIsLoading] = useState(false);
@@ -39,11 +40,11 @@ export default function LearnPage() {
     setError(null);
     
     try {
-      const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
       // Get the user's email from the auth state
-      const userEmail = user?.email;
+      const userEmail = user?.user_email;
       
-      const response = await fetch(`${backendUrl}/learn`, {
+      // Call our Next.js API route instead of hitting backend directly
+      const response = await fetch('/api/learn', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -68,17 +69,13 @@ export default function LearnPage() {
         throw new Error('Received invalid response from server: missing video URL');
       }
 
-      // Handle both relative and absolute URLs
-      let videoPath = data.video_url;
-      if (typeof videoPath === 'string') {
-        videoPath = videoPath.startsWith('http') 
-          ? videoPath 
-          : `${backendUrl}${videoPath.startsWith('/') ? '' : '/'}${videoPath}`;
-      } else {
+      // Handle both relative and absolute URLs (API route attempts to return absolute URL)
+      const videoPath = data.video_url;
+      if (typeof videoPath !== 'string') {
         console.error('Invalid video_url format:', videoPath);
         throw new Error('Received invalid video URL format from server');
       }
-      
+
       setVideoUrl(videoPath);
     } catch (err) {
       console.error('Error generating learning video:', err);

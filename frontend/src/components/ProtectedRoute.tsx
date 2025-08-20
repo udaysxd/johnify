@@ -2,7 +2,7 @@
 
 import { useRouter } from 'next/navigation';
 import { useEffect, ReactNode, useState } from 'react';
-import { useAuth } from '@/providers/AuthProvider';
+import { useAuth } from '@/contexts/AuthContext';
 
 // Define user role type
 type UserRole = 'user' | 'admin' | 'premium' | string;
@@ -18,7 +18,8 @@ export default function ProtectedRoute({
   requiredRole,
   redirectTo = '/auth/signin',
 }: ProtectedRouteProps) {
-  const { user, isAuthenticated, isLoading } = useAuth();
+  const { user, loading } = useAuth();
+  const isAuthenticated = !!user;
   const router = useRouter();
   const [isClient, setIsClient] = useState(false);
 
@@ -32,7 +33,7 @@ export default function ProtectedRoute({
     if (!isClient) return;
 
     // If still loading, do nothing
-    if (isLoading) return;
+    if (loading) return;
 
     // If not authenticated, redirect to login
     if (!isAuthenticated) {
@@ -46,10 +47,10 @@ export default function ProtectedRoute({
       // You can add role checking logic here when needed
       // For example: if (user.role !== requiredRole) { ... }
     }
-  }, [requiredRole, router, redirectTo, isLoading, isClient]);
+  }, [requiredRole, router, redirectTo, loading, isClient, isAuthenticated]);
 
   // Show loading state while checking authentication
-  if (isLoading || !isClient) {
+  if (loading || !isClient) {
     return (
       <div className="min-h-screen flex items-center justify-center">
         <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-indigo-500"></div>

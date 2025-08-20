@@ -55,6 +55,3 @@ class UserPost(Base):
     
     # Relationship to user
     user = relationship("User", back_populates="posts")
-    
-    # Relationship to user
-    user = relationship("User", back_populates="posts")

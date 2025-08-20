@@ -12,7 +12,7 @@ interface VideoItem {
   [key: string]: unknown;
 }
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+const API_BASE_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
 
 // Helper function to handle errors
 function createErrorResponse(message: string, status: number, details?: unknown): NextResponse {

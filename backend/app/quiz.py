@@ -1,4 +1,7 @@
 from fastapi import APIRouter, Request
+import json
+from typing import List, Dict
+from .slidegen import get_deepseek_client
 
 router = APIRouter(prefix="/api/quiz", tags=["quiz"])
 
@@ -82,6 +85,93 @@ def mock_test():
         }
     ]
 
+def _normalize_options(opts: List[str]) -> List[str]:
+    """Ensure options are a list of 4 strings each prefixed with 'a) ', 'b) ', ..."""
+    if not isinstance(opts, list):
+        return []
+    letters = ["a)", "b)", "c)", "d)"]
+    out: List[str] = []
+    for i in range(min(4, len(opts))):
+        val = str(opts[i]).strip()
+        # strip existing leading letter if present
+        if len(val) >= 3 and val[:2].lower() in ["a)", "b)", "c)", "d)"]:
+            val = val[3:].strip()
+        out.append(f"{letters[i]} {val}")
+    # pad if fewer than 4
+    while len(out) < 4:
+        out.append(f"{letters[len(out)]} Option {len(out)+1}")
+    return out
+
+def _validate_question(obj: Dict) -> Dict:
+    """Coerce a single question into expected schema: {q, opts[4], a in [a-d], explanation}"""
+    q = (obj.get("q") or obj.get("question") or "").strip()
+    opts = obj.get("opts") or obj.get("options") or []
+    opts = _normalize_options(opts)
+    a = (obj.get("a") or obj.get("answer") or "").strip().lower()
+    if a not in ["a", "b", "c", "d"]:
+        a = "a"
+    explanation = str(obj.get("explanation") or "").strip()
+    return {"q": q, "opts": opts, "a": a, "explanation": explanation}
+
+def generate_topic_quiz(topic: str, num_questions: int = 10) -> List[Dict]:
+    """
+    Use DeepSeek to generate topic-aware multiple choice questions.
+    Returns validated list compatible with grading.
+    """
+    client = get_deepseek_client()
+    num = max(1, min(20, int(num_questions)))
+    system = (
+        "You generate multiple-choice quizzes. Return STRICT JSON ONLY. "
+        "Each question must have: q (string), opts (array of 4 strings), a (one of 'a','b','c','d'), explanation (string)."
+    )
+    user = (
+        f"Create a {num}-question multiple-choice quiz on the topic: '{topic}'.\n"
+        "Requirements:\n"
+        "- Difficulty: GCSE/High-school level, concise and accurate.\n"
+        "- opts must be exactly 4 distinct plausible choices. Prefer short options.\n"
+        "- a must be the correct option's letter (a/b/c/d).\n"
+        "- Provide a one-sentence explanation for the correct answer.\n"
+        "Return ONLY a JSON array, no code fences, no extra text. Example element: {\"q\":\"...\",\"opts\":[\"a) ...\",\"b) ...\",\"c) ...\",\"d) ...\"],\"a\":\"b\",\"explanation\":\"...\"}"
+    )
+    resp = client.chat.completions.create(
+        model="deepseek-chat",
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        temperature=0.7,
+        max_tokens=1500,
+    )
+    content = resp.choices[0].message.content.strip()
+    # try parse JSON array from content
+    try:
+        data = json.loads(content)
+    except Exception:
+        # attempt to extract first JSON array
+        import re
+        m = re.search(r"\[.*\]", content, re.DOTALL)
+        if not m:
+            raise
+        data = json.loads(m.group(0))
+    if not isinstance(data, list):
+        raise ValueError("Model did not return a JSON array")
+    normalized: List[Dict] = []
+    for item in data[:num]:
+        try:
+            normalized.append(_validate_question(item))
+        except Exception:
+            continue
+    # ensure we have num questions
+    while len(normalized) < num:
+        # backfill from mock to avoid frontend breakage
+        idx = len(normalized)
+        mt = mock_test()
+        if idx < len(mt):
+            normalized.append(mt[idx])
+        else:
+            break
+    return normalized
+
 @router.get("/questions")
 async def get_questions():
     """Endpoint to get all quiz questions."""
@@ -92,8 +182,13 @@ async def generate_quiz(request: Request):
     data = await request.json()
     topic = data.get("topic", "General Knowledge")
     num_questions = int(data.get("num_questions", 10))
-    # For now, return the first num_questions from mock_test
-    questions = mock_test()[:num_questions]
+    # Try dynamic generation; fallback to mock on any error
+    try:
+        questions = generate_topic_quiz(topic, num_questions)
+    except Exception as e:
+        # Log-friendly message; still return a valid structure
+        print(f"[quiz.generate] Fallback to mock due to error: {e}")
+        questions = mock_test()[:num_questions]
     return {"topic": topic, "questions": questions}
 
 def administer(answers, questions=None):

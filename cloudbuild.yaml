@@ -1,0 +1,36 @@
+steps:
+  # Build and push the Docker image with BuildKit enabled
+  - name: 'gcr.io/cloud-builders/docker'
+    entrypoint: bash
+    args:
+      - '-c'
+      - |
+        # Enable BuildKit
+        export DOCKER_BUILDKIT=1
+        # Build the image with BuildKit
+        docker build \
+          --progress=plain \
+          --no-cache \
+          -t gcr.io/optimum-shape-467809-h9/johnify-backend \
+          .
+    dir: 'backend'
+    env:
+      - 'DOCKER_BUILDKIT=1'
+
+  # Deploy to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'johnify-backend'
+      - '--image=gcr.io/optimum-shape-467809-h9/johnify-backend'
+      - '--platform=managed'
+      - '--region=us-central1'
+      - '--allow-unauthenticated'
+      - '--port=8000'
+      - '--set-env-vars=ENVIRONMENT=production,DATABASE_URL=postgresql+psycopg2://postgres:E^3j#soDHIW!68gW@/johnify?host=/cloudsql/optimum-shape-467809-h9:us-central1:johnify-db,COOKIE_DOMAIN=.johnify.com,DEEPSEEK_API_KEY=sk-df4c42b632a341708dc4cc581c699f3d'
+      - '--memory=1Gi'
+      - '--cpu=1'
+      - '--timeout=300s'
+      - '--concurrency=80'

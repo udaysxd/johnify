@@ -41,15 +41,48 @@ Thumbs.db
 *.pyc
 *.pyo
 *.pyd
-.Python
-*.so
 .pytest_cache/
 .coverage
 htmlcov/
 
-# Ignore everything except the files needed for deploy
-requirements.txt
-../backend/requirements.txt
-../backend/requirements-deploy.txt
-!requirements-deploy.txt
+# Include only what's needed for backend deployment
+!backend/**
+!cloudbuild.yaml
 
+# Exclude entire frontend from backend builds to shrink upload size
+frontend/
+
+# Exclude debug and other local folders
+debug/
+
+# Keep backend necessities even if excluded by above
+!backend/requirements.txt
+!backend/Dockerfile
+!backend/app/**
+!backend/main.py
+!backend/app.py
+!backend/gunicorn.conf.py
+!backend/pyproject.toml
+!backend/project.toml
+!backend/runtime.txt
+!backend/setup.py
+
+# Exclude frontend build artifacts and dependencies (redundant if frontend/ ignored)
+frontend/.next/
+frontend/out/
+frontend/.vercel/
+frontend/node_modules/
+
+# Exclude all node_modules and Next.js caches globally
+**/node_modules/
+**/.next/
+
+# Exclude Python virtual environments globally
+**/.venv/
+
+# Exclude large generated/media directories not needed for build
+image_cache/
+generated/
+audio/
+backend/image_cache/
+backend/working_dir/

@@ -2,17 +2,17 @@
 
 import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { useAuth } from '@/providers/AuthProvider';
+import { useAuth } from '@/contexts/AuthContext';
 
 export default function SignOutPage() {
   const router = useRouter();
-  const { logout } = useAuth();
+  const { signOut } = useAuth();
   
   useEffect(() => {
     // Sign out when the component mounts
     const handleSignOut = async () => {
       try {
-        await logout();
+        await signOut();
         // Redirect to sign-in page after signing out
         router.push('/auth/signin');
       } catch (error) {
@@ -23,7 +23,7 @@ export default function SignOutPage() {
     };
     
     handleSignOut();
-  }, [router, logout]);
+  }, [router, signOut]);
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-50 py-12 px-4 sm:px-6 lg:px-8">

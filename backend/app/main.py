@@ -83,6 +83,8 @@ class QuizRequest(BaseModel):
 
 app = FastAPI(title="Johnify API")
 
+# CORS will be configured later in the file - removing duplicate registration
+
 @app.get("/")
 def root():
     return {"message": "Backend is running"}
@@ -139,10 +141,15 @@ def create_simple_slide(text, output_path, width=1920, height=1080, bg_color=(25
         
         # Try to load a nice font, fall back to default if not available
         try:
-            title_font = ImageFont.truetype("arialbd.ttf", title_size)
-            body_font = ImageFont.truetype("arial.ttf", body_size)
+            # Prefer DejaVu fonts available in Debian Slim runtime
+            title_font = ImageFont.truetype(
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", title_size
+            )
+            body_font = ImageFont.truetype(
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", body_size
+            )
         except IOError:
-            # Fall back to default font if Arial is not available
+            # Fall back to default font if DejaVu isn't available (e.g., local env without package)
             title_font = ImageFont.load_default()
             body_font = ImageFont.load_default()
         
@@ -215,11 +222,34 @@ def create_simple_slide(text, output_path, width=1920, height=1080, bg_color=(25
 # Initialize database tables
 init_db()
 
+# --- DB target logging (startup) ---
+try:
+    db_url = os.getenv("DATABASE_URL", "")
+    if db_url:
+        # Mask credentials and log host/db
+        parsed = urllib.parse.urlparse(db_url)
+        host = parsed.hostname or ""
+        dbname = (parsed.path or "/").lstrip("/")
+        print(f"[DB DEBUG] Connecting to host='{host}' db='{dbname}'")
+    else:
+        print("[DB DEBUG] DATABASE_URL not set")
+except Exception as e:
+    print(f"[DB DEBUG] Error parsing DATABASE_URL: {e}")
+
 # Mount the static directory for serving generated videos
 import os
 from pathlib import Path
 # Get the absolute path to the generated directory
-base_dir = Path(__file__).resolve().parent.parent.parent
+# In production (Cloud Run), serve from /app/generated. Locally, keep repo_root/generated.
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
+IS_PRODUCTION = ENVIRONMENT == "production"
+
+if IS_PRODUCTION:
+    base_dir = Path("/app")
+else:
+    # Previous behavior: repo root three levels up from this file
+    base_dir = Path(__file__).resolve().parent.parent.parent
+
 generated_dir = base_dir / "generated"
 
 # Create the directory if it doesn't exist
@@ -227,15 +257,93 @@ generated_dir.mkdir(exist_ok=True, parents=True)
 
 # Convert to string path for FastAPI (using forward slashes for consistency)
 generated_path = str(generated_dir).replace('\\', '/')
+print(f"[STATIC DEBUG] ENVIRONMENT={ENVIRONMENT} Serving videos from: {generated_path}")
 
-# Enable CORS for static files
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Get allowed origins from environment variable or use default
+ALLOWED_ORIGINS = os.getenv(
+    "ALLOWED_ORIGINS", 
+    "http://localhost:3000,http://localhost:8000"
+).split(",")
+
+
+# Configure CORS (single, correct middleware)
+
+# Debug logging
+print(f"[CORS DEBUG] ENVIRONMENT: {ENVIRONMENT}")
+print(f"[CORS DEBUG] IS_PRODUCTION: {IS_PRODUCTION}")
+
+if IS_PRODUCTION:
+    origins = [
+        "https://johnify.com",
+        "https://www.johnify.com",
+        "https://johnify-frontend-*.uc.r.appspot.com",  # GCP App Engine domain pattern
+        "https://*.web.app",  # Firebase Hosting domain
+        "https://*.firebaseapp.com"  # Firebase Auth domain
+    ]
+    print(f"[CORS DEBUG] Production origins: {origins}")
+else:
+    origins = [
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3000"
+    ]
+
+def custom_cors_middleware(app):
+    async def cors_middleware(request: Request, call_next):
+        # Handle preflight requests
+        if request.method == 'OPTIONS':
+            response = JSONResponse(status_code=200, content={"status": "ok"})
+        else:
+            response = await call_next(request)
+
+        # Get the origin from the request
+        origin = request.headers.get('origin')
+        
+        # Check if origin is in allowed origins or matches a wildcard pattern
+        origin_allowed = False
+        if origin:
+            if origin in origins:
+                origin_allowed = True
+            else:
+                # Check against wildcard patterns
+                for pattern in origins:
+                    if '*' in pattern:
+                        # Convert pattern to regex
+                        regex_pattern = '^' + pattern.replace('.', '\.').replace('*', '.*') + '$'
+                        if re.match(regex_pattern, origin):
+                            origin_allowed = True
+                            break
+        
+        # Set CORS headers
+        if origin_allowed:
+            response.headers['Access-Control-Allow-Origin'] = origin
+            response.headers['Access-Control-Allow-Credentials'] = 'true'
+            response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+            response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Requested-With'
+            # Expose headers needed for cross-origin media seeking
+            response.headers['Access-Control-Expose-Headers'] = 'Content-Disposition, Authorization, Accept-Ranges, Content-Range'
+            response.headers['Access-Control-Max-Age'] = '600'
+        
+        return response
+    
+    return cors_middleware
+
+# Add the CORS middleware
+app.middleware('http')(custom_cors_middleware(app))
+
+# Add a lightweight middleware to ensure Accept-Ranges for video responses
+@app.middleware('http')
+async def add_range_headers(request: Request, call_next):
+    response = await call_next(request)
+    try:
+        if request.url.path.startswith('/videos'):
+            # Starlette StaticFiles handles range/206; we add explicit header for clients to detect seekability
+            if 'Accept-Ranges' not in response.headers:
+                response.headers['Accept-Ranges'] = 'bytes'
+    except Exception:
+        pass
+    return response
+
 
 # Mount the static files with the absolute path
 app.mount("/videos", StaticFiles(directory=generated_path), name="videos")
@@ -303,6 +411,38 @@ async def test_files():
     except Exception as e:
         return {"error": str(e), "generated_dir": str(generated_dir)}
 
+# Debug endpoint: show recent user_posts
+@app.get("/debug/user-posts")
+async def debug_user_posts():
+    try:
+        from .database import SessionLocal
+        from .auth.models import UserPost
+        db = SessionLocal()
+        rows = (
+            db.query(UserPost)
+            .order_by(UserPost.post_id.desc())
+            .limit(5)
+            .all()
+        )
+        out = [
+            {
+                "post_id": r.post_id,
+                "user_id": r.user_id,
+                "post_topic": getattr(r, 'post_topic', None),
+                "post_path": getattr(r, 'post_path', None),
+                "created_on": str(getattr(r, 'created_on', None)),
+            }
+            for r in rows
+        ]
+        return {"count": len(out), "rows": out}
+    except Exception as e:
+        return {"error": str(e)}
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
 # Include authentication routes
 app.include_router(auth.auth_router, prefix="/api")
 
@@ -315,23 +455,6 @@ from . import videos
 app.include_router(videos.router)
 
 # Configure CORS with specific allowed origins and credentials
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",  # Default Next.js dev server
-        "http://localhost:8000",  # FastAPI server
-    ],
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=[
-        "Content-Type",
-        "Authorization",
-        "Accept",
-        "X-Requested-With",
-        "Access-Control-Allow-Credentials",
-    ],
-    expose_headers=["Content-Range", "X-Total-Count"],
-)
 
 # Include routers
 app.include_router(quiz.router)

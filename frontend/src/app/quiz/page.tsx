@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
-import { useAuth } from '@/providers/AuthProvider';
+import { useAuth } from '@/contexts/AuthContext';
 import LoadingState from '@/components/LoadingState';
 
 // Define types
@@ -25,20 +25,37 @@ interface QuizResult {
   wrongAnswers: Array<{
     question: string;
     correctAnswer: string;
-    userAnswer: string;
+    userAnswer?: string;  // Made optional to match the actual data structure
     explanation?: string;
   }>;
 }
 
+interface ApiQuestion {
+  id?: string;
+  q: string;
+  a: string;
+  opts?: Record<string, string>;
+  explanation?: string;
+}
+
+interface ApiWrongQuestion {
+  question: string;
+  user_answer_text?: string;
+  user_answer?: string;
+  correct_answer_text?: string;
+  correct_answer: string;
+  explanation?: string;
+}
+
 function QuizPageContent() {
   const router = useRouter();
-  const { user } = useAuth();
+  const { user, loading: authLoading } = useAuth();
   const isAuthenticated = !!user;
   const [isLoading, setIsLoading] = useState(false);
   const [isGeneratingVideo, setIsGeneratingVideo] = useState(false);
   const [videoError, setVideoError] = useState<string | null>(null);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
-  const [topic, setTopic] = useState('');
+  const [quizTopic, setQuizTopic] = useState('');
   const [quiz, setQuiz] = useState<QuizData | null>(null);
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [result, setResult] = useState<QuizResult | null>(null);
@@ -49,14 +66,15 @@ function QuizPageContent() {
     setIsClient(true);
   }, []);
 
+  // Check authentication status when component mounts or auth state changes
   useEffect(() => {
-    if (isClient && !isAuthenticated) {
+    if (!authLoading && !isAuthenticated) {
       router.push('/auth/signin');
     }
-  }, [isClient, isAuthenticated, router]);
+  }, [authLoading, isAuthenticated, router]);
 
   const generateQuiz = useCallback(async () => {
-    if (!topic.trim()) return;
+    if (!quizTopic.trim()) return;
 
     setIsLoading(true);
     setError(null);
@@ -68,7 +86,8 @@ function QuizPageContent() {
       const response = await fetch('/api/quiz', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ topic, numQuestions: 3 }),
+        credentials: 'include',
+        body: JSON.stringify({ topic: quizTopic, numQuestions: 3 }),
       });
 
       if (!response.ok) {
@@ -94,7 +113,7 @@ function QuizPageContent() {
       // Transform the data to match our QuizData interface
       const quizData: QuizData = {
         topic: responseData.topic || 'General Knowledge',
-        questions: (responseData.questions || []).map((q: any, index: number) => {
+        questions: (responseData.questions as ApiQuestion[] || []).map((q, index) => {
           console.log('Processing question:', q);
           return {
             id: q.id || `question-${index}`,
@@ -114,7 +133,7 @@ function QuizPageContent() {
     } finally {
       setIsLoading(false);
     }
-  }, [topic]);
+  }, [quizTopic]);
 
   const generateVideo = async () => {
     if (!quiz) return;
@@ -141,7 +160,7 @@ function QuizPageContent() {
         // Format options as { A: 'option1', B: 'option2', ... }
         const formattedOpts: Record<string, string> = {};
         if (q.options && typeof q.options === 'object') {
-          Object.entries(q.options).forEach(([key, value], idx) => {
+          Object.entries(q.options).forEach(([_, value], idx) => {
             const optionKey = String.fromCharCode(65 + idx); // A, B, C, etc.
             formattedOpts[optionKey] = String(value);
           });
@@ -150,9 +169,16 @@ function QuizPageContent() {
         // Store the answer for this question
         const answerKey = answers[q.id];
         if (answerKey !== undefined) {
-          // Convert answer to letter (0->'a', 1->'b', etc.)
-          const letterAnswer = String.fromCharCode(97 + parseInt(answerKey, 10));
-          formattedAnswers[index] = letterAnswer;
+          // Support both numeric index ("0", "1", ...) and letter keys ("a", "A", ...)
+          const parsed = parseInt(answerKey as string, 10);
+          if (!isNaN(parsed)) {
+            // numeric index -> letter
+            const letterAnswer = String.fromCharCode(97 + parsed);
+            formattedAnswers[index] = letterAnswer;
+          } else if (typeof answerKey === 'string' && answerKey.length > 0) {
+            // letter key -> normalize to lowercase first char
+            formattedAnswers[index] = answerKey[0].toLowerCase();
+          }
         }
         
         // Return formatted question
@@ -222,12 +248,12 @@ function QuizPageContent() {
     }
   };
 
-  const handleAnswer = useCallback((questionId: string, answer: string) => {
+  const handleAnswer = (questionId: string, answer: string) => {
     setAnswers(prev => ({
       ...prev,
       [questionId]: answer
     }));
-  }, []);
+  };
 
   const submitQuiz = useCallback(async () => {
     if (!quiz) return;
@@ -285,7 +311,7 @@ function QuizPageContent() {
         setResult({
           score: data.score,
           total: data.total_questions,
-          wrongAnswers: data.wrong_questions.map((wq: any) => ({
+          wrongAnswers: (data.wrong_questions as ApiWrongQuestion[]).map((wq) => ({
             question: wq.question,
             userAnswer: wq.user_answer_text || wq.user_answer,
             correctAnswer: wq.correct_answer_text || wq.correct_answer,
@@ -311,12 +337,16 @@ function QuizPageContent() {
     } finally {
       setIsLoading(false);
     }
-  }, [answers, quiz]);
+  }, [quiz, answers, setIsLoading, setError, setResult]);
 
-  // Show loading state when not on client or when loading data
-  if (!isClient || isLoading) {
-    return <LoadingState />;
-  }
+  // Automatically start video generation once the results are available
+  useEffect(() => {
+    if (result && !isGeneratingVideo && !videoUrl) {
+      // if there are no wrong answers, generateVideo will show a friendly message and exit
+      generateVideo();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [result]);
 
   // Show loading state when not on client or when loading data
   if (!isClient || isLoading) {
@@ -347,14 +377,14 @@ function QuizPageContent() {
               <input
                 type="text"
                 id="topic"
-                value={topic}
-                onChange={(e) => setTopic(e.target.value)}
+                value={quizTopic}
+                onChange={(e) => setQuizTopic(e.target.value)}
                 placeholder="e.g., Jazz Music, Ancient Rome, World History"
                 className="flex-1 px-4 py-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
               />
               <button
                 onClick={generateQuiz}
-                disabled={!topic.trim() || isLoading}
+                disabled={!quizTopic.trim() || isLoading}
                 className="px-6 py-2 bg-blue-600 text-white font-medium rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {isLoading ? 'Generating...' : 'Start Assessment'}
@@ -511,6 +541,20 @@ function QuizPageContent() {
                       </div>
                     ))}
                   </div>
+                  {/* Video preview and errors, similar to Learn page */}
+                  {videoError && (
+                    <div className="mt-4 text-sm text-red-600">{videoError}</div>
+                  )}
+                  {videoUrl && (
+                    <div className="mt-6">
+                      <h3 className="text-md font-semibold mb-2">Your Video</h3>
+                      <div className="aspect-w-16 aspect-h-9 bg-black rounded-lg overflow-hidden">
+                        <video src={videoUrl} controls className="w-full h-full" autoPlay>
+                          Your browser does not support the video tag.
+                        </video>
+                      </div>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div className="text-center py-8">
@@ -534,21 +578,16 @@ function QuizPageContent() {
                       {isGeneratingVideo ? 'Generating Video...' : 'Generate Video'}
                     </button>
                     {videoError && (
-                      <div className="mt-2 text-sm text-red-600">
-                        {videoError}
-                      </div>
+                      <div className="mt-2 text-sm text-red-600">{videoError}</div>
                     )}
                     {videoUrl && (
-                      <div className="mt-4">
-                        <p className="text-sm text-green-600 mb-2">Video generated successfully!</p>
-                        <a 
-                          href={videoUrl} 
-                          target="_blank" 
-                          rel="noopener noreferrer"
-                          className="text-blue-600 hover:underline text-sm"
-                        >
-                          Watch Video
-                        </a>
+                      <div className="mt-6">
+                        <h3 className="text-md font-semibold mb-2">Your Video</h3>
+                        <div className="aspect-w-16 aspect-h-9 bg-black rounded-lg overflow-hidden">
+                          <video src={videoUrl} controls className="w-full h-full" autoPlay>
+                            Your browser does not support the video tag.
+                          </video>
+                        </div>
                       </div>
                     )}
                   </div>
@@ -563,16 +602,17 @@ function QuizPageContent() {
 }
 
 export default function QuizPage() {
-  const { user, isAuthenticated, isLoading } = useAuth();
+  const { user, loading } = useAuth();
   const router = useRouter();
+  const isAuthenticated = !!user;
 
   useEffect(() => {
-    if (!isLoading && !isAuthenticated) {
-      router.push('/login');
+    if (!loading && !isAuthenticated) {
+      router.push('/auth/signin');
     }
-  }, [isAuthenticated, isLoading, router]);
+  }, [isAuthenticated, loading, router]);
 
-  if (isLoading || !isAuthenticated) {
+  if (loading || !isAuthenticated) {
     return <LoadingState />;
   }
 

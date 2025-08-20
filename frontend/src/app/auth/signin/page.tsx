@@ -1,8 +1,8 @@
 'use client';
 
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useSearchParams } from 'next/navigation';
 import { useState, useEffect } from 'react';
-import { useAuth } from '@/providers/AuthProvider';
+import { useAuth } from '@/contexts/AuthContext';
 
 // Disable SSR for this component to prevent hydration issues
 const NoSSRWrapper = ({ children }: { children: React.ReactNode }) => {
@@ -21,11 +21,13 @@ const NoSSRWrapper = ({ children }: { children: React.ReactNode }) => {
 
 export default function SignInPage() {
   const searchParams = useSearchParams();
-  const { login, isLoading: isAuthLoading } = useAuth();
+  const { signIn, loading: isAuthLoading } = useAuth();
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
+    console.log('[SignInPage] handleSubmit called', e);
+
     e.preventDefault();
     setIsSubmitting(true);
     setError('');
@@ -50,10 +52,13 @@ export default function SignInPage() {
         throw new Error('Username and password are required');
       }
 
-      console.log('Attempting sign in with:', { username, callbackUrl });
+      console.log('[SignInPage] Attempting sign in with:', { username, callbackUrl });
       
-      // Use the login function from our auth hook
-      await login(username, password);
+      // Use the signIn function from our auth hook
+      const { error } = await signIn(username, password);
+      if (error) {
+        throw new Error(error);
+      }
       
       // If login is successful, redirect to the callback URL
       window.location.href = callbackUrl;
@@ -69,9 +74,10 @@ export default function SignInPage() {
       }
       
       setError(errorMessage);
-      console.error('Sign in error:', error);
+      console.error('[SignInPage] Sign in error:', error);
     } finally {
       setIsSubmitting(false);
+      console.log('[SignInPage] handleSubmit finished', { error, isSubmitting });
     }
   };
 
