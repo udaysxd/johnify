@@ -20,6 +20,20 @@ const nextConfig = {
   // Note: Avoid catch-all API rewrites so local App Router API routes
   // (e.g., /api/quiz, /api/learn) are handled by Next.js instead of being
   // proxied to the backend.
+  async redirects() {
+    return [
+      {
+        source: '/home',
+        destination: '/my-learning',
+        permanent: true,
+      },
+      {
+        source: '/home/',
+        destination: '/my-learning/',
+        permanent: true,
+      },
+    ];
+  },
 }
 
 module.exports = nextConfig

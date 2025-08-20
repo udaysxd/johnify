@@ -85,7 +85,17 @@ export async function middleware(request: NextRequest) {
       } 
     });
   }
-  
+  // Read token early for auth-page redirect logic
+  const accessTokenPre = request.cookies.get('access_token')?.value;
+
+  // If an authenticated user hits any auth page (e.g., /auth/signin), send them to /my-learning
+  if (pathname.startsWith('/auth') && accessTokenPre) {
+    const { isValid } = await verifyToken(accessTokenPre, JWT_SECRET);
+    if (isValid) {
+      return NextResponse.redirect(new URL('/my-learning', request.url));
+    }
+  }
+
   // Allow all API routes for now - we'll handle auth at the API route level
   if (pathname.startsWith('/api/')) {
     return response;

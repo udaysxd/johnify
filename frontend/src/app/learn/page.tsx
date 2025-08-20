@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { useAuth } from '@/contexts/AuthContext';
 
 export default function LearnPage() {
@@ -13,6 +13,16 @@ export default function LearnPage() {
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const router = useRouter();
+  const searchParams = useSearchParams();
+
+  // Prefill topic from query string
+  useEffect(() => {
+    const q = searchParams.get('topic');
+    if (q && !topic) {
+      setTopic(q);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   // Redirect to login if not authenticated
   useEffect(() => {
@@ -21,29 +31,15 @@ export default function LearnPage() {
     }
   }, [isAuthenticated, isAuthLoading, router]);
 
-  if (isAuthLoading) {
-    return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <div className="text-center">
-          <div className="w-16 h-16 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto"></div>
-          <p className="mt-4 text-gray-600">Loading...</p>
-        </div>
-      </div>
-    );
-  }
+  const generateVideo = async (requestedTopic: string) => {
+    const trimmed = requestedTopic.trim();
+    if (!trimmed) return;
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!topic.trim()) return;
-    
     setIsLoading(true);
     setError(null);
-    
+
     try {
-      // Get the user's email from the auth state
       const userEmail = user?.user_email;
-      
-      // Call our Next.js API route instead of hitting backend directly
       const response = await fetch('/api/learn', {
         method: 'POST',
         headers: {
@@ -51,25 +47,22 @@ export default function LearnPage() {
           'Accept': 'application/json',
         },
         body: JSON.stringify({
-          topic: topic.trim(),
+          topic: trimmed,
           complexity_level: complexity,
-          user_email: userEmail || 'anonymous@example.com' // Fallback email if not available
+          user_email: userEmail || 'anonymous@example.com',
         }),
       });
 
       const data = await response.json();
-      
       if (!response.ok) {
         throw new Error(data.detail || data.message || 'Failed to generate learning video');
       }
 
-      // Check if video_url exists in the response
       if (!data.video_url) {
         console.error('No video_url in response:', data);
         throw new Error('Received invalid response from server: missing video URL');
       }
 
-      // Handle both relative and absolute URLs (API route attempts to return absolute URL)
       const videoPath = data.video_url;
       if (typeof videoPath !== 'string') {
         console.error('Invalid video_url format:', videoPath);
@@ -85,6 +78,24 @@ export default function LearnPage() {
     }
   };
 
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!topic.trim()) return;
+    await generateVideo(topic);
+  };
+
+  // Autostart if ?autostart=1 and topic present
+  useEffect(() => {
+    if (isAuthLoading) return;
+    if (!isAuthenticated) return;
+    const auto = searchParams.get('autostart');
+    const q = (searchParams.get('topic') || topic || '').trim();
+    if (auto && q && !isLoading && !videoUrl) {
+      generateVideo(q);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAuthenticated, isAuthLoading, searchParams, topic]);
+
   return (
     <div className="min-h-screen bg-gray-50">
       <div className="py-12 px-4 sm:px-6 lg:px-8">
@@ -93,8 +104,15 @@ export default function LearnPage() {
             <h1 className="text-3xl font-bold text-gray-900 mb-2">Learn Something New</h1>
             <p className="text-gray-600">Enter a topic and we&apos;ll generate an educational video for you</p>
           </div>
-          
-          {!videoUrl ? (
+
+          {isAuthLoading ? (
+            <div className="min-h-[200px] flex items-center justify-center">
+              <div className="text-center">
+                <div className="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto"></div>
+                <p className="mt-4 text-gray-600">Loading...</p>
+              </div>
+            </div>
+          ) : !videoUrl ? (
             <div className="bg-white shadow rounded-lg p-6">
               <form onSubmit={handleSubmit} className="space-y-6">
                 <div>

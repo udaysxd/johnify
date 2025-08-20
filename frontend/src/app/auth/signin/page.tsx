@@ -38,14 +38,14 @@ export default function SignInPage() {
       const password = formData.get('password')?.toString();
       
       // Get and validate callback URL
-      let callbackUrl = searchParams.get('callbackUrl') || '/dashboard';
+      let callbackUrl = searchParams.get('callbackUrl') || '/my-learning';
       try {
         // Ensure the callback URL is a relative path
         const url = new URL(callbackUrl, window.location.origin);
         callbackUrl = url.pathname + url.search + url.hash;
       } catch {
         console.warn('Invalid callback URL, using default');
-        callbackUrl = '/dashboard';
+        callbackUrl = '/my-learning';
       }
 
       if (!username || !password) {
