@@ -19,7 +19,7 @@ export default function PromptDemo() {
   return (
     <div className="w-full">
       <label htmlFor="prompt" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-        Try a prompt
+        Learn anything
       </label>
       <textarea
         id="prompt"
@@ -27,7 +27,7 @@ export default function PromptDemo() {
         onChange={(e) => setValue(e.target.value.slice(0, max))}
         maxLength={max}
         rows={5}
-        placeholder="Describe the video you want to create..."
+        placeholder="Write the topic for which you need a tutor..."
         className="w-full rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 p-4 shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
       />
       <div className="mt-2 flex items-center justify-between">

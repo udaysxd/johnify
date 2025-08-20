@@ -167,12 +167,14 @@ export default function HomePage() {
         <div className="max-w-7xl mx-auto">
           <div className="flex justify-between items-center mb-8">
             <h1 className="text-3xl font-bold text-gray-900">Your Library</h1>
-            <Link
-              href="/quiz"
-              className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
-            >
-              Create My Tutor
-            </Link>
+            {videos.length > 0 && (
+              <Link
+                href="/quiz"
+                className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+              >
+                Create My Tutor
+              </Link>
+            )}
           </div>
 
           {error ? (
@@ -208,11 +210,11 @@ export default function HomePage() {
                   d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2z"
                 />
               </svg>
-              <h3 className="mt-2 text-sm font-medium text-gray-900">No videos yet</h3>
-              <p className="mt-1 text-sm text-gray-500">Get started by creating your first video.</p>
+              <h3 className="mt-2 text-sm font-medium text-gray-900">You have no learning videos created yet.</h3>
+              <p className="mt-1 text-sm text-gray-500">Get started by creating your first AI tutor.</p>
               <div className="mt-6">
                 <Link
-                  href="/generate"
+                  href="/quiz"
                   className="inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
                 >
                   <svg
@@ -228,7 +230,7 @@ export default function HomePage() {
                       clipRule="evenodd"
                     />
                   </svg>
-                  New Video
+                  Create My Tutor
                 </Link>
               </div>
             </div>

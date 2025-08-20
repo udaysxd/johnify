@@ -1,10 +1,10 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useAuth } from '@/contexts/AuthContext';
 
-export default function LearnPage() {
+function LearnPageContent() {
   const { user, loading: isAuthLoading } = useAuth();
   const isAuthenticated = !!user;
   const [topic, setTopic] = useState('');
@@ -188,5 +188,13 @@ export default function LearnPage() {
       </div>
       </div>
     </div>
+  );
+}
+
+export default function LearnPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-gray-50 flex items-center justify-center"><div className="text-gray-600">Loading…</div></div>}>
+      <LearnPageContent />
+    </Suspense>
   );
 }
