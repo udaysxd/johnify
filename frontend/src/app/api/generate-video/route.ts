@@ -3,11 +3,9 @@ import { Question, VideoRequest, VideoResponse } from '@/types/video';
 
 // Helper function to get backend URL
 function getBackendUrl(): string {
-  // Check for environment variable first
-  if (process.env.NEXT_PUBLIC_BACKEND_URL) {
-    return process.env.NEXT_PUBLIC_BACKEND_URL;
-  }
-  
+  // Prefer server-only BACKEND_URL, then fall back to NEXT_PUBLIC_BACKEND_URL
+  const serverUrl = process.env.BACKEND_URL || process.env.NEXT_PUBLIC_BACKEND_URL;
+  if (serverUrl) return serverUrl.replace(/\/$/, '');
   // Default to local development URL
   return 'http://localhost:8000';
 }
@@ -22,10 +20,21 @@ export async function POST(request: Request) {
     
     // Format the answers to match backend expectations
     const formattedAnswers: Record<string, string> = {};
-    Object.entries(answers).forEach(([questionIndex, answerIndex]) => {
-      // Convert numeric answer index to letter (0->'a', 1->'b', etc.)
-      const letterAnswer = String.fromCharCode(97 + parseInt(answerIndex, 10));
-      formattedAnswers[questionIndex] = letterAnswer;
+    Object.entries(answers).forEach(([questionIndex, rawVal]) => {
+      const val = String(rawVal).trim().toLowerCase();
+      let letter = '';
+      // Cases: numeric index ("0"), option key ("a", "b", "c"), or prefixed like "option-0"
+      const numericMatch = val.match(/^(?:option[-_])?(\d+)$/);
+      if (numericMatch) {
+        const idx = parseInt(numericMatch[1], 10);
+        if (!Number.isNaN(idx) && idx >= 0 && idx < 26) letter = String.fromCharCode(97 + idx);
+      } else if (/^[a-z]$/.test(val)) {
+        letter = val;
+      } else if (/^[a-z]\)/.test(val)) {
+        // e.g., "a) Some text"
+        letter = val[0];
+      }
+      formattedAnswers[questionIndex] = letter || val[0] || '';
     });
 
     // Format questions to ensure they match the expected format
@@ -47,37 +56,72 @@ export async function POST(request: Request) {
     const timeoutId = setTimeout(() => controller.abort(), 600000); // 10 minute timeout
     
     try {
-      const response = await fetch(`${backendUrl}/generate-video`, {
+      const base = backendUrl.replace(/\/$/, '');
+      // Prefer async job to avoid timeouts
+      const asyncUrl = `${base}/generate-video-async`;
+      const incomingCookie = request.headers.get('cookie') || '';
+      const incomingAuth = request.headers.get('authorization') || '';
+      const commonHeaders: Record<string, string> = {
+        'Content-Type': 'application/json',
+        ...(incomingCookie ? { Cookie: incomingCookie } : {}),
+        ...(incomingAuth ? { Authorization: incomingAuth } : {}),
+      };
+
+      // Attempt async first
+      let response = await fetch(asyncUrl, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: commonHeaders,
         body: JSON.stringify({
           topic,
           questions: formattedQuestions,
           answers: formattedAnswers
         }),
-        credentials: 'include',
         signal: controller.signal
       });
+
+      // If async endpoint not available, fallback to sync
+      if (response.status === 404) {
+        const targetUrl = `${base}/generate-video`;
+        response = await fetch(targetUrl, {
+          method: 'POST',
+          headers: commonHeaders,
+          body: JSON.stringify({
+            topic,
+            questions: formattedQuestions,
+            answers: formattedAnswers
+          }),
+          signal: controller.signal
+        });
+      }
+
       
       clearTimeout(timeoutId);
       
       if (!response.ok) {
-        const errorText = await response.text();
+        let details: unknown = undefined;
+        try {
+          details = await response.json();
+        } catch {
+          details = await response.text();
+        }
         console.error('Backend error status:', response.status);
-        console.error('Backend error response:', errorText);
-        throw new Error(`Backend error: ${response.status} - ${errorText}`);
+        console.error('Backend error response:', details);
+        return NextResponse.json(
+          { error: 'Failed to generate video', details },
+          { status: response.status }
+        );
       }
       
       const data = await response.json() as VideoResponse;
       
       // Ensure the video URLs are absolute if they're not already
       if (data.videos && Array.isArray(data.videos)) {
-        data.videos = data.videos.map((video) => ({
-          ...video,
-          url: video.url.startsWith('http') ? video.url : `${backendUrl}${video.url}`
-        }));
+        data.videos = data.videos.map((video) => {
+          const absoluteUrl = video.url.startsWith('http') ? video.url : `${backendUrl}${video.url}`;
+          // Return proxied URL for same-origin playback
+          const proxied = `/api/proxy-video?url=${encodeURIComponent(absoluteUrl)}`;
+          return { ...video, url: proxied };
+        });
       }
       
       console.log('Backend response data:', data);
@@ -97,7 +141,11 @@ export async function POST(request: Request) {
             { status: 504 }
           );
         }
-        throw error; // Re-throw other errors to be caught by the outer catch
+        // Network or other fetch errors
+        return NextResponse.json(
+          { error: 'Failed to generate video', details: error.message },
+          { status: 502 }
+        );
       }
       
       throw new Error('An unknown error occurred');

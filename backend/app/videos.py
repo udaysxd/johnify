@@ -98,17 +98,20 @@ def get_video_files(user_id: int, db: Session) -> List[Dict[str, Any]]:
                 # Generate URL for the video file using the /videos/ endpoint
                 # Get the base URL from environment or use a default
                 base_url = os.getenv("BACKEND_URL", "http://localhost:8000")
-                
-                # Get just the filename and directory name (relative to the generated directory)
-                rel_path = os.path.relpath(video_path, os.path.join(os.path.dirname(__file__), "..", "..", "generated"))
-                # Convert to forward slashes for URLs and ensure no leading slash
-                rel_path = rel_path.replace('\\', '/').lstrip('/')
+
+                # Build clean relative path under /videos without any '..' components
+                # directory_name is already relative to the generated/ folder
+                # video_filename was discovered from the filesystem
+                safe_dir = (directory_name or "").replace('\\', '/').strip('/')
+                safe_file = (video_filename or "").replace('\\', '/').strip('/')
+                rel_path = f"{safe_dir}/{safe_file}" if safe_dir else safe_file
+                rel_path = rel_path.lstrip('/')
                 video_url = f"{base_url}/videos/{rel_path}"
-                
-                # Generate thumbnail URL if it exists
+
+                # Generate thumbnail URL if it exists (thumbnail.jpg inside the same directory)
                 thumbnail_url = ""
                 if os.path.exists(thumbnail_path):
-                    thumb_rel_path = os.path.relpath(thumbnail_path, os.path.join(os.path.dirname(__file__), "..", "..", "generated"))
+                    thumb_rel_path = f"{safe_dir}/thumbnail.jpg" if safe_dir else "thumbnail.jpg"
                     thumb_rel_path = thumb_rel_path.replace('\\', '/').lstrip('/')
                     thumbnail_url = f"{base_url}/videos/{thumb_rel_path}"
                 

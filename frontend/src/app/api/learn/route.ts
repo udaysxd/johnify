@@ -1,4 +1,6 @@
 import { NextResponse } from 'next/server';
+// Note: Avoid importing 'undici' to keep build portable. We'll rely on AbortController
+// and simple retries to mitigate transient upstream timeouts.
 
 interface LearnRequest {
   topic: string;
@@ -34,17 +36,33 @@ export async function POST(request: Request) {
     const timeoutId = setTimeout(() => controller.abort(), 600000); // 10 minute timeout
     
     try {
-      const response = await fetch(`${backendUrl}/learn`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          topic,
-          complexity_level: Math.min(5, Math.max(1, complexity_level || 3)) // Ensure between 1-5
-        }),
-        signal: controller.signal
-      });
+      // Simple retry for transient network issues
+      const maxRetries = 2;
+      let lastError: unknown = null;
+      let response: Response | null = null;
+      for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+          response = await fetch(`${backendUrl}/learn`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              topic,
+              complexity_level: Math.min(5, Math.max(1, complexity_level || 3)) // Ensure between 1-5
+            }),
+            signal: controller.signal
+          });
+          break; // success
+        } catch (e) {
+          lastError = e;
+          if (attempt === maxRetries) throw e;
+        }
+      }
+
+      if (!response) {
+        throw lastError || new Error('Unknown network error');
+      }
 
       clearTimeout(timeoutId);
 

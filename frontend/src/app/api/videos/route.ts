@@ -12,7 +12,10 @@ interface VideoItem {
   [key: string]: unknown;
 }
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+const isProduction = process.env.NODE_ENV === 'production';
+const API_BASE_URL = isProduction
+  ? (process.env.BACKEND_URL || 'https://johnify-backend-873155673176.us-central1.run.app')
+  : (process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000');
 
 // Helper function to handle errors
 function createErrorResponse(message: string, status: number, details?: unknown): NextResponse {
@@ -36,17 +39,14 @@ function createErrorResponse(message: string, status: number, details?: unknown)
 
 export async function GET(): Promise<NextResponse> {
   try {
-    // Get the auth token from cookies
+    // Get the auth token from cookies (prefer access_token, fallback to legacy auth_token)
     const cookieStore = await cookies();
-    const authToken = cookieStore.get('auth_token')?.value;
+    const accessToken = cookieStore.get('access_token')?.value || cookieStore.get('auth_token')?.value;
     
-    if (!authToken) {
+    if (!accessToken) {
       return createErrorResponse('Authentication required', 401);
     }
     
-    // Use the auth token as the access token
-    const accessToken = authToken;
-
     try {
       // Call the backend API with the user's access token
       const backendResponse = await fetch(`${API_BASE_URL}/api/videos/my-videos`, {
@@ -56,6 +56,7 @@ export async function GET(): Promise<NextResponse> {
           'Content-Type': 'application/json',
         },
         credentials: 'include',
+        cache: 'no-store',
       });
 
       if (!backendResponse.ok) {

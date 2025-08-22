@@ -4,6 +4,16 @@ import { useState, useEffect, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useAuth } from '@/contexts/AuthContext';
 
+// Response shape from /api/learn
+interface LearnResponse {
+  status?: string;
+  video_url?: string;
+  message?: string;
+  error?: string;
+  details?: string;
+  detail?: string;
+}
+
 function LearnPageContent() {
   const { user, loading: isAuthLoading } = useAuth();
   const isAuthenticated = !!user;
@@ -53,12 +63,35 @@ function LearnPageContent() {
         }),
       });
 
-      const data = await response.json();
+      const contentType = response.headers.get('content-type') || '';
+      let data: LearnResponse | null = null;
+      if (contentType.includes('application/json')) {
+        data = await response.json().catch(() => null);
+      } else {
+        // Try to parse as text then JSON; otherwise, construct an informative error
+        const textBody = await response.text().catch(() => '');
+        try {
+          data = JSON.parse(textBody) as LearnResponse;
+        } catch {
+          if (!response.ok) {
+            throw new Error(
+              `Backend error (${response.status}): ${response.statusText || 'Unknown'}\n` +
+              `${textBody?.slice(0, 300) || 'No body'}`
+            );
+          } else {
+            throw new Error(
+              'Received non-JSON success body from server. Please try again later.'
+            );
+          }
+        }
+      }
       if (!response.ok) {
-        throw new Error(data.detail || data.message || 'Failed to generate learning video');
+        throw new Error(
+          data?.detail || data?.message || data?.error || 'Failed to generate learning video'
+        );
       }
 
-      if (!data.video_url) {
+      if (!data || !data.video_url) {
         console.error('No video_url in response:', data);
         throw new Error('Received invalid response from server: missing video URL');
       }

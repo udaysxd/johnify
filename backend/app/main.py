@@ -1,4 +1,6 @@
+from __future__ import annotations
 import os
+import uuid
 import subprocess
 import time
 import re
@@ -80,6 +82,12 @@ class QuizRequest(BaseModel):
     topic: str = Field(..., description="The topic for the quiz")
     num_questions: int = Field(10, ge=1, le=50, description="Number of questions to generate")
     difficulty: Optional[str] = Field(None, description="Difficulty level (optional)")
+
+# Moved up to ensure it exists before FastAPI evaluates forward refs in route annotations
+class VideoRequest(BaseModel):
+    topic: str
+    questions: List[Dict[str, Any]]
+    answers: Dict[str, str]
 
 app = FastAPI(title="Johnify API")
 
@@ -343,6 +351,8 @@ if IS_PRODUCTION:
         "https://johnify.com",
         "https://www.johnify.com",
         "https://johnify-frontend-*.uc.r.appspot.com",  # GCP App Engine domain pattern
+        "https://*.run.app",  # Cloud Run domains
+        "https://*.us-central1.run.app",  # Regional Cloud Run subdomains
         "https://*.web.app",  # Firebase Hosting domain
         "https://*.firebaseapp.com"  # Firebase Auth domain
     ]
@@ -385,10 +395,23 @@ def custom_cors_middleware(app):
             response.headers['Access-Control-Allow-Origin'] = origin
             response.headers['Access-Control-Allow-Credentials'] = 'true'
             response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
-            response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Requested-With'
+            # Include requested headers and ensure 'Range' is allowed for media
+            requested_headers = request.headers.get('access-control-request-headers', '')
+            # Build a superset including common headers + requested ones
+            base_allow_headers = ['Content-Type', 'Authorization', 'X-Requested-With', 'Range']
+            if requested_headers:
+                # Normalize and merge
+                req_list = [h.strip() for h in requested_headers.split(',') if h.strip()]
+                for h in req_list:
+                    if h.lower() not in [b.lower() for b in base_allow_headers]:
+                        base_allow_headers.append(h)
+            response.headers['Access-Control-Allow-Headers'] = ', '.join(base_allow_headers)
             # Expose headers needed for cross-origin media seeking
             response.headers['Access-Control-Expose-Headers'] = 'Content-Disposition, Authorization, Accept-Ranges, Content-Range'
             response.headers['Access-Control-Max-Age'] = '600'
+            # Help caches and proxies vary by Origin
+            vary = response.headers.get('Vary')
+            response.headers['Vary'] = f"{vary}, Origin" if vary else 'Origin'
         
         return response
     
@@ -406,6 +429,9 @@ async def add_range_headers(request: Request, call_next):
             # Starlette StaticFiles handles range/206; we add explicit header for clients to detect seekability
             if 'Accept-Ranges' not in response.headers:
                 response.headers['Accept-Ranges'] = 'bytes'
+            # Allow cross-origin resource policy for media embedding/consumption
+            if 'Cross-Origin-Resource-Policy' not in response.headers:
+                response.headers['Cross-Origin-Resource-Policy'] = 'cross-origin'
     except Exception:
         pass
     return response
@@ -1385,19 +1411,179 @@ async def generate_quiz(quiz_request: QuizRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# Add this to your main.py
-class VideoRequest(BaseModel):
-    topic: str
-    questions: List[Dict[str, Any]]
-    answers: Dict[str, str]
+# ---------------- Async video generation endpoints to avoid timeouts ----------------
+from fastapi import BackgroundTasks
 
-class QuizRequest(BaseModel):
-    topic: str = Field(..., description="The topic for the quiz")
-    num_questions: int = Field(10, ge=1, le=50, description="Number of questions to generate")
-    difficulty: Optional[str] = Field(None, description="Difficulty level (optional)")
+def _write_status(status_path: Path, payload: dict) -> None:
+    try:
+        status_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(status_path, 'w', encoding='utf-8') as f:
+            json.dump(payload, f)
+    except Exception as e:
+        print(f"[ASYNC STATUS] Failed to write status: {e}")
+
+def _read_status(status_path: Path) -> dict:
+    try:
+        with open(status_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {"status": "processing"}
+
+async def _run_quiz_video_job(job_dir: Path, request: 'VideoRequest'):
+    """Background task: generate video using the Python-only slide pipeline and update status.json"""
+    status_path = job_dir / 'status.json'
+    try:
+        # Prepare wrong_questions similarly to generate_video_endpoint
+        wrong_questions = []
+        for idx, question in enumerate(request.questions):
+            opts = question.get('opts')
+            if isinstance(opts, dict):
+                opts_list = [f"{k}) {v}" for k, v in opts.items()]
+                opts_dict = opts
+            elif isinstance(opts, list):
+                opts_list = opts
+                opts_dict = {chr(ord('a')+i): v for i, v in enumerate(opts) if i < 26}
+            else:
+                opts_list = []
+                opts_dict = {}
+            question = {**question, 'opts': opts_list, '_opts_dict': opts_dict}
+
+            question_idx = str(idx)
+            user_answer_key = request.answers.get(question_idx)
+            correct_answer_key = question.get('a', '').lower()
+
+            def normalize_key(key: str) -> str:
+                if not key:
+                    return ''
+                key = str(key).strip()
+                if ')' in key:
+                    key = key.split(')')[0].strip().lower()
+                return key[0].lower() if key else ''
+
+            user_key = normalize_key(user_answer_key)
+            correct_key = normalize_key(correct_answer_key)
+            option_keys = list(question.get('_opts_dict', {}).keys())
+            correct_option_key = next((k for k in option_keys if normalize_key(k) == correct_key), '')
+            user_option_key = user_key if user_key in option_keys else ''
+            if not user_option_key and user_key:
+                user_option_key = next((k for k in option_keys if normalize_key(k) == user_key), '')
+            correct_answer = question['_opts_dict'].get(correct_option_key, f'No correct answer found for key: {correct_key}')
+            if user_option_key:
+                user_answer = question['_opts_dict'].get(user_option_key, str(user_answer_key))
+            else:
+                user_answer = f"{user_answer_key}" if user_answer_key else "No answer provided"
+            if user_key != correct_key:
+                wrong_questions.append({
+                    "question": question.get('q', ''),
+                    "correct_answer": correct_answer,
+                    "user_answer": user_answer,
+                    "options": question.get('opts', {}),
+                    "explanation": question.get('explanation', ''),
+                    "question_number": idx + 1
+                })
+
+        total_questions = len(request.questions)
+        wrong_count = len(wrong_questions)
+        score = total_questions - wrong_count
+
+        if not wrong_questions:
+            _write_status(status_path, {
+                "status": "done",
+                "message": "All answers are correct! No video needed.",
+                "score": score,
+                "total": total_questions,
+                "wrong_answers": wrong_count,
+                "videos": []
+            })
+            return
+
+        # Generate slides markdown
+        md_path = job_dir / 'slides.md'
+        from . import slidegen as sg
+        slides = sg.generate_slide_markdown(wrong_questions)
+        sg.save_slides_to_md(slides, str(md_path))
+
+        # Generate images via Python fallback
+        images_dir = job_dir / 'images'
+        audio_dir = job_dir / 'audio'
+        video_path = job_dir / 'result.mp4'
+        images_dir.mkdir(parents=True, exist_ok=True)
+        audio_dir.mkdir(parents=True, exist_ok=True)
+
+        generated_images = []
+        for i, slide_content in enumerate(slides, 1):
+            slide_text = str(slide_content or '').strip() or f'Slide {i}'
+            out_path = images_dir / f'slide_{i:03d}.png'
+            try:
+                ok = create_simple_slide(slide_text, str(out_path))
+                if ok:
+                    generated_images.append(str(out_path))
+            except Exception as e:
+                print(f"[ASYNC IMG] Failed slide {i}: {e}")
+        if not generated_images:
+            raise RuntimeError('No slide images were generated via Python fallback')
+
+        # Narration and audio
+        narrations = sg.generate_narration(slides)
+        from . import tts
+        tts.narrations_to_mp3(narrations, str(audio_dir))
+
+        # Stitch video
+        from .video_quiz import stitch_images_and_audio_to_video_quiz
+        stitch_images_and_audio_to_video_quiz(
+            img_dir=images_dir,
+            aud_dir=audio_dir,
+            out_mp4=video_path
+        )
+
+        rel_url = f"/videos/async/{job_dir.name}/result.mp4"
+        _write_status(status_path, {
+            "status": "done",
+            "videos": [{"url": rel_url, "title": f"{request.topic} Explanation"}],
+            "score": score,
+            "total": total_questions,
+            "wrong_answers": wrong_count
+        })
+    except Exception as e:
+        print(f"[ASYNC JOB] Error: {e}")
+        _write_status(status_path, {"status": "error", "error": str(e)})
+
+
+@app.post("/generate-video-async")
+async def generate_video_async(background_tasks: BackgroundTasks, request: 'VideoRequest'):
+    try:
+        job_id = uuid.uuid4().hex
+        base_dir = Path(__file__).parent.parent.parent
+        job_dir = base_dir / 'generated' / 'async' / job_id
+        job_dir.mkdir(parents=True, exist_ok=True)
+
+        status_path = job_dir / 'status.json'
+        _write_status(status_path, {"status": "processing"})
+
+        background_tasks.add_task(_run_quiz_video_job, job_dir, request)
+
+        return {
+            "job_id": job_id,
+            "status": "processing",
+            "status_url": f"/generate-video/status/{job_id}"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/generate-video/status/{job_id}")
+async def generate_video_status(job_id: str):
+    base_dir = Path(__file__).parent.parent.parent
+    job_dir = base_dir / 'generated' / 'async' / job_id
+    status_path = job_dir / 'status.json'
+    if not status_path.exists():
+        raise HTTPException(status_code=404, detail="Job not found")
+    data = _read_status(status_path)
+    return data
+
 
 @app.post("/generate-video")
-async def generate_video_endpoint(request: VideoRequest):
+async def generate_video_endpoint(request: 'VideoRequest'):
     print("Video generation endpoint called")
     print(f"Topic: {request.topic}")
     print(f"Number of questions: {len(request.questions)}")
@@ -1533,13 +1719,12 @@ async def generate_video_endpoint(request: VideoRequest):
         
         # Define paths
         md_path = output_dir / "slides.md"
-        pptx_path = output_dir / "slides.pptx"
         images_dir = output_dir / "images"
         audio_dir = output_dir / "audio"
         video_path = output_dir / f"{sanitized_topic}_explanation.mp4"
         
         # Clean up existing files
-        for path in [md_path, pptx_path, images_dir, audio_dir]:
+        for path in [md_path, images_dir, audio_dir]:
             if path.exists():
                 if path.is_dir():
                     shutil.rmtree(path)
@@ -1556,18 +1741,29 @@ async def generate_video_endpoint(request: VideoRequest):
             
             # 2. Generate narration
             narrations = sg.generate_narration(slides)
-            
-            # 3. Convert markdown to PPTX (optional, keep if PPTX is needed elsewhere)
-            from . import pptx_gen
-            pptx_gen.markdown_to_pptx(md_path, pptx_path)
 
-            # 4. Export PNGs from markdown using Marp CLI (robust, no fallback)
-            pptx_gen.export_slides_to_png_with_marp(md_path, images_dir)
+            # 3. Generate slide images using Python-only fallback (no Marp/Node required)
+            images_dir.mkdir(parents=True, exist_ok=True)
+            generated_images = []
+            for i, slide_content in enumerate(slides, 1):
+                # Clean and ensure basic structure; create_simple_slide will extract title if present
+                slide_text = str(slide_content or "").strip()
+                if not slide_text:
+                    slide_text = f"Slide {i}"
+                out_path = images_dir / f"slide_{i:03d}.png"
+                try:
+                    ok = create_simple_slide(slide_text, str(out_path))
+                    if ok:
+                        generated_images.append(str(out_path))
+                except Exception as e:
+                    print(f"[IMG FALLBACK] Failed to render slide {i}: {e}")
+            if not generated_images:
+                raise RuntimeError("No slide images were generated via Python fallback")
 
-            # 5. Generate audio for each slide
+            # 4. Generate audio for each slide
             tts.narrations_to_mp3(narrations, str(audio_dir))
             
-            # 6. Stitch everything together
+            # 5. Stitch everything together
             from .video_quiz import stitch_images_and_audio_to_video_quiz
             stitch_images_and_audio_to_video_quiz(
                 img_dir=images_dir,

@@ -119,6 +119,25 @@ export default function HomePage() {
     };
   }, [selectedVideo]);
 
+  // Try to programmatically play when a video is selected
+  useEffect(() => {
+    if (selectedVideo && videoRef.current) {
+      // Reload the element to ensure fresh source
+      try {
+        videoRef.current.load();
+      } catch {}
+      const tryPlay = async () => {
+        try {
+          await videoRef.current?.play();
+        } catch (err) {
+          console.log('Video play() was prevented:', err);
+        }
+      };
+      // Give the browser a tick to attach source
+      setTimeout(tryPlay, 0);
+    }
+  }, [selectedVideo]);
+
   // Show loading state while checking auth status or fetching videos
   if (isAuthLoading || (isAuthenticated && isLoading)) {
     return (
@@ -304,17 +323,43 @@ export default function HomePage() {
             className="relative w-full max-w-4xl bg-white rounded-lg overflow-hidden shadow-xl"
           >
             <div className="relative pt-[56.25%] bg-black">
+              {(() => {
+                const proxySrc = `/api/proxy-video?url=${encodeURIComponent(selectedVideo.videoUrl)}`;
+                return (
               <video
+                key={selectedVideo.id}
                 ref={videoRef}
                 className="absolute top-0 left-0 w-full h-full"
                 controls
                 autoPlay
-                src={selectedVideo.videoUrl}
+                crossOrigin="anonymous"
+                playsInline
+                preload="auto"
+                src={proxySrc}
                 onEnded={() => videoRef.current?.pause()}
+                onLoadedMetadata={() => {
+                  // Attempt to auto-play once metadata is available
+                  videoRef.current?.play().catch((e) => {
+                    console.log('Auto-play blocked on metadata:', e);
+                  });
+                }}
+                onError={(e) => {
+                  const v = videoRef.current;
+                  const err = v?.error;
+                  console.error('Video error event', {
+                    src: proxySrc,
+                    networkState: v?.networkState,
+                    readyState: v?.readyState,
+                    errorCode: err?.code,
+                    errorMessage: err?.message,
+                  });
+                }}
               >
-                <source src={selectedVideo.videoUrl} type="video/mp4" />
+                <source src={proxySrc} type="video/mp4" />
                 Your browser does not support the video tag.
               </video>
+                );
+              })()}
               <button
                 onClick={() => setSelectedVideo(null)}
                 className="absolute top-4 right-4 p-2 rounded-full bg-black/50 text-white hover:bg-black/70 transition-colors"

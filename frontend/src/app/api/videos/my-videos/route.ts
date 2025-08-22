@@ -24,11 +24,30 @@ interface FrontendVideoItem {
   status: 'processing' | 'completed' | 'failed';
 }
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+const isProduction = process.env.NODE_ENV === 'production';
+const API_BASE_URL = isProduction
+  ? (process.env.BACKEND_URL || 'https://johnify-backend-873155673176.us-central1.run.app')
+  : (process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000');
 
 function absoluteUrl(url: string | undefined): string {
   if (!url) return '';
-  return url.startsWith('http') ? url : `${API_BASE_URL}${url.startsWith('/') ? '' : '/'}${url}`;
+  // If backend returned an absolute URL, normalize its origin and path quirks
+  if (url.startsWith('http')) {
+    try {
+      const u = new URL(url);
+      const api = new URL(API_BASE_URL);
+      // Replace localhost origin with backend API origin
+      u.protocol = api.protocol;
+      u.host = api.host;
+      // Collapse any `/videos/../app/` to `/videos/`
+      u.pathname = u.pathname.replace('/videos/../app/', '/videos/');
+      return u.toString();
+    } catch {
+      return url;
+    }
+  }
+  // For relative paths, keep existing join behavior
+  return `${API_BASE_URL}${url.startsWith('/') ? '' : '/'}${url}`;
 }
 
 function createErrorResponse(message: string, status: number, details?: unknown): NextResponse {

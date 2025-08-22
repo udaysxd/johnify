@@ -214,16 +214,55 @@ function QuizPageContent() {
       if (!response.ok) {
         throw new Error(data.error || 'Failed to generate video');
       }
-      
+
+      // If async job started, poll status until complete
+      if (data.job_id || data.status === 'processing') {
+        const jobId: string = data.job_id;
+        if (!jobId) {
+          throw new Error('Missing job id for async video generation');
+        }
+        const poll = async (): Promise<void> => {
+          try {
+            const statusRes = await fetch(`/api/generate-video-status?job_id=${encodeURIComponent(jobId)}`, {
+              cache: 'no-store'
+            });
+            const statusData = await statusRes.json();
+            if (!statusRes.ok) {
+              throw new Error(statusData?.error || 'Status check failed');
+            }
+            if (statusData.status === 'done') {
+              if (Array.isArray(statusData.videos) && statusData.videos.length > 0) {
+                const vid = statusData.videos[0];
+                if (vid?.url) {
+                  setVideoUrl(vid.url);
+                  return;
+                }
+              }
+              setVideoError('Video generated but no URL returned.');
+              return;
+            }
+            if (statusData.status === 'error') {
+              throw new Error(statusData.error || 'Video generation failed');
+            }
+            // Still processing; wait and poll again
+            setTimeout(poll, 3000);
+          } catch (e) {
+            setVideoError(e instanceof Error ? e.message : 'Failed to poll video status');
+          }
+        };
+        // Kick off polling and exit handler; UI will update when done
+        void poll();
+        return;
+      }
+
       // If the response indicates all answers are correct, handle it gracefully
       if (data.message && data.message.includes('All answers are correct')) {
         setVideoError('Great job! All answers are correct. No video needed.');
         return;
       }
       
-      // Handle different possible response formats
+      // Handle different possible response formats (sync path)
       if (data.videos && Array.isArray(data.videos) && data.videos.length > 0) {
-        // New format: { videos: [{ url: string, type: string }] }
         const video = data.videos[0];
         if (video && video.url) {
           setVideoUrl(video.url);
@@ -262,8 +301,28 @@ function QuizPageContent() {
     setError(null);
     
     try {
-      // Convert answers from {questionId: answer} to array of answers in order
-      const answerArray = quiz.questions.map(question => answers[question.id] || '');
+      // Convert answers from {questionId: answerKey} to array of letters (a-d) in order
+      const answerArray = quiz.questions.map((question, idx) => {
+        const key = answers[question.id] || '';
+        if (!key) return '';
+        // If already a letter like 'a'/'A', normalize to lowercase
+        if (typeof key === 'string' && /^[a-dA-D]$/.test(key)) {
+          return key.toLowerCase();
+        }
+        // If key like 'option-0', map to a/b/c/d
+        const optIdxMatch = typeof key === 'string' && key.match(/^option-(\d+)$/);
+        if (optIdxMatch) {
+          const n = parseInt(optIdxMatch[1], 10);
+          return n >= 0 && n < 26 ? String.fromCharCode(97 + n) : '';
+        }
+        // If numeric index string, map to a/b/c/d
+        const asNum = parseInt(String(key), 10);
+        if (!isNaN(asNum)) {
+          return asNum >= 0 && asNum < 26 ? String.fromCharCode(97 + asNum) : '';
+        }
+        // Fallback empty
+        return '';
+      });
       
       // Format questions for the backend
       const formattedQuestions = quiz.questions.map(q => ({
