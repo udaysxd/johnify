@@ -26,13 +26,31 @@ def create_slide_video_quiz(img: Path, mp3: Path, out_mp4: Path):
         print(f"[QUIZ VIDEO] Skipping segment for {img} due to missing/invalid audio duration.")
         return False
     try:
-        subprocess.run([
-            "ffmpeg", "-y", "-loop", "1", "-i", str(img), "-i", str(mp3),
-            "-t", str(duration), "-c:v", "libx264",
-            "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(out_mp4)
-        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Use a faster preset to avoid long CPU-bound encodes on Cloud Run
+        cmd = [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-loop", "1", "-i", str(img), "-i", str(mp3),
+            "-t", str(duration),
+            "-c:v", "libx264", "-preset", "veryfast",
+            "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest",
+            str(out_mp4)
+        ]
+        res = subprocess.run(
+            cmd,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=300,  # 5 minutes per segment as a hard ceiling
+        )
         print(f"[QUIZ VIDEO] Created video segment: {out_mp4}")
         return True
+    except subprocess.TimeoutExpired:
+        print(f"[QUIZ VIDEO] Timeout creating segment for {img} + {mp3}")
+        return False
+    except subprocess.CalledProcessError as e:
+        print(f"[QUIZ VIDEO] ffmpeg error creating segment: {e.stderr.strip()}")
+        return False
     except Exception as e:
         print(f"[QUIZ VIDEO] Error creating video segment: {str(e)}")
         return False
@@ -66,11 +84,21 @@ def stitch_images_and_audio_to_video_quiz(img_dir: Path, aud_dir: Path, out_mp4:
             for seg in segs:
                 f.write(f"file '{seg.resolve()}'\n")
         out_mp4.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run([
-            "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat),
-            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart",
+        cmd = [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "concat", "-safe", "0", "-i", str(concat),
+            "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-movflags", "+faststart",
             str(out_mp4)
-        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        ]
+        subprocess.run(
+            cmd,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=600,  # 10 minutes max for concat
+        )
         print(f"[QUIZ VIDEO] Final video created: {out_mp4}")
         return True
     except Exception as e:

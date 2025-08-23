@@ -3,12 +3,45 @@ from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session, joinedload
 from datetime import datetime
 import os
+from pathlib import Path
 from typing import List, Dict, Any
 
 from .database import get_db
 from .auth import models, security
 
 router = APIRouter(prefix="/api/videos", tags=["videos"])
+
+# Resolve the base generated directory consistent with app.main
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
+IS_PRODUCTION = ENVIRONMENT == "production"
+if IS_PRODUCTION:
+    _base_dir = Path("/tmp")
+else:
+    _base_dir = Path(__file__).resolve().parent.parent.parent
+GENERATED_ROOT = (_base_dir / "generated").resolve()
+
+def _gcs_https_from_gs(gs_url: str) -> str:
+    """Convert gs://bucket/object to public HTTPS URL."""
+    try:
+        # gs://bucket/path/to/file -> https://storage.googleapis.com/bucket/path/to/file
+        without_scheme = gs_url[len("gs://"):]
+        bucket, *obj_parts = without_scheme.split("/")
+        object_path = "/".join(obj_parts)
+        return f"https://storage.googleapis.com/{bucket}/{object_path}"
+    except Exception:
+        return ""
+
+
+def _derive_thumb_url_from_video(video_url: str) -> str:
+    try:
+        # Replace last segment with thumbnail.jpg
+        idx = video_url.rfind("/")
+        if idx == -1:
+            return ""
+        return f"{video_url[:idx]}/thumbnail.jpg"
+    except Exception:
+        return ""
+
 
 def get_video_files(user_id: int, db: Session) -> List[Dict[str, Any]]:
     """
@@ -38,7 +71,37 @@ def get_video_files(user_id: int, db: Session) -> List[Dict[str, Any]]:
             print(f"\n--- Debugging Video Paths ---")
             print(f"Original post_path: {post.post_path}")
             print(f"Current working directory: {os.getcwd()}")
-            
+
+            # If post_path is a GCS path or URL, short-circuit to URLs without filesystem access
+            pp = (post.post_path or "").strip()
+            if pp.startswith("gs://"):
+                video_url = _gcs_https_from_gs(pp)
+                thumbnail_url = _derive_thumb_url_from_video(video_url)
+                if video_url:
+                    videos.append({
+                        "id": str(post.post_id),
+                        "title": post.post_topic or "Untitled Video",
+                        "created_at": post.created_on.isoformat() if post.created_on else datetime.utcnow().isoformat(),
+                        "video_url": video_url,
+                        "thumbnail_url": thumbnail_url,
+                        "topic": post.post_topic or "",
+                        "status": "completed"
+                    })
+                    continue
+            if pp.startswith("https://storage.googleapis.com/"):
+                video_url = pp
+                thumbnail_url = _derive_thumb_url_from_video(video_url)
+                videos.append({
+                    "id": str(post.post_id),
+                    "title": post.post_topic or "Untitled Video",
+                    "created_at": post.created_on.isoformat() if post.created_on else datetime.utcnow().isoformat(),
+                    "video_url": video_url,
+                    "thumbnail_url": thumbnail_url,
+                    "topic": post.post_topic or "",
+                    "status": "completed"
+                })
+                continue
+
             # The post_path contains both directory and filename, e.g.:
             # 'generated/learn_why_are_women_not_safe_in_india_and_mexico_1753718382\learn_why_are_women_not_safe_in_india_and_mexico_1753718382.mp4'
             
@@ -60,8 +123,8 @@ def get_video_files(user_id: int, db: Session) -> List[Dict[str, Any]]:
             directory_name = '/'.join(path_parts[:-1])
             video_filename = path_parts[-1] if path_parts[-1].endswith('.mp4') else None
             
-            # Construct the full path to the video directory
-            video_dir_path = os.path.join("generated", directory_name)
+            # Construct the full path to the video directory under the resolved generated root
+            video_dir_path = os.path.join(str(GENERATED_ROOT), directory_name)
             video_dir_path = os.path.normpath(video_dir_path)  # Normalize the path for the current OS
             
             print(f"Normalized video directory path: {video_dir_path}")
@@ -176,7 +239,7 @@ def _collect_videos_for_post(post: models.UserPost) -> Dict[str, Any]:
         normalized_path = normalized_path[10:]
     path_parts = normalized_path.split('/') if normalized_path else []
     directory_name = '/'.join(path_parts[:-1]) if path_parts else ''
-    video_dir_path = os.path.normpath(os.path.join("generated", directory_name))
+    video_dir_path = os.path.normpath(os.path.join(str(GENERATED_ROOT), directory_name))
 
     video_filename = None
     video_path = None
@@ -236,6 +299,40 @@ async def get_feed_videos(
         )
         out: List[Dict[str, Any]] = []
         for post in posts:
+            # Prefer direct GCS URLs when present
+            pp = (post.post_path or "").strip()
+            if pp.startswith("gs://"):
+                video_url = _gcs_https_from_gs(pp)
+                thumbnail_url = _derive_thumb_url_from_video(video_url)
+                if video_url:
+                    out.append({
+                        "id": str(post.post_id),
+                        "title": post.post_topic or "Untitled Video",
+                        "created_at": post.created_on.isoformat() if post.created_on else datetime.utcnow().isoformat(),
+                        "video_url": video_url,
+                        "thumbnail_url": thumbnail_url,
+                        "topic": post.post_topic or "",
+                        "status": "completed",
+                        "user_id": post.user_id,
+                        "user_name": getattr(post, "user", None) and getattr(post.user, "user_name", None),
+                    })
+                    continue
+            if pp.startswith("https://storage.googleapis.com/"):
+                video_url = pp
+                thumbnail_url = _derive_thumb_url_from_video(video_url)
+                out.append({
+                    "id": str(post.post_id),
+                    "title": post.post_topic or "Untitled Video",
+                    "created_at": post.created_on.isoformat() if post.created_on else datetime.utcnow().isoformat(),
+                    "video_url": video_url,
+                    "thumbnail_url": thumbnail_url,
+                    "topic": post.post_topic or "",
+                    "status": "completed",
+                    "user_id": post.user_id,
+                    "user_name": getattr(post, "user", None) and getattr(post.user, "user_name", None),
+                })
+                continue
+
             item = _collect_videos_for_post(post)
             if item.get("video_url"):
                 out.append(item)

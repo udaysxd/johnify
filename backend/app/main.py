@@ -28,9 +28,11 @@ import requests
 from sqlalchemy.orm import Session
 
 # Import local modules
-from . import quiz, slidegen, pptx_gen, tts, video, utils, auth
+from . import quiz, slidegen, pptx_gen, tts, video, utils, auth, tutor
+from . import gcs_utils
 from .database import engine, init_db, get_db
 from .auth import models, schemas, security
+import shutil
 
 def sanitize_filename(filename: str) -> str:
     """
@@ -375,8 +377,9 @@ def custom_cors_middleware(app):
                 # Check against wildcard patterns
                 for pattern in origins:
                     if '*' in pattern:
-                        # Convert pattern to regex
-                        regex_pattern = '^' + pattern.replace('.', '\.').replace('*', '.*') + '$'
+                        # Convert wildcard pattern to regex safely
+                        escaped = re.escape(pattern)
+                        regex_pattern = '^' + escaped.replace(r'\*', '.*') + '$'
                         if re.match(regex_pattern, origin):
                             origin_allowed = True
                             break
@@ -525,6 +528,7 @@ app.include_router(videos.router)
 
 # Include routers
 app.include_router(quiz.router)
+app.include_router(tutor.router)
 
 class LearnVideoTask:
     def __init__(self, topic: str, complexity_level: int = 3, user_email: str = None):
@@ -787,17 +791,17 @@ class LearnVideoTask:
                 
                 if not os.path.exists(video_path):
                     raise FileNotFoundError(f"Failed to create video at {video_path}")
-                    
-                print(f"✅ Video generated: {video_path}")
                 
+                print(f"✅ Video generated: {video_path}")
             except Exception as e:
                 print(f"❌ Error generating video: {str(e)}")
                 raise
             
-            # Generate thumbnail.jpg (Pollinations only for thumbnail)
-            try:
-                thumb_path = os.path.join(self.output_dir, "thumbnail.jpg")
-                if not os.path.exists(thumb_path):
+            # Generate thumbnail.jpg (simplified, no nested try blocks)
+            thumb_path = os.path.join(self.output_dir, "thumbnail.jpg")
+            if not os.path.exists(thumb_path):
+                try:
+                    # Attempt Pollinations fetch first
                     prompt = f"clean minimal educational thumbnail for: {self.topic}"
                     encoded = urllib.parse.quote(prompt[:200])
                     url = f"https://image.pollinations.ai/prompt/{encoded}"
@@ -806,30 +810,15 @@ class LearnVideoTask:
                     resp.raise_for_status()
                     with open(thumb_path, 'wb') as f:
                         f.write(resp.content)
-                    # Basic sanity check
                     if os.path.getsize(thumb_path) < 1024:
                         raise RuntimeError("Thumbnail too small; treating as failure")
-                print(f"✅ Thumbnail saved: {thumb_path}")
-            except Exception as e:
-                print(f"⚠️ Pollinations thumbnail failed: {e}. Falling back to simple generated image.")
-                try:
-                    # Fallback: create a simple thumbnail with title text using PIL
-                    thumb_path = os.path.join(self.output_dir, "thumbnail.jpg")
+                except Exception as e:
+                    print(f"⚠️ Pollinations thumbnail failed: {e}. Using simple PIL-generated image.")
+                    # Fallback: minimal PIL image with centered title using default font
                     img = Image.new('RGB', (1280, 720), color=(20, 32, 48))
                     draw = ImageDraw.Draw(img)
                     title = self.topic[:60]
-                    # Try to load a font; fall back to default if unavailable
-                    try:
-                        font_path = _find_ttf_font([
-                            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-                            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-                            r"C:\\Windows\\Fonts\\arialbd.ttf",
-                            r"C:\\Windows\\Fonts\\segoeuib.ttf",
-                        ])
-                        font = ImageFont.truetype(font_path, 56) if font_path else ImageFont.load_default()
-                    except Exception:
-                        font = ImageFont.load_default()
-                    # Center text
+                    font = ImageFont.load_default()
                     try:
                         bbox = draw.textbbox((0, 0), title, font=font)
                         tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
@@ -840,105 +829,8 @@ class LearnVideoTask:
                     draw.text((x, y), title, fill=(235, 245, 255), font=font)
                     img.save(thumb_path, format='JPEG', quality=85)
                     print(f"✅ Fallback thumbnail saved: {thumb_path}")
-                except Exception as e2:
-                    print(f"❌ Failed to create fallback thumbnail: {e2}")
-            
-            # Create a URL for the video
-            video_url = f"/videos/learn_{self.safe_topic}_{self.timestamp}/{video_filename}"
-            
-            # Get the database session
-            from .database import SessionLocal, get_db
-            from .auth.models import User, UserPost
-            from sqlalchemy.exc import SQLAlchemyError, IntegrityError
-            from datetime import datetime
-            
-            # Record the video in user_posts table
-            db = None
-            try:
-                print(f"🔍 Attempting to connect to database...")
-                db = SessionLocal()
-                print("✅ Successfully connected to database")
-                
-                # Debug: Print all users in the database
-                all_users = db.query(User).all()
-                print(f"🔍 Found {len(all_users)} users in the database")
-                for u in all_users:
-                    print(f"   - User ID: {u.user_id}, Email: {u.user_email}")
-                
-                # Find the user by email
-                user = None
-                if self.user_email:
-                    print(f"🔍 Looking for user with email: {self.user_email}")
-                    user = db.query(User).filter(User.user_email == self.user_email).first()
-                    if user:
-                        print(f"✅ Found user by email: ID={user.user_id}, Email={user.user_email}")
-                    else:
-                        print(f"⚠️ No user found with email: {self.user_email}")
-                
-                # If no user found with email, get the first user as fallback (for testing)
-                if not user and all_users:
-                    print("⚠️ No matching user found, using first available user")
-                    user = all_users[0]
-                    print(f"   - Selected user: ID={user.user_id}, Email={user.user_email}")
-                
-                if user:
-                    print(f"📝 Creating new post entry for user ID: {user.user_id}")
-                    print(f"   - Topic: {self.topic}")
-                    print(f"   - Video Path: {video_path}")
-                    
-                    # Create a new post entry
-                    post = UserPost(
-                        user_id=user.user_id,
-                        post_path=video_path,  # Store the local file path
-                        post_topic=self.topic,
-                        created_on=datetime.utcnow(),
-                        type='learn'
-                    )
-                    
-                    db.add(post)
-                    try:
-                        db.commit()
-                        db.refresh(post)  # Refresh to get the generated ID
-                        print(f"✅ Successfully recorded video in user_posts table with ID: {post.post_id}")
-                    except IntegrityError as ie:
-                        db.rollback()
-                        print(f"❌ Integrity error when saving to database: {str(ie)}")
-                        raise
-                    except Exception as e:
-                        db.rollback()
-                        print(f"❌ Error saving to database: {str(e)}")
-                        raise
-                else:
-                    print("❌ No users found in the database to associate with the video")
-                    
-            except SQLAlchemyError as sae:
-                print(f"❌ Database error: {str(sae)}")
-                if db:
-                    db.rollback()
-                # Re-raise to be caught by the outer exception handler
-                raise
-            except Exception as e:
-                print(f"❌ Unexpected error when saving to database: {str(e)}")
-                if db:
-                    db.rollback()
-                # Don't fail the entire request if database recording fails
-                # Just log the error and continue
-            finally:
-                if db:
-                    try:
-                        db.close()
-                    except Exception as e:
-                        print(f"⚠️ Error closing database connection: {str(e)}")
-            
-            # Return success response with video URL
-            response = {
-                "status": "completed",
-                "video_url": video_url,
-                "message": "Video generated successfully"
-            }
-            print(f"✅ Returning success response: {response}")
-            return response
-            
+            else:
+                print(f"✅ Thumbnail saved: {thumb_path}")
         except Exception as e:
             error_msg = f"Error in LearnVideoTask: {str(e)}"
             print(error_msg)
@@ -949,6 +841,147 @@ class LearnVideoTask:
             }
             print(f"❌ Returning error response: {response}")
             return response
+
+        # If in production, upload artifacts to GCS and use public HTTPS URLs
+        gcs_used = False
+        gcs_video_gs = ""
+        gcs_video_https = ""
+        gcs_thumb_https = ""
+        if IS_PRODUCTION:
+            try:
+                # Directory part for GCS under prefix 'content/learn/...'
+                gcs_dir = f"learn/learn_{self.safe_topic}_{self.timestamp}"
+                up_video = gcs_utils.maybe_upload_and_url(
+                    video_path,
+                    parts=[gcs_dir, video_filename],
+                    content_type="video/mp4",
+                )
+                gcs_video_gs = up_video.get("gs_url", "")
+                gcs_video_https = up_video.get("https_url", "")
+                # Thumbnail
+                if os.path.exists(thumb_path):
+                    up_thumb = gcs_utils.maybe_upload_and_url(
+                        thumb_path,
+                        parts=[gcs_dir, "thumbnail.jpg"],
+                        content_type="image/jpeg",
+                    )
+                    gcs_thumb_https = up_thumb.get("https_url", "")
+                gcs_used = True
+            except Exception as e:
+                print(f"⚠️ GCS upload failed (learn): {e}")
+
+        # Create a URL for the video (prefer GCS in production)
+        if gcs_used and gcs_video_https:
+            video_url = gcs_video_https
+        else:
+            video_url = f"/videos/learn_{self.safe_topic}_{self.timestamp}/{video_filename}"
+        
+        # Get the database session
+        from .database import SessionLocal, get_db
+        from .auth.models import User, UserPost
+        from sqlalchemy.exc import SQLAlchemyError, IntegrityError
+        from datetime import datetime
+
+        # Record the video in user_posts table
+        db = None
+        try:
+            print(f"🔍 Attempting to connect to database...")
+            db = SessionLocal()
+            print("✅ Successfully connected to database")
+            
+            # Debug: Print all users in the database
+            all_users = db.query(User).all()
+            print(f"🔍 Found {len(all_users)} users in the database")
+            for u in all_users:
+                print(f"   - User ID: {u.user_id}, Email: {u.user_email}")
+            
+            # Find the user by email
+            user = None
+            if self.user_email:
+                print(f"🔍 Looking for user with email: {self.user_email}")
+                user = db.query(User).filter(User.user_email == self.user_email).first()
+                if user:
+                    print(f"✅ Found user by email: ID={user.user_id}, Email={user.user_email}")
+                else:
+                    print(f"⚠️ No user found with email: {self.user_email}")
+            
+            # If no user found with email, get the first user as fallback (for testing)
+            if not user and all_users:
+                print("⚠️ No matching user found, using first available user")
+                user = all_users[0]
+                print(f"   - Selected user: ID={user.user_id}, Email={user.user_email}")
+            
+            if user:
+                print(f"📝 Creating new post entry for user ID: {user.user_id}")
+                print(f"   - Topic: {self.topic}")
+                print(f"   - Video Path: {video_path}")
+                
+                # Create a new post entry
+                # Prefer a directly playable URL when available
+                post_playable_path = (gcs_video_https or gcs_video_gs or video_url or video_path)
+                post = UserPost(
+                    user_id=user.user_id,
+                    post_path=post_playable_path,
+                    post_topic=self.topic,
+                    created_on=datetime.utcnow(),
+                    type='learn'
+                )
+                
+                db.add(post)
+                try:
+                    db.commit()
+                    db.refresh(post)  # Refresh to get the generated ID
+                    print(f"✅ Successfully recorded video in user_posts table with ID: {post.post_id}")
+                except IntegrityError as ie:
+                    db.rollback()
+                    print(f"❌ Integrity error when saving to database: {str(ie)}")
+                    raise
+                except Exception as e:
+                    db.rollback()
+                    print(f"❌ Error saving to database: {str(e)}")
+                    raise
+            else:
+                print("❌ No users found in the database to associate with the video")
+                
+        except SQLAlchemyError as sae:
+            print(f"❌ Database error: {str(sae)}")
+            if db:
+                db.rollback()
+            # Re-raise to be caught by the outer exception handler
+            raise
+        except Exception as e:
+            print(f"❌ Unexpected error when saving to database: {str(e)}")
+            if db:
+                db.rollback()
+            # Don't fail the entire request if database recording fails
+            # Just log the error and continue
+        finally:
+            if db:
+                try:
+                    db.close()
+                except Exception as e:
+                    print(f"⚠️ Error closing database connection: {str(e)}")
+
+        # Cleanup local temp artifacts in production ONLY if GCS public URL exists
+        try:
+            if IS_PRODUCTION and gcs_used and gcs_video_https:
+                # Remove the generated directory for this job
+                if self.output_dir and os.path.exists(self.output_dir):
+                    shutil.rmtree(self.output_dir, ignore_errors=True)
+                    print(f"🧹 Cleaned up temp dir: {self.output_dir}")
+        except Exception as e:
+            print(f"⚠️ Cleanup failed: {e}")
+
+        # Return success response with video URL (after DB handling)
+        response = {
+            "status": "completed",
+            "video_url": video_url,
+            "thumbnail_url": (gcs_thumb_https if gcs_used and gcs_thumb_https else f"/videos/learn_{self.safe_topic}_{self.timestamp}/thumbnail.jpg"),
+            "message": "Video generated successfully"
+        }
+        print(f"✅ Returning success response: {response}")
+        return response
+
 
 # Learn endpoint
 @app.post("/learn")
@@ -1730,11 +1763,33 @@ def _generate_video_from_request(request: "VideoRequest") -> Dict[str, Any]:
                         # Fallback to first user (keeps parity with learn path)
                         user = db.query(User).first()
                     if user:
-                        # Store a stable relative path under generated/ using known pieces
+                        # In production, upload to GCS and store gs://; otherwise store relative generated path
                         rel_post_path = f"generated/quiz_{sanitized_topic}_{ts}/{sanitized_topic}_explanation.mp4"
+                        gs_post_path = None
+                        try:
+                            if IS_PRODUCTION:
+                                gcs_dir = f"quiz/quiz_{sanitized_topic}_{ts}"
+                                # Upload video
+                                up_video = gcs_utils.maybe_upload_and_url(
+                                    video_path,
+                                    parts=[gcs_dir, f"{sanitized_topic}_explanation.mp4"],
+                                    content_type="video/mp4",
+                                )
+                                gs_post_path = up_video.get("gs_url")
+                                # Upload thumbnail if present
+                                thumb_local = (Path(output_dir) / "thumbnail.jpg")
+                                if thumb_local.exists():
+                                    gcs_utils.maybe_upload_and_url(
+                                        thumb_local,
+                                        parts=[gcs_dir, "thumbnail.jpg"],
+                                        content_type="image/jpeg",
+                                    )
+                        except Exception as e:
+                            print(f"⚠️ QUIZ GCS upload failed: {e}")
+
                         post = UserPost(
                             user_id=user.user_id,
-                            post_path=rel_post_path,
+                            post_path=(gs_post_path or rel_post_path),
                             post_topic=request.topic,
                             created_on=_dt.utcnow(),
                             type='tutor'
@@ -1764,18 +1819,43 @@ def _generate_video_from_request(request: "VideoRequest") -> Dict[str, Any]:
             print(f"\n❌ QUIZ VIDEO: ERROR | {str(e)}")
             raise
         
-        video_filename = f"quiz_{sanitized_topic}_{ts}/{sanitized_topic}_explanation.mp4"
-        # Return in the format expected by the frontend
-        return {
-            "videos": [{
-                "url": f"/videos/{video_filename}",
-                "title": f"{request.topic} Explanation"
-            }],
-            "score": score,
-            "total": total_questions,
-            "wrong_answers": wrong_count,
-            "message": "Video generated successfully"
-        }
+        # Cleanup local temp artifacts in production after successful upload/DB write
+        try:
+            if IS_PRODUCTION:
+                if output_dir.exists():
+                    shutil.rmtree(output_dir, ignore_errors=True)
+                    print(f"[QUIZ VIDEO] 🧹 Cleaned up temp dir: {output_dir}")
+        except Exception as e:
+            print(f"[QUIZ VIDEO] ⚠️ Cleanup failed: {e}")
+
+        # Prefer GCS public URL in production
+        if IS_PRODUCTION:
+            gcs_dir = f"quiz/quiz_{sanitized_topic}_{ts}"
+            https_url = gcs_utils.public_url(gcs_utils.gcs_object_path(gcs_dir, f"{sanitized_topic}_explanation.mp4"))
+            thumb_url = gcs_utils.public_url(gcs_utils.gcs_object_path(gcs_dir, "thumbnail.jpg"))
+            return {
+                "videos": [{
+                    "url": https_url,
+                    "title": f"{request.topic} Explanation",
+                    "thumbnail_url": thumb_url,
+                }],
+                "score": score,
+                "total": total_questions,
+                "wrong_answers": wrong_count,
+                "message": "Video generated successfully"
+            }
+        else:
+            video_filename = f"quiz_{sanitized_topic}_{ts}/{sanitized_topic}_explanation.mp4"
+            return {
+                "videos": [{
+                    "url": f"/videos/{video_filename}",
+                    "title": f"{request.topic} Explanation"
+                }],
+                "score": score,
+                "total": total_questions,
+                "wrong_answers": wrong_count,
+                "message": "Video generated successfully"
+            }
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

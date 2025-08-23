@@ -55,7 +55,7 @@ export default function Home() {
 
         {/* Hero Video */}
         <div className="mt-16 rounded-xl overflow-hidden shadow-2xl">
-          <HeroVideo src="https://storage.googleapis.com/assets-johnify/homepage/learn_ancient_rome_1754906885.mp4" />
+          <HeroVideo src="https://storage.googleapis.com/assets-johnify/homepage/hero.mp4" />
         </div>
       </section>
 
