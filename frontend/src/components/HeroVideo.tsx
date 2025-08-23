@@ -31,7 +31,6 @@ export default function HeroVideo({ src }: { src: string }) {
       <video
         ref={videoRef}
         className="w-full h-full object-cover"
-        loop
         playsInline
         preload="metadata"
         muted

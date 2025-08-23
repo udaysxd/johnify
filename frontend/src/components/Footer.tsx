@@ -2,13 +2,19 @@ import Link from 'next/link';
 export default function Footer() {
   const year = new Date().getFullYear();
   return (
-    <footer className="border-t border-gray-200 dark:border-gray-800 bg-white/70 dark:bg-gray-900/70 backdrop-blur supports-[backdrop-filter]:bg-white/60">
+    <footer className="border-t border-gray-200 dark:border-gray-800 bg-gray-100 dark:bg-gray-900">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <div className="flex flex-col md:flex-row items-center md:items-start justify-between gap-6">
           {/* Brand */}
           <div className="text-center md:text-left">
             <span className="text-lg font-semibold text-gray-900 dark:text-white">johnify</span>
             <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">Learn anything with your own personalised tutor</p>
+            <div className="mt-2 flex items-center justify-center md:justify-start gap-2 text-gray-600 dark:text-gray-300">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="h-4 w-4" aria-hidden="true">
+                <path d="M12 2C8.685 2 6 4.686 6 8c0 4.418 6 12 6 12s6-7.582 6-12c0-3.314-2.686-6-6-6zm0 8.5A2.5 2.5 0 1 1 12 5.5a2.5 2.5 0 0 1 0 5z" />
+              </svg>
+              <span className="text-xs">London, UK</span>
+            </div>
           </div>
 
           {/* Nav (two lines) */}

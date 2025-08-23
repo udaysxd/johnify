@@ -69,23 +69,30 @@ export default function Header() {
   const isAuthenticated = !!user;
   
   return (
-    <header className="w-full border-b border-gray-200 bg-white">
+    <header className="w-full border-b border-gray-800 bg-gray-900">
       <div className="container mx-auto px-4 py-4 flex justify-between items-center">
-        <Link href="/" className="text-2xl font-bold text-indigo-600 hover:text-indigo-700">
+        <Link href="/" className="text-2xl font-bold text-white hover:text-indigo-300">
           Johnify
         </Link>
         
         <nav className="flex items-center space-x-4">
           {!isClient || loading || isSigningOut ? (
-            <div className="h-8 w-24 bg-gray-200 rounded animate-pulse"></div>
+            <div className="h-8 w-24 bg-gray-700 rounded animate-pulse"></div>
           ) : isAuthenticated ? (
             <div className="flex items-center space-x-4 relative">
               {/* My learning link (authenticated) */}
               <Link 
                 href="/my-learning" 
-                className="px-3 py-2 text-sm font-medium text-gray-700 hover:text-indigo-600"
+                className="px-3 py-2 text-sm font-bold text-gray-100 hover:text-indigo-300"
               >
                 My learning
+              </Link>
+              {/* My Feed link (authenticated) */}
+              <Link 
+                href="/feed" 
+                className="px-3 py-2 text-sm font-bold text-gray-100 hover:text-indigo-300"
+              >
+                My Feed
               </Link>
               {/* User initial avatar */}
               <button
@@ -123,14 +130,21 @@ export default function Header() {
               {/* My learning link (unauthenticated) */}
               <Link 
                 href="/my-learning" 
-                className="px-3 py-2 text-sm font-medium text-gray-700 hover:text-indigo-600"
+                className="px-3 py-2 text-sm font-bold text-gray-100 hover:text-indigo-300"
               >
                 My learning
+              </Link>
+              {/* My Feed link (unauthenticated) */}
+              <Link 
+                href="/feed" 
+                className="px-3 py-2 text-sm font-bold text-gray-100 hover:text-indigo-300"
+              >
+                My Feed
               </Link>
               {!pathname.startsWith('/auth/signin') && (
                 <Link 
                   href="/auth/signin" 
-                  className="px-4 py-2 text-sm font-medium text-gray-700 hover:text-indigo-600"
+                  className="px-4 py-2 text-sm font-bold text-gray-100 hover:text-indigo-300"
                 >
                   Sign In
                 </Link>
@@ -138,7 +152,7 @@ export default function Header() {
               {!pathname.startsWith('/auth/register') && (
                 <Link 
                   href="/auth/register" 
-                  className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-md hover:bg-indigo-700"
+                  className="px-4 py-2 text-sm font-bold text-white bg-indigo-600 rounded-md hover:bg-indigo-700"
                 >
                   Sign Up
                 </Link>

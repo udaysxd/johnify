@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from datetime import datetime
 import os
 from typing import List, Dict, Any
@@ -156,4 +156,83 @@ async def get_my_videos(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error fetching videos: {str(e)}"
+        )
+
+# New: Public feed endpoint aggregating videos from all users
+def _collect_videos_for_post(post: models.UserPost) -> Dict[str, Any]:
+    import os
+    from datetime import datetime
+    # Normalize and locate video file within generated/<dir>
+    normalized_path = (post.post_path or "").replace('\\', '/').strip()
+    if normalized_path.startswith('generated/'):
+        normalized_path = normalized_path[10:]
+    path_parts = normalized_path.split('/') if normalized_path else []
+    directory_name = '/'.join(path_parts[:-1]) if path_parts else ''
+    video_dir_path = os.path.normpath(os.path.join("generated", directory_name))
+
+    video_filename = None
+    video_path = None
+    if os.path.exists(video_dir_path):
+        for file in os.listdir(video_dir_path):
+            if file.endswith('.mp4'):
+                video_filename = file
+                video_path = os.path.normpath(os.path.join(video_dir_path, video_filename))
+                break
+
+    if not (video_path and os.path.exists(video_path)):
+        return {}
+
+    # Build URLs
+    base_url = os.getenv("BACKEND_URL", "http://localhost:8000")
+    safe_dir = (directory_name or "").replace('\\', '/').strip('/')
+    safe_file = (video_filename or "").replace('\\', '/').strip('/')
+    rel_path = f"{safe_dir}/{safe_file}" if safe_dir else safe_file
+    rel_path = rel_path.lstrip('/')
+    video_url = f"{base_url}/videos/{rel_path}"
+
+    # Thumbnail
+    thumbnail_url = ""
+    thumb_path = os.path.join(video_dir_path, "thumbnail.jpg")
+    if os.path.exists(thumb_path):
+        thumb_rel = f"{safe_dir}/thumbnail.jpg" if safe_dir else "thumbnail.jpg"
+        thumbnail_url = f"{base_url}/videos/{thumb_rel.replace('\\', '/').lstrip('/')}"
+
+    return {
+        "id": str(post.post_id),
+        "title": post.post_topic or "Untitled Video",
+        "created_at": post.created_on.isoformat() if post.created_on else datetime.utcnow().isoformat(),
+        "video_url": video_url,
+        "thumbnail_url": thumbnail_url,
+        "topic": post.post_topic or "",
+        "status": "completed",
+        "user_id": post.user_id,
+        "user_name": getattr(post.user, "user_name", None) if getattr(post, "user", None) is not None else None,
+    }
+
+@router.get("/feed", response_model=List[Dict[str, Any]])
+async def get_feed_videos(
+    db: Session = Depends(get_db)
+):
+    """
+    Public feed of videos across all users.
+    """
+    try:
+        posts = (
+            db.query(models.UserPost)
+            .options(joinedload(models.UserPost.user))
+            .filter(models.UserPost.post_path != None)
+            .order_by(models.UserPost.created_on.desc())
+            .limit(200)
+            .all()
+        )
+        out: List[Dict[str, Any]] = []
+        for post in posts:
+            item = _collect_videos_for_post(post)
+            if item.get("video_url"):
+                out.append(item)
+        return out
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error fetching feed videos: {str(e)}"
         )

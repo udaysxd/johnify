@@ -5,9 +5,8 @@ const BACKEND_URL = process.env.BACKEND_URL || process.env.NEXT_PUBLIC_BACKEND_U
 
 function sanitizeBackendUrl(input: string): string | null {
   try {
+    // Validate and normalize, but DO NOT strip port. We need ports in local dev.
     const u = new URL(input);
-    // Strip any explicit port (Cloud Run shouldn't use :8000 externally)
-    u.port = '';
     return u.toString();
   } catch {
     return null;
@@ -15,10 +14,8 @@ function sanitizeBackendUrl(input: string): string | null {
 }
 
 function isAllowedTarget(target: URL, backendOrigin: URL): boolean {
-  return (
-    target.hostname === backendOrigin.hostname &&
-    target.protocol === backendOrigin.protocol
-  );
+  // Ensure exact origin match (protocol + hostname + port)
+  return target.origin === backendOrigin.origin;
 }
 
 export async function GET(req: NextRequest) {

@@ -79,25 +79,39 @@ def markdown_to_pptx(md_path: Path, pptx_path: Path):
             MARP = find_marp_cli()
         except Exception as e:
             raise RuntimeError(f"Marp CLI not found: {e}")
+        chrome_path = os.environ.get('PUPPETEER_EXECUTABLE_PATH') or os.environ.get('CHROME_PATH') or '/usr/bin/chromium'
         cmd = [
             MARP,
             str(md_path),
             '--allow-local-files',
             '--theme', 'default',
             '--pptx',
-            '--timeout', '120000',  # 2 minutes timeout
+            '--timeout', '180000',  # 3 minutes timeout
+            '--chrome-path', chrome_path,
+            '--verbose',
             '--output', str(pptx_path)
         ]
         
         print("\n🚀 Running Marp command:")
         print("  " + " ".join(f'"{arg}"' if ' ' in arg else arg for arg in cmd))
         
+        env = os.environ.copy()
+        # Encourage Puppeteer to use system Chromium and be resilient in containers
+        env.setdefault('PUPPETEER_EXECUTABLE_PATH', chrome_path)
+        env.setdefault('PUPPETEER_SKIP_DOWNLOAD', '1')
+        env.setdefault('CHROME_NO_SANDBOX', '1')
+        env.setdefault('CHROME_DISABLE_GPU', '1')
+        # Some environments benefit from this flag to avoid /dev/shm limits
+        chromium_flags = '--no-sandbox --disable-gpu --disable-dev-shm-usage'
+        env.setdefault('CHROMIUM_FLAGS', chromium_flags)
+
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
             encoding='utf-8',
-            errors='replace'
+            errors='replace',
+            env=env
         )
         
         # Log command output
@@ -140,7 +154,7 @@ def markdown_to_pptx(md_path: Path, pptx_path: Path):
     except Exception as e:
         raise RuntimeError(f"Error converting markdown to PPTX: {str(e)}") from e
 
-def export_slides_to_png_with_marp(md_path: Path, out_dir: Path, timeout_seconds: int = 60):
+def export_slides_to_png_with_marp(md_path: Path, out_dir: Path, timeout_seconds: int = 180):
     """
     Export slide images as PNGs using Marp CLI from markdown file.
     This works on both Windows and Linux as long as Marp CLI is installed.
@@ -162,13 +176,21 @@ def export_slides_to_png_with_marp(md_path: Path, out_dir: Path, timeout_seconds
         return pngs
 
     # Always run Marp CLI in the markdown's directory, output to local 'images' folder
+    chrome_path = os.environ.get('PUPPETEER_EXECUTABLE_PATH') or os.environ.get('CHROME_PATH') or '/usr/bin/chromium'
     cmd = [
         MARP, 
         md_path.name, 
         "--images", "png", 
         "--output", "images",
         "--allow-local-files",  # Allow local file access
-        "--html"  # Generate HTML first which is generally more stable
+        "--html",                # Generate HTML first which is generally more stable
+        "--timeout", str(timeout_seconds * 1000),
+        "--chrome-path", chrome_path,
+        "--verbose",
+        "--",  # pass raw flags to Chromium
+        "--no-sandbox",
+        "--disable-gpu",
+        "--disable-dev-shm-usage"
     ]
     
     print("\n🚀 Running Marp CLI for PNG export:")
@@ -177,6 +199,13 @@ def export_slides_to_png_with_marp(md_path: Path, out_dir: Path, timeout_seconds
 
     try:
         # Run with timeout to prevent hanging
+        env = os.environ.copy()
+        env.setdefault('PUPPETEER_EXECUTABLE_PATH', chrome_path)
+        env.setdefault('PUPPETEER_SKIP_DOWNLOAD', '1')
+        env.setdefault('CHROME_NO_SANDBOX', '1')
+        env.setdefault('CHROME_DISABLE_GPU', '1')
+        env.setdefault('CHROMIUM_FLAGS', '--no-sandbox --disable-gpu --disable-dev-shm-usage')
+
         result = subprocess.run(
             cmd,
             cwd=str(md_path.parent),
@@ -184,7 +213,8 @@ def export_slides_to_png_with_marp(md_path: Path, out_dir: Path, timeout_seconds
             text=True,
             encoding='utf-8',
             errors='replace',
-            timeout=timeout_seconds
+            timeout=timeout_seconds,
+            env=env
         )
     except subprocess.TimeoutExpired:
         print(f"⚠️  Marp CLI timed out after {timeout_seconds} seconds")
@@ -255,6 +285,14 @@ def export_slides_to_png_with_marp(md_path: Path, out_dir: Path, timeout_seconds
     if result and result.stderr:
         print("\n⚠️  Marp PNG export stderr:")
         print(result.stderr.strip())
+    # If Marp CLI failed, raise with captured output to surface the root cause
+    if result and result.returncode != 0:
+        err = [
+            f"Marp PNG export failed with exit code {result.returncode}",
+            ("STDOUT:\n" + result.stdout.strip()) if result.stdout else "",
+            ("STDERR:\n" + result.stderr.strip()) if result.stderr else "",
+        ]
+        raise RuntimeError("\n".join([e for e in err if e]))
     
     # Process found images
     if image_files:

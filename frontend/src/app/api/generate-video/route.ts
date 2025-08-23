@@ -1,17 +1,56 @@
 import { NextResponse } from 'next/server';
-import { Question, VideoRequest, VideoResponse } from '@/types/video';
+import { Question, VideoRequest } from '@/types/video';
+import { Agent, setGlobalDispatcher } from 'undici';
+
+// Ensure Node.js runtime (not Edge) so Undici settings apply
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+
+// Configure a long-lived Undici Agent to disable default timeouts
+const longLivedAgent = new Agent({
+  headersTimeout: 0,
+  bodyTimeout: 0,
+});
+setGlobalDispatcher(longLivedAgent);
+
+// Note: We rely on Node's global fetch (Undici under the hood in Node 18+).
+// We avoid importing 'undici' directly to prevent module resolution issues in builds.
 
 // Helper function to get backend URL
 function getBackendUrl(): string {
-  // Prefer server-only BACKEND_URL, then fall back to NEXT_PUBLIC_BACKEND_URL
-  const serverUrl = process.env.BACKEND_URL || process.env.NEXT_PUBLIC_BACKEND_URL;
-  if (serverUrl) return serverUrl.replace(/\/$/, '');
-  // Default to local development URL
-  return 'http://localhost:8000';
+  // Prefer server-side BACKEND_URL, then NEXT_PUBLIC_BACKEND_URL
+  const raw = process.env.BACKEND_URL || process.env.NEXT_PUBLIC_BACKEND_URL;
+  if (raw && typeof raw === 'string') {
+    return raw.replace(/\/$/, '');
+  }
+  // Only fall back to localhost during development
+  if (process.env.NODE_ENV === 'development') {
+    return 'http://localhost:8000';
+  }
+  throw new Error('Backend URL not configured');
 }
 
 interface FormattedQuestion extends Omit<Question, 'opts'> {
   opts: Record<string, string>;
+}
+
+type VideoItem = { url?: string; [key: string]: unknown };
+type MaybeVideos = { videos?: VideoItem[] };
+
+function hasVideos(v: unknown): v is MaybeVideos {
+  if (typeof v !== 'object' || v === null) return false;
+  const videos = (v as { videos?: unknown }).videos;
+  return Array.isArray(videos);
+}
+
+function normalizeError(e: unknown): { name: string; message: string } {
+  if (e && typeof e === 'object') {
+    const rec = e as Record<string, unknown>;
+    const name = typeof rec.name === 'string' ? rec.name : '';
+    const message = typeof rec.message === 'string' ? rec.message : String(e);
+    return { name, message };
+  }
+  return { name: '', message: String(e) };
 }
 
 export async function POST(request: Request) {
@@ -20,21 +59,10 @@ export async function POST(request: Request) {
     
     // Format the answers to match backend expectations
     const formattedAnswers: Record<string, string> = {};
-    Object.entries(answers).forEach(([questionIndex, rawVal]) => {
-      const val = String(rawVal).trim().toLowerCase();
-      let letter = '';
-      // Cases: numeric index ("0"), option key ("a", "b", "c"), or prefixed like "option-0"
-      const numericMatch = val.match(/^(?:option[-_])?(\d+)$/);
-      if (numericMatch) {
-        const idx = parseInt(numericMatch[1], 10);
-        if (!Number.isNaN(idx) && idx >= 0 && idx < 26) letter = String.fromCharCode(97 + idx);
-      } else if (/^[a-z]$/.test(val)) {
-        letter = val;
-      } else if (/^[a-z]\)/.test(val)) {
-        // e.g., "a) Some text"
-        letter = val[0];
-      }
-      formattedAnswers[questionIndex] = letter || val[0] || '';
+    Object.entries(answers).forEach(([questionIndex, answerIndex]) => {
+      // Convert numeric answer index to letter (0->'a', 1->'b', etc.)
+      const letterAnswer = String.fromCharCode(97 + parseInt(answerIndex, 10));
+      formattedAnswers[questionIndex] = letterAnswer;
     });
 
     // Format questions to ensure they match the expected format
@@ -52,100 +80,91 @@ export async function POST(request: Request) {
     });
 
     const backendUrl = getBackendUrl();
+    console.log('Using BACKEND_URL for quiz kickoff:', backendUrl);
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 600000); // 10 minute timeout
+    const timeoutId = setTimeout(() => controller.abort(), 1100_000); // ~18m20s, below Cloud Run 1200s
     
     try {
-      const base = backendUrl.replace(/\/$/, '');
-      // Prefer async job to avoid timeouts
-      const asyncUrl = `${base}/generate-video-async`;
+      // Forward incoming auth/cookie headers to backend
       const incomingCookie = request.headers.get('cookie') || '';
       const incomingAuth = request.headers.get('authorization') || '';
-      const commonHeaders: Record<string, string> = {
-        'Content-Type': 'application/json',
-        ...(incomingCookie ? { Cookie: incomingCookie } : {}),
-        ...(incomingAuth ? { Authorization: incomingAuth } : {}),
-      };
 
-      // Attempt async first
-      let response = await fetch(asyncUrl, {
-        method: 'POST',
-        headers: commonHeaders,
-        body: JSON.stringify({
-          topic,
-          questions: formattedQuestions,
-          answers: formattedAnswers
-        }),
-        signal: controller.signal
-      });
-
-      // If async endpoint not available, fallback to sync
-      if (response.status === 404) {
-        const targetUrl = `${base}/generate-video`;
-        response = await fetch(targetUrl, {
+      // Kick off async job via global fetch with AbortController timeout
+      async function kickoffOnce() {
+        const resp = await fetch(`${backendUrl}/generate-video/start`, {
           method: 'POST',
-          headers: commonHeaders,
-          body: JSON.stringify({
-            topic,
-            questions: formattedQuestions,
-            answers: formattedAnswers
-          }),
-          signal: controller.signal
+          headers: {
+            'Content-Type': 'application/json',
+            ...(incomingCookie ? { Cookie: incomingCookie } : {}),
+            ...(incomingAuth ? { Authorization: incomingAuth } : {}),
+          },
+          body: JSON.stringify({ topic, questions: formattedQuestions, answers: formattedAnswers }),
+          signal: controller.signal,
+          // cache no-store not necessary server-to-server
         });
+        const text = await resp.text();
+        if (!resp.ok) {
+          console.error('Backend error status:', resp.status);
+          console.error('Backend error response:', text);
+          throw new Error(`Backend error: ${resp.status} - ${text}`);
+        }
+        try {
+          return text ? JSON.parse(text) : {};
+        } catch (e) {
+          console.error('Failed to parse backend JSON:', text);
+          throw e;
+        }
       }
 
-      
-      clearTimeout(timeoutId);
-      
-      if (!response.ok) {
-        let details: unknown = undefined;
-        try {
-          details = await response.json();
-        } catch {
-          details = await response.text();
+      let data: unknown;
+      try {
+        data = await kickoffOnce();
+      } catch (e: unknown) {
+        // Retry once on HeadersTimeoutError
+        const { name, message } = normalizeError(e);
+        if (name === 'HeadersTimeoutError' || /UND_ERR_HEADERS_TIMEOUT/i.test(message)) {
+          console.warn('Retrying kickoff after HeadersTimeoutError...');
+          data = await kickoffOnce();
+        } else {
+          throw e;
         }
-        console.error('Backend error status:', response.status);
-        console.error('Backend error response:', details);
-        return NextResponse.json(
-          { error: 'Failed to generate video', details },
-          { status: response.status }
-        );
+      } finally {
+        clearTimeout(timeoutId);
       }
       
-      const data = await response.json() as VideoResponse;
-      
-      // Ensure the video URLs are absolute if they're not already
-      if (data.videos && Array.isArray(data.videos)) {
-        data.videos = data.videos.map((video) => {
-          const absoluteUrl = video.url.startsWith('http') ? video.url : `${backendUrl}${video.url}`;
-          // Return proxied URL for same-origin playback
-          const proxied = `/api/proxy-video?url=${encodeURIComponent(absoluteUrl)}`;
-          return { ...video, url: proxied };
-        });
+      // If backend returned a synchronous result (rare), ensure URLs are absolute
+      if (hasVideos(data)) {
+        data.videos = data.videos!.map((video: VideoItem) => ({
+          ...video,
+          url: typeof video.url === 'string' && video.url.startsWith('http') ? video.url : `${backendUrl}${video.url ?? ''}`
+        }));
       }
       
       console.log('Backend response data:', data);
-      return NextResponse.json(data);
+      const res = NextResponse.json(data as object);
+      res.headers.set('X-Route-Version', 'quiz-generate-video:kickoff-v2');
+      return res;
       
     } catch (error: unknown) {
       clearTimeout(timeoutId);
       
       if (error instanceof Error) {
         if (error.name === 'AbortError') {
-          console.error('Request timed out after 10 minutes');
+          console.error('Request timed out before Cloud Run limit');
           return NextResponse.json(
             { 
-              error: 'Video generation is taking longer than expected', 
+              message: 'Video generation is taking longer than expected', 
               details: 'The server is still processing your request. Please try again in a few minutes.' 
             },
             { status: 504 }
           );
         }
-        // Network or other fetch errors
-        return NextResponse.json(
-          { error: 'Failed to generate video', details: error.message },
-          { status: 502 }
-        );
+        console.error('Undici/Fetch error details:', {
+          name: error.name,
+          message: error.message,
+          stack: error.stack,
+        });
+        throw error; // Re-throw other errors to be caught by the outer catch
       }
       
       throw new Error('An unknown error occurred');
@@ -156,7 +175,7 @@ export async function POST(request: Request) {
     
     return NextResponse.json(
       { 
-        error: 'Failed to generate video', 
+        message: 'Failed to generate video', 
         details: errorMessage
       },
       { status: 500 }

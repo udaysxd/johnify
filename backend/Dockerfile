@@ -61,11 +61,21 @@ RUN rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock && \
     apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     fonts-dejavu-core \
+    nodejs \
+    npm \
+    chromium \
     && rm -rf /var/lib/apt/lists/* \
     && rm -rf /var/cache/apt/archives/*
 
-# Copy only necessary files from builder
-COPY --from=builder /usr/local/bin/marp /usr/local/bin/marp
+# Install Marp CLI in the final stage to ensure proper bin symlink and module layout
+RUN npm install -g @marp-team/marp-cli && marp --version
+
+# Let Marp/Puppeteer find system Chromium and run headless in container
+ENV CHROME_PATH=/usr/bin/chromium \
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium \
+    PUPPETEER_SKIP_DOWNLOAD=1 \
+    CHROME_NO_SANDBOX=1 \
+    CHROME_DISABLE_GPU=1
 
 # Set work directory
 WORKDIR /app
@@ -76,5 +86,5 @@ COPY . .
 # Expose port
 EXPOSE 8000
 
-# Start with Gunicorn (increase timeout for long-running requests)
-CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-b", ":8000", "--timeout", "600", "app.main:app"]
+# Start with Gunicorn (align timeout with Cloud Run's 1200s hard limit)
+CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-b", ":8000", "--timeout", "1200", "app.main:app"]

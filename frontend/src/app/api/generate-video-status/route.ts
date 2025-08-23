@@ -1,4 +1,12 @@
 import { NextResponse } from 'next/server';
+import { Agent, setGlobalDispatcher } from 'undici';
+
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+
+// Configure a long-lived Undici Agent to disable default timeouts for polling
+const longLivedAgent = new Agent({ headersTimeout: 0, bodyTimeout: 0 });
+setGlobalDispatcher(longLivedAgent);
 
 type VideoItem = {
   url?: string;
@@ -70,7 +78,9 @@ export async function GET(request: Request) {
       });
     }
 
-    return NextResponse.json(data);
+    const out = NextResponse.json(data);
+    out.headers.set('X-Route-Version', 'quiz-generate-video-status:v2');
+    return out;
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error';
     return NextResponse.json({ error: 'Failed to fetch job status', details: message }, { status: 500 });

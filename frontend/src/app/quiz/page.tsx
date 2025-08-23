@@ -208,77 +208,75 @@ function QuizPageContent() {
         }),
       });
       
-      const data = await response.json();
-      console.log('Video generation response:', data);
+      const kickoff = await response.json();
+      console.log('Video generation kickoff response:', kickoff);
       
       if (!response.ok) {
-        throw new Error(data.error || 'Failed to generate video');
+        throw new Error(kickoff.error || kickoff.message || 'Failed to start video generation');
       }
 
-      // If async job started, poll status until complete
-      if (data.job_id || data.status === 'processing') {
-        const jobId: string = data.job_id;
-        if (!jobId) {
-          throw new Error('Missing job id for async video generation');
-        }
-        const poll = async (): Promise<void> => {
-          try {
-            const statusRes = await fetch(`/api/generate-video-status?job_id=${encodeURIComponent(jobId)}`, {
-              cache: 'no-store'
-            });
-            const statusData = await statusRes.json();
-            if (!statusRes.ok) {
-              throw new Error(statusData?.error || 'Status check failed');
-            }
-            if (statusData.status === 'done') {
-              if (Array.isArray(statusData.videos) && statusData.videos.length > 0) {
-                const vid = statusData.videos[0];
-                if (vid?.url) {
-                  setVideoUrl(vid.url);
-                  return;
-                }
-              }
-              setVideoError('Video generated but no URL returned.');
-              return;
-            }
-            if (statusData.status === 'error') {
-              throw new Error(statusData.error || 'Video generation failed');
-            }
-            // Still processing; wait and poll again
-            setTimeout(poll, 3000);
-          } catch (e) {
-            setVideoError(e instanceof Error ? e.message : 'Failed to poll video status');
-          }
-        };
-        // Kick off polling and exit handler; UI will update when done
-        void poll();
-        return;
-      }
-
-      // If the response indicates all answers are correct, handle it gracefully
-      if (data.message && data.message.includes('All answers are correct')) {
-        setVideoError('Great job! All answers are correct. No video needed.');
-        return;
-      }
-      
-      // Handle different possible response formats (sync path)
-      if (data.videos && Array.isArray(data.videos) && data.videos.length > 0) {
-        const video = data.videos[0];
+      // Legacy synchronous response path (backend returned videos immediately)
+      if (kickoff && kickoff.videos && Array.isArray(kickoff.videos) && kickoff.videos.length > 0) {
+        const video = kickoff.videos[0];
         if (video && video.url) {
           setVideoUrl(video.url);
           return;
         }
       }
-      
-      // Fallback formats for backward compatibility
-      if (data.videoUrl || data.video_url) {
-        setVideoUrl(data.videoUrl || data.video_url);
+      if (kickoff.videoUrl || kickoff.video_url) {
+        setVideoUrl(kickoff.videoUrl || kickoff.video_url);
         return;
       }
-      
-      // If we get here, no valid video URL was found
-      console.error('No video URL found in response:', data);
-      throw new Error('No video URL was provided in the response. Please try again or contact support if the issue persists.');
+      if (kickoff.message && String(kickoff.message).includes('All answers are correct')) {
+        setVideoError('Great job! All answers are correct. No video needed.');
+        return;
+      }
+
+      // New async job flow: expect a job_id to poll
+      const jobId: string | undefined = kickoff.job_id || kickoff.jobId;
+      if (!jobId) {
+        throw new Error('No job_id returned from server.');
+      }
+
+      // Poll status endpoint until done/error with capped exponential backoff
+      let attempt = 0;
+      const maxAttempts = 120; // roughly up to ~10-15 minutes depending on backoff
+      while (attempt < maxAttempts) {
+        attempt += 1;
+        const statusRes = await fetch(`/api/generate-video-status?job_id=${encodeURIComponent(jobId)}`, {
+          cache: 'no-store'
+        });
+        const statusData = await statusRes.json();
+        console.log('Status poll', { attempt, status: statusData });
+
+        if (!statusRes.ok) {
+          throw new Error(statusData?.error || 'Failed to fetch job status');
+        }
+
+        const status = statusData.status as string | undefined;
+        if (status === 'done') {
+          const videos = statusData.videos as Array<{ url?: string }> | undefined;
+          if (videos && videos.length && videos[0]?.url) {
+            setVideoUrl(String(videos[0].url));
+            return;
+          }
+          const fallbackUrl = statusData.videoUrl || statusData.video_url;
+          if (fallbackUrl) {
+            setVideoUrl(String(fallbackUrl));
+            return;
+          }
+          throw new Error('Job finished but no video URL was provided.');
+        }
+        if (status === 'error') {
+          throw new Error(statusData?.error || 'Video generation failed');
+        }
+
+        // backoff: 2^n * 500ms, capped at 10s
+        const delayMs = Math.min(10000, 500 * Math.pow(2, Math.min(6, attempt - 1)));
+        await new Promise((r) => setTimeout(r, delayMs));
+      }
+
+      throw new Error('Video generation is taking longer than expected. Please try again later.');
     } catch (err) {
       console.error('Error generating video:', err);
       setVideoError(err instanceof Error ? err.message : 'Failed to generate video');
@@ -301,28 +299,8 @@ function QuizPageContent() {
     setError(null);
     
     try {
-      // Convert answers from {questionId: answerKey} to array of letters (a-d) in order
-      const answerArray = quiz.questions.map((question, idx) => {
-        const key = answers[question.id] || '';
-        if (!key) return '';
-        // If already a letter like 'a'/'A', normalize to lowercase
-        if (typeof key === 'string' && /^[a-dA-D]$/.test(key)) {
-          return key.toLowerCase();
-        }
-        // If key like 'option-0', map to a/b/c/d
-        const optIdxMatch = typeof key === 'string' && key.match(/^option-(\d+)$/);
-        if (optIdxMatch) {
-          const n = parseInt(optIdxMatch[1], 10);
-          return n >= 0 && n < 26 ? String.fromCharCode(97 + n) : '';
-        }
-        // If numeric index string, map to a/b/c/d
-        const asNum = parseInt(String(key), 10);
-        if (!isNaN(asNum)) {
-          return asNum >= 0 && asNum < 26 ? String.fromCharCode(97 + asNum) : '';
-        }
-        // Fallback empty
-        return '';
-      });
+      // Convert answers from {questionId: answer} to array of answers in order
+      const answerArray = quiz.questions.map(question => answers[question.id] || '');
       
       // Format questions for the backend
       const formattedQuestions = quiz.questions.map(q => ({
