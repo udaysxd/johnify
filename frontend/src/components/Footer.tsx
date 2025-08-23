@@ -32,7 +32,21 @@ export default function Footer() {
         </div>
 
         <div className="mt-6 pt-6 border-t border-gray-100 dark:border-gray-800 flex flex-col md:flex-row items-center justify-between gap-4">
-          <p className="text-xs text-gray-500 dark:text-gray-400">© {year} johnify. All rights reserved.</p>
+          <div className="text-center md:text-left">
+            <p className="text-xs text-gray-500 dark:text-gray-400">© {year} johnify. All rights reserved.</p>
+            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+              Images are powered by{' '}
+              <a
+                href="https://pollinations.ai"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="underline hover:text-gray-700 dark:hover:text-gray-200"
+                title="Pollinations.ai"
+              >
+                pollinations.ai
+              </a>
+            </p>
+          </div>
           <div className="flex items-center gap-4">
             {/* Social icons */}
             <a
@@ -60,7 +74,7 @@ export default function Footer() {
               </svg>
             </a>
             {/* Legal */}
-            <div className="flex items-center gap-4 text-xs">
+            <div className="flex items-center flex-wrap gap-4 text-xs">
               <Link href="/terms" className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200">Terms</Link>
               <span className="text-gray-300 dark:text-gray-700">•</span>
               <Link href="/privacy" className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200">Privacy</Link>

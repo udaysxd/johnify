@@ -52,6 +52,8 @@ class UserPost(Base):
     post_path = Column(String(500), nullable=True)
     created_on = Column(DateTime, default=datetime.utcnow, nullable=True)
     post_topic = Column(String(255), nullable=True)
+    # 'learn' or 'tutor'
+    type = Column(String(50), nullable=True)
     
     # Relationship to user
     user = relationship("User", back_populates="posts")

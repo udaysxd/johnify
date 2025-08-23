@@ -42,8 +42,12 @@ def get_video_files(user_id: int, db: Session) -> List[Dict[str, Any]]:
             # The post_path contains both directory and filename, e.g.:
             # 'generated/learn_why_are_women_not_safe_in_india_and_mexico_1753718382\learn_why_are_women_not_safe_in_india_and_mexico_1753718382.mp4'
             
-            # Normalize the path and split into components
-            normalized_path = post.post_path.replace('\\', '/').strip()
+            # Normalize the path and force it to be relative under generated/
+            normalized_path = (post.post_path or '').replace('\\', '/').strip()
+            if 'generated/' in normalized_path:
+                # Trim everything before the first occurrence of generated/
+                idx = normalized_path.find('generated/')
+                normalized_path = normalized_path[idx:]
             
             # Remove 'generated/' prefix if it exists
             if normalized_path.startswith('generated/'):
@@ -164,7 +168,11 @@ def _collect_videos_for_post(post: models.UserPost) -> Dict[str, Any]:
     from datetime import datetime
     # Normalize and locate video file within generated/<dir>
     normalized_path = (post.post_path or "").replace('\\', '/').strip()
-    if normalized_path.startswith('generated/'):
+    if 'generated/' in normalized_path:
+        # Keep only path from generated/
+        idx = normalized_path.find('generated/')
+        normalized_path = normalized_path[idx+len('generated/'):]
+    elif normalized_path.startswith('generated/'):
         normalized_path = normalized_path[10:]
     path_parts = normalized_path.split('/') if normalized_path else []
     directory_name = '/'.join(path_parts[:-1]) if path_parts else ''
@@ -195,7 +203,8 @@ def _collect_videos_for_post(post: models.UserPost) -> Dict[str, Any]:
     thumb_path = os.path.join(video_dir_path, "thumbnail.jpg")
     if os.path.exists(thumb_path):
         thumb_rel = f"{safe_dir}/thumbnail.jpg" if safe_dir else "thumbnail.jpg"
-        thumbnail_url = f"{base_url}/videos/{thumb_rel.replace('\\', '/').lstrip('/')}"
+        thumb_rel_clean = thumb_rel.replace('\\', '/').lstrip('/')
+        thumbnail_url = f"{base_url}/videos/{thumb_rel_clean}"
 
     return {
         "id": str(post.post_id),

@@ -275,46 +275,16 @@ session.mount("https://", adapter)
 
 def get_image_url(prompt: str, width: int = 800, height: int = 300) -> str:
     """
-    Generate an image using Pollinations AI with caching.
-    Returns a URL to the generated image or a placeholder if generation fails.
+    Return a deterministic placeholder image URL for slide images.
+    IMPORTANT: This function must NOT call Pollinations or any external API.
     """
-    # Simplify and clean the prompt
-    prompt = prompt.lower()
-    prompt = re.sub(r'[^\w\s-]', ' ', prompt)  # Remove special chars
-    words = [w for w in prompt.split() if len(w) > 3][:3]  # Get up to 3 meaningful words
-    if not words:
-        words = ['education', 'learning', 'concept']
-    
-    # Create a simple, reliable prompt
-    simple_prompt = ' '.join(words) + ' educational'
-    simple_prompt = simple_prompt[:50]  # Keep it short and sweet
-    
-    # Create a unique cache key
+    # Normalize prompt and derive a stable seed
+    prompt_norm = re.sub(r'[^\w\s-]', ' ', (prompt or '').lower())
+    words = [w for w in prompt_norm.split() if len(w) > 3][:3] or ['education', 'learning', 'concept']
+    simple_prompt = (' '.join(words) + ' educational')[:50]
     cache_key = hashlib.md5(simple_prompt.encode()).hexdigest()
-    cache_file = CACHE_DIR / f"{cache_key}.jpg"
-    
-    # Return cached image if it exists and is not empty
-    if cache_file.exists() and cache_file.stat().st_size > 0:
-        return f"https://picsum.photos/seed/{cache_key}/{width}/{height}"
-    
-    try:
-        # Try to generate a new image (using the session for better performance)
-        encoded_prompt = requests.utils.quote(simple_prompt)
-        image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}"
-        
-        response = session.get(image_url, timeout=10)  # Using the session here
-        response.raise_for_status()
-        
-        # Save the image to cache
-        with open(cache_file, 'wb') as f:
-            f.write(response.content)
-            
-        return f"https://picsum.photos/seed/{cache_key}/{width}/{height}"
-        
-    except Exception as e:
-        print(f"Error generating image: {e}")
-        # Fallback to a placeholder with a unique URL based on the prompt
-        return f"https://picsum.photos/seed/{cache_key}/{width}/{height}"
+    # Always return a placeholder; no network call here
+    return f"https://picsum.photos/seed/{cache_key}/{width}/{height}"
 
 def save_slides_to_md(slides: List[str], output_path: str) -> None:
     """

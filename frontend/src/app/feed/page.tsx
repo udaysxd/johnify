@@ -166,14 +166,16 @@ export default function FeedPage() {
                 >
                   <div className="relative pb-[56.25%] bg-black">
                     {video.thumbnailUrl ? (
-                      <Image
-                        className="w-full h-full object-cover"
-                        src={video.thumbnailUrl}
-                        alt={video.title}
-                        width={640}
-                        height={360}
-                        unoptimized
-                      />
+                      <div className="absolute inset-0">
+                        <Image
+                          src={video.thumbnailUrl}
+                          alt={video.title}
+                          fill
+                          className="object-cover"
+                          sizes="(max-width: 768px) 100vw, (max-width: 1200px) 50vw, 33vw"
+                          unoptimized
+                        />
+                      </div>
                     ) : (
                       <div className="w-full h-full bg-gradient-to-br from-blue-600 to-purple-600 flex flex-col items-center justify-center text-white p-4 text-center">
                         <div className="relative w-16 h-16 mb-4">
@@ -184,8 +186,7 @@ export default function FeedPage() {
                             </svg>
                           </div>
                         </div>
-                        <h3 className="text-lg font-semibold mb-1">Video Preview</h3>
-                        <p className="text-sm opacity-80">{video.title || 'Untitled Video'}</p>
+                        {/* No title text on top of the image, to match my-learning */}
                       </div>
                     )}
                     {video.status === 'processing' && (
@@ -205,15 +206,20 @@ export default function FeedPage() {
                       </div>
                     </div>
                   </div>
-                  <div className="p-4">
-                    <h3 className="text-lg font-medium text-gray-900 truncate">{video.title}</h3>
+                  <div className="mx-4 border-t border-gray-300" />
+                  <div className="px-4 pb-3 pt-3">
+                    <h3 className="text-base font-medium text-gray-900 truncate">
+                      {video.title || 'Untitled Video'}
+                    </h3>
                     {(() => {
                       const creatorName = extractCreatorName(video);
                       return creatorName ? (
-                        <p className="mt-1 text-sm text-gray-700 font-medium">{creatorName}</p>
+                        <p className="mt-0.5 text-sm text-gray-700 font-medium">{creatorName}</p>
                       ) : null;
                     })()}
-                    <p className="mt-1 text-sm text-gray-500">Created on {new Date(video.createdAt).toLocaleDateString()}</p>
+                    <p className="text-sm text-gray-500">
+                      Created on {new Date(video.createdAt).toLocaleDateString()}
+                    </p>
                   </div>
                 </div>
               ))}

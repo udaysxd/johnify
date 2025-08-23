@@ -311,7 +311,8 @@ ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 IS_PRODUCTION = ENVIRONMENT == "production"
 
 if IS_PRODUCTION:
-    base_dir = Path("/app")
+    # Cloud Run: container FS is read-only except /tmp. Use /tmp for generated artifacts.
+    base_dir = Path("/tmp")
 else:
     # Previous behavior: repo root three levels up from this file
     base_dir = Path(__file__).resolve().parent.parent.parent
@@ -793,6 +794,55 @@ class LearnVideoTask:
                 print(f"❌ Error generating video: {str(e)}")
                 raise
             
+            # Generate thumbnail.jpg (Pollinations only for thumbnail)
+            try:
+                thumb_path = os.path.join(self.output_dir, "thumbnail.jpg")
+                if not os.path.exists(thumb_path):
+                    prompt = f"clean minimal educational thumbnail for: {self.topic}"
+                    encoded = urllib.parse.quote(prompt[:200])
+                    url = f"https://image.pollinations.ai/prompt/{encoded}"
+                    print(f"🖼️ Generating thumbnail via Pollinations: {url}")
+                    resp = requests.get(url, timeout=20)
+                    resp.raise_for_status()
+                    with open(thumb_path, 'wb') as f:
+                        f.write(resp.content)
+                    # Basic sanity check
+                    if os.path.getsize(thumb_path) < 1024:
+                        raise RuntimeError("Thumbnail too small; treating as failure")
+                print(f"✅ Thumbnail saved: {thumb_path}")
+            except Exception as e:
+                print(f"⚠️ Pollinations thumbnail failed: {e}. Falling back to simple generated image.")
+                try:
+                    # Fallback: create a simple thumbnail with title text using PIL
+                    thumb_path = os.path.join(self.output_dir, "thumbnail.jpg")
+                    img = Image.new('RGB', (1280, 720), color=(20, 32, 48))
+                    draw = ImageDraw.Draw(img)
+                    title = self.topic[:60]
+                    # Try to load a font; fall back to default if unavailable
+                    try:
+                        font_path = _find_ttf_font([
+                            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                            r"C:\\Windows\\Fonts\\arialbd.ttf",
+                            r"C:\\Windows\\Fonts\\segoeuib.ttf",
+                        ])
+                        font = ImageFont.truetype(font_path, 56) if font_path else ImageFont.load_default()
+                    except Exception:
+                        font = ImageFont.load_default()
+                    # Center text
+                    try:
+                        bbox = draw.textbbox((0, 0), title, font=font)
+                        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                    except Exception:
+                        tw, th = draw.textlength(title, font=font), 56
+                    x = (1280 - tw) // 2
+                    y = (720 - th) // 2
+                    draw.text((x, y), title, fill=(235, 245, 255), font=font)
+                    img.save(thumb_path, format='JPEG', quality=85)
+                    print(f"✅ Fallback thumbnail saved: {thumb_path}")
+                except Exception as e2:
+                    print(f"❌ Failed to create fallback thumbnail: {e2}")
+            
             # Create a URL for the video
             video_url = f"/videos/learn_{self.safe_topic}_{self.timestamp}/{video_filename}"
             
@@ -841,7 +891,8 @@ class LearnVideoTask:
                         user_id=user.user_id,
                         post_path=video_path,  # Store the local file path
                         post_topic=self.topic,
-                        created_on=datetime.utcnow()
+                        created_on=datetime.utcnow(),
+                        type='learn'
                     )
                     
                     db.add(post)
@@ -1390,6 +1441,8 @@ class VideoRequest(BaseModel):
     topic: str
     questions: List[Dict[str, Any]]
     answers: Dict[str, str]
+    # Optional: helps us associate the generated quiz video with a user
+    user_email: Optional[str] = None
 
 class QuizRequest(BaseModel):
     topic: str = Field(..., description="The topic for the quiz")
@@ -1527,10 +1580,10 @@ def _generate_video_from_request(request: "VideoRequest") -> Dict[str, Any]:
         sanitized_topic = sanitize_filename(request.topic)
         if not sanitized_topic:
             sanitized_topic = f"quiz_review_{int(time.time())}"
+        ts = int(time.time())
             
-        # Create output directories under project root
-        base_dir = Path(__file__).parent.parent.parent  # Go up to project root
-        output_dir = base_dir / "generated" / sanitized_topic
+        # Create output directory under the globally configured generated_dir (timestamped to avoid collisions)
+        output_dir = Path(generated_dir) / f"quiz_{sanitized_topic}_{ts}"
         output_dir.mkdir(parents=True, exist_ok=True)
         
         # Define paths
@@ -1570,8 +1623,8 @@ def _generate_video_from_request(request: "VideoRequest") -> Dict[str, Any]:
             from . import pptx_gen
             t0 = time.time()
             print(f"[QUIZ VIDEO] Step 3: Marp CLI PNG export | md={md_path} -> dir={images_dir}")
-            # Increase timeout for production stability (5 minutes)
-            exported_pngs = pptx_gen.export_slides_to_png_with_marp(md_path, images_dir, timeout_seconds=300)
+            # Increase timeout for production stability (10 minutes)
+            exported_pngs = pptx_gen.export_slides_to_png_with_marp(md_path, images_dir, timeout_seconds=600)
             # Validate images actually exist
             from pathlib import Path as _Path
             png_count = len(exported_pngs) if exported_pngs else 0
@@ -1582,6 +1635,63 @@ def _generate_video_from_request(request: "VideoRequest") -> Dict[str, Any]:
             if png_count == 0:
                 raise RuntimeError("No slide images were generated by Marp PNG export")
             print(f"[QUIZ VIDEO] Step 3 done in {time.time() - t0:.2f}s | slides={png_count}")
+
+            # 3b. Create thumbnail: Pollinations first, then fallback to first slide
+            thumb_path = _Path(output_dir) / "thumbnail.jpg"
+            thumb_ok = False
+            # Try Pollinations (aligns with learn flow) with basic retries
+            try:
+                prompt = f"clean minimal educational thumbnail for: {request.topic} (quiz review)"
+                encoded = urllib.parse.quote(prompt[:200])
+                url = f"https://image.pollinations.ai/prompt/{encoded}"
+                headers = {"User-Agent": "Johnify/1.0 (+https://johnify.com)"}
+                print(f"[QUIZ VIDEO] Pollinations thumbnail: {url}")
+                last_err = None
+                for attempt in range(3):
+                    try:
+                        resp = requests.get(url, timeout=25, headers=headers)
+                        resp.raise_for_status()
+                        with open(thumb_path, 'wb') as f:
+                            f.write(resp.content)
+                        if thumb_path.exists() and thumb_path.stat().st_size > 1024:
+                            print(f"[QUIZ VIDEO] Thumbnail saved via Pollinations (attempt {attempt+1}): {thumb_path}")
+                            thumb_ok = True
+                            break
+                        else:
+                            last_err = RuntimeError("Thumbnail too small")
+                    except Exception as e:
+                        last_err = e
+                        time.sleep(1.0 * (attempt + 1))
+                if not thumb_ok and last_err:
+                    raise last_err
+            except Exception as e:
+                print(f"[QUIZ VIDEO] Pollinations thumbnail failed after retries: {e}")
+
+            if not thumb_ok:
+                try:
+                    from PIL import Image as _Image
+                    first_slide = sorted(_Path(images_dir).glob('slide_*.png'))[0]
+                    with _Image.open(first_slide) as im:
+                        im = im.convert('RGB')
+                        # Letterbox to 1280x720 while preserving aspect
+                        target_w, target_h = 1280, 720
+                        im_ratio = im.width / im.height
+                        tgt_ratio = target_w / target_h
+                        if im_ratio > tgt_ratio:
+                            new_w = target_w
+                            new_h = int(target_w / im_ratio)
+                        else:
+                            new_h = target_h
+                            new_w = int(target_h * im_ratio)
+                        im_resized = im.resize((new_w, new_h))
+                        canvas = _Image.new('RGB', (target_w, target_h), color=(20, 32, 48))
+                        x = (target_w - new_w) // 2
+                        y = (target_h - new_h) // 2
+                        canvas.paste(im_resized, (x, y))
+                        canvas.save(thumb_path, format='JPEG', quality=85)
+                    print(f"[QUIZ VIDEO] Thumbnail saved from first slide: {thumb_path}")
+                except Exception as e:
+                    print(f"[QUIZ VIDEO] ⚠️ Failed to create thumbnail from slide: {e}")
 
             # 4. Generate audio for each slide
             t0 = time.time()
@@ -1604,12 +1714,57 @@ def _generate_video_from_request(request: "VideoRequest") -> Dict[str, Any]:
             
             total_dur = time.time() - start_ts
             print(f"\n✅ QUIZ VIDEO: COMPLETED | out_dir={output_dir} | total_time={total_dur:.2f}s")
+
+            # Record quiz video in user_posts (type='tutor')
+            try:
+                from .database import SessionLocal
+                from .auth.models import User, UserPost
+                from sqlalchemy.exc import SQLAlchemyError, IntegrityError
+                from datetime import datetime as _dt
+                db = SessionLocal()
+                try:
+                    user = None
+                    if request.user_email:
+                        user = db.query(User).filter(User.user_email == request.user_email).first()
+                    if not user:
+                        # Fallback to first user (keeps parity with learn path)
+                        user = db.query(User).first()
+                    if user:
+                        # Store a stable relative path under generated/ using known pieces
+                        rel_post_path = f"generated/quiz_{sanitized_topic}_{ts}/{sanitized_topic}_explanation.mp4"
+                        post = UserPost(
+                            user_id=user.user_id,
+                            post_path=rel_post_path,
+                            post_topic=request.topic,
+                            created_on=_dt.utcnow(),
+                            type='tutor'
+                        )
+                        db.add(post)
+                        try:
+                            db.commit()
+                            db.refresh(post)
+                            print(f"✅ Saved quiz post to user_posts id={post.post_id} type='tutor'")
+                        except IntegrityError as ie:
+                            db.rollback()
+                            print(f"❌ Integrity error saving quiz post: {ie}")
+                        except Exception as e:
+                            db.rollback()
+                            print(f"❌ Error saving quiz post: {e}")
+                    else:
+                        print("⚠️ No user found to associate quiz post")
+                finally:
+                    try:
+                        db.close()
+                    except Exception:
+                        pass
+            except Exception as e:
+                print(f"⚠️ Failed to record quiz post: {e}")
             
         except Exception as e:
             print(f"\n❌ QUIZ VIDEO: ERROR | {str(e)}")
             raise
         
-        video_filename = f"{sanitized_topic}/{sanitized_topic}_explanation.mp4"
+        video_filename = f"quiz_{sanitized_topic}_{ts}/{sanitized_topic}_explanation.mp4"
         # Return in the format expected by the frontend
         return {
             "videos": [{

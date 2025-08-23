@@ -79,7 +79,20 @@ def markdown_to_pptx(md_path: Path, pptx_path: Path):
             MARP = find_marp_cli()
         except Exception as e:
             raise RuntimeError(f"Marp CLI not found: {e}")
-        chrome_path = os.environ.get('PUPPETEER_EXECUTABLE_PATH') or os.environ.get('CHROME_PATH') or '/usr/bin/chromium'
+        chrome_path_env = os.environ.get('PUPPETEER_EXECUTABLE_PATH') or os.environ.get('CHROME_PATH')
+        # On Windows, try to auto-detect Chrome/Edge if not provided
+        if not chrome_path_env and sys.platform == 'win32':
+            win_candidates = [
+                r"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+                r"C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+                r"C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+                r"C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+            ]
+            for p in win_candidates:
+                if os.path.exists(p):
+                    chrome_path_env = p
+                    break
+        # Build command with optional chrome-path only if it exists
         cmd = [
             MARP,
             str(md_path),
@@ -87,23 +100,25 @@ def markdown_to_pptx(md_path: Path, pptx_path: Path):
             '--theme', 'default',
             '--pptx',
             '--timeout', '180000',  # 3 minutes timeout
-            '--chrome-path', chrome_path,
             '--verbose',
             '--output', str(pptx_path)
         ]
+        if chrome_path_env and os.path.exists(chrome_path_env):
+            cmd.extend(['--chrome-path', chrome_path_env])
         
         print("\n🚀 Running Marp command:")
         print("  " + " ".join(f'"{arg}"' if ' ' in arg else arg for arg in cmd))
         
         env = os.environ.copy()
-        # Encourage Puppeteer to use system Chromium and be resilient in containers
-        env.setdefault('PUPPETEER_EXECUTABLE_PATH', chrome_path)
-        env.setdefault('PUPPETEER_SKIP_DOWNLOAD', '1')
-        env.setdefault('CHROME_NO_SANDBOX', '1')
-        env.setdefault('CHROME_DISABLE_GPU', '1')
-        # Some environments benefit from this flag to avoid /dev/shm limits
-        chromium_flags = '--no-sandbox --disable-gpu --disable-dev-shm-usage'
-        env.setdefault('CHROMIUM_FLAGS', chromium_flags)
+        # Only set PUPPETEER_EXECUTABLE_PATH if it points to a real file
+        if chrome_path_env and os.path.exists(chrome_path_env):
+            env.setdefault('PUPPETEER_EXECUTABLE_PATH', chrome_path_env)
+            env.setdefault('PUPPETEER_SKIP_DOWNLOAD', '1')
+        # Linux container hardening flags
+        if sys.platform != 'win32':
+            env.setdefault('CHROME_NO_SANDBOX', '1')
+            env.setdefault('CHROME_DISABLE_GPU', '1')
+            env.setdefault('CHROMIUM_FLAGS', '--no-sandbox --disable-gpu --disable-dev-shm-usage')
 
         result = subprocess.run(
             cmd,
@@ -176,22 +191,27 @@ def export_slides_to_png_with_marp(md_path: Path, out_dir: Path, timeout_seconds
         return pngs
 
     # Always run Marp CLI in the markdown's directory, output to local 'images' folder
-    chrome_path = os.environ.get('PUPPETEER_EXECUTABLE_PATH') or os.environ.get('CHROME_PATH') or '/usr/bin/chromium'
+    chrome_path_env = os.environ.get('PUPPETEER_EXECUTABLE_PATH') or os.environ.get('CHROME_PATH')
     cmd = [
         MARP, 
         md_path.name, 
         "--images", "png", 
         "--output", "images",
-        "--allow-local-files",  # Allow local file access
-        "--html",                # Generate HTML first which is generally more stable
+        "--allow-local-files",
+        "--html",
         "--timeout", str(timeout_seconds * 1000),
-        "--chrome-path", chrome_path,
         "--verbose",
-        "--",  # pass raw flags to Chromium
-        "--no-sandbox",
-        "--disable-gpu",
-        "--disable-dev-shm-usage"
     ]
+    if chrome_path_env and os.path.exists(chrome_path_env):
+        cmd.extend(["--chrome-path", chrome_path_env])
+    # Only add Chromium raw flags on non-Windows
+    if sys.platform != 'win32':
+        cmd.extend([
+            "--",
+            "--no-sandbox",
+            "--disable-gpu",
+            "--disable-dev-shm-usage"
+        ])
     
     print("\n🚀 Running Marp CLI for PNG export:")
     print(f"  Working directory: {md_path.parent}")
@@ -200,11 +220,14 @@ def export_slides_to_png_with_marp(md_path: Path, out_dir: Path, timeout_seconds
     try:
         # Run with timeout to prevent hanging
         env = os.environ.copy()
-        env.setdefault('PUPPETEER_EXECUTABLE_PATH', chrome_path)
-        env.setdefault('PUPPETEER_SKIP_DOWNLOAD', '1')
-        env.setdefault('CHROME_NO_SANDBOX', '1')
-        env.setdefault('CHROME_DISABLE_GPU', '1')
-        env.setdefault('CHROMIUM_FLAGS', '--no-sandbox --disable-gpu --disable-dev-shm-usage')
+        # Only configure Puppeteer executable if it's valid; otherwise let Marp manage Chromium
+        if chrome_path_env and os.path.exists(chrome_path_env):
+            env.setdefault('PUPPETEER_EXECUTABLE_PATH', chrome_path_env)
+            env.setdefault('PUPPETEER_SKIP_DOWNLOAD', '1')
+        if sys.platform != 'win32':
+            env.setdefault('CHROME_NO_SANDBOX', '1')
+            env.setdefault('CHROME_DISABLE_GPU', '1')
+            env.setdefault('CHROMIUM_FLAGS', '--no-sandbox --disable-gpu --disable-dev-shm-usage')
 
         result = subprocess.run(
             cmd,
@@ -216,9 +239,14 @@ def export_slides_to_png_with_marp(md_path: Path, out_dir: Path, timeout_seconds
             timeout=timeout_seconds,
             env=env
         )
-    except subprocess.TimeoutExpired:
-        print(f"⚠️  Marp CLI timed out after {timeout_seconds} seconds")
-        return pngs
+    except subprocess.TimeoutExpired as e:
+        # Surface timeout as an error for upstream handling
+        msg = (
+            f"Marp CLI timed out after {timeout_seconds} seconds while exporting PNGs.\n"
+            f"md_path={md_path} cwd={md_path.parent} command={' '.join(cmd)}"
+        )
+        print(f"⚠️  {msg}")
+        raise RuntimeError(msg) from e
     except Exception as e:
         print(f"⚠️  Error running Marp CLI: {e}")
         return pngs
