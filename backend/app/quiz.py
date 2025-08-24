@@ -194,43 +194,82 @@ async def generate_quiz(request: Request):
 def administer(answers, questions=None):
     """
     Grade quiz answers and identify wrong questions with detailed feedback.
-    Args:
-        answers: List of answer choices (a, b, c, or d) for each question
-        questions: List of question dicts (optional, for dynamic quizzes)
-    Returns:
-        dict: Contains score, total questions, wrong indices, and detailed wrong questions
+    Accepts diverse answer formats: 'a'/'A', 'b) Text', numbers 1-4 or 0-3, 'option-0..3', or full option text.
     """
     if questions is None:
         questions = mock_test()
     score = 0
     wrong_indices = []
     wrong_questions = []
+
+    def _normalize_user_key(ans, opts_list):
+        try:
+            s = str(ans).strip().lower()
+            if not s:
+                return ''
+            # 'option-<n>' pattern (0-based)
+            if s.startswith('option-'):
+                try:
+                    n = int(s.split('-', 1)[1])
+                    if 0 <= n <= 3:
+                        return chr(ord('a') + n)
+                except Exception:
+                    pass
+            # Direct letter
+            if s[0] in ('a','b','c','d'):
+                return s[0]
+            # Numeric indexes: allow '1'..'4' (1-based) and '0'..'3' (0-based)
+            if s[0].isdigit():
+                try:
+                    n = int(s.split()[0])
+                    if 1 <= n <= 4:
+                        return chr(ord('a') + (n - 1))
+                    if 0 <= n <= 3:
+                        return chr(ord('a') + n)
+                except Exception:
+                    pass
+            # Match against option text
+            norm_opts = []
+            for o in (opts_list or []):
+                o_str = str(o)
+                if len(o_str) >= 3 and o_str[:3].lower() in ("a) ", "b) ", "c) ", "d) "):
+                    norm_opts.append(o_str[3:].strip().lower())
+                else:
+                    norm_opts.append(o_str.strip().lower())
+            try:
+                idx = norm_opts.index(s)
+                if 0 <= idx < 4:
+                    return chr(ord('a') + idx)
+            except ValueError:
+                pass
+        except Exception:
+            return ''
+        return ''
+
     print(f"\n📝 Grading answers: {answers}")
     for i, answer in enumerate(answers):
         if i >= len(questions):
             print(f"⚠️ More answers ({len(answers)}) than questions ({len(questions)})")
             break
         question = questions[i]
-        correct = question.get("a")
-        user_answer = answer.strip().lower() if answer else ""
-        print(f"  Q{i+1}: Given '{user_answer}', Correct is '{correct}'", end="")
-        if user_answer == (correct.lower() if correct else ""):
+        correct = (question.get("a") or '').strip().lower()[:1]
+        opts = question.get("opts") or question.get("options") or []
+        if isinstance(opts, dict):
+            opts = [f"{k}) {v}" for k, v in opts.items()]
+        if not isinstance(opts, list):
+            print(f"[WARN] Question opts is not a list: {opts}")
+            opts = []
+        user_key = _normalize_user_key(answer, opts)
+        print(f"  Q{i+1}: Given '{answer}', Normalized '{user_key}', Correct is '{correct}'", end="")
+        if user_key == correct:
             score += 1
             print(" ✅")
         else:
             # Get the full text of the correct answer
-            opts = question.get("opts") or question.get("options") or []
-            if isinstance(opts, dict):
-                # Convert dict to list of strings like ['a) Laos', 'b) Cambodia', ...]
-                opts = [f"{k}) {v}" for k, v in opts.items()]
-            if not isinstance(opts, list):
-                print(f"[WARN] Question opts is not a list: {opts}")
-                opts = []
             correct_answer_text = ""
             try:
-                correct_opt_index = ord(correct.lower()) - ord('a') if correct else -1
+                correct_opt_index = ord(correct) - ord('a') if correct else -1
                 if 0 <= correct_opt_index < len(opts):
-                    # Strip 'a) ' prefix if present
                     opt_val = opts[correct_opt_index]
                     correct_answer_text = opt_val[3:] if opt_val[:3].lower() in ["a) ", "b) ", "c) ", "d) "] else opt_val
             except Exception as e:
@@ -238,9 +277,9 @@ def administer(answers, questions=None):
                 correct_answer_text = ""
             # Get the user's selected answer text
             user_answer_text = ""
-            if user_answer:
+            if user_key:
                 try:
-                    user_opt_index = ord(user_answer[0].lower()) - ord('a')
+                    user_opt_index = ord(user_key) - ord('a')
                     if 0 <= user_opt_index < len(opts):
                         opt_val = opts[user_opt_index]
                         user_answer_text = opt_val[3:] if opt_val[:3].lower() in ["a) ", "b) ", "c) ", "d) "] else opt_val
@@ -251,11 +290,13 @@ def administer(answers, questions=None):
             wrong_question = {
                 "question": question.get("q") or question.get("question", ""),
                 "correct_answer": correct,
-                "user_answer": user_answer if user_answer else "(No answer provided)",
+                "user_answer": user_key if user_key else "(No answer provided)",
                 "options": opts,
                 "explanation": question.get("explanation", ""),
                 "correct_answer_text": correct_answer_text,
                 "user_answer_text": user_answer_text,
+                "correct_letter": correct,
+                "user_letter": user_key,
                 "question_number": i + 1
             }
             wrong_indices.append(i)

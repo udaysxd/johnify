@@ -61,6 +61,24 @@ function TutorPageContent() {
   const [result, setResult] = useState<QuizResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isClient, setIsClient] = useState(false);
+  const funFacts = [
+    'Your brain uses about 20% of your body\'s energy—even at rest.',
+    'Learning something new builds fresh neural connections.',
+    'Short breaks improve focus and memory retention.',
+    'Explaining a topic to others boosts your understanding.',
+    'Sleep consolidates memories—review before bedtime!',
+    'Curiosity triggers dopamine, enhancing learning.',
+  ];
+  const [factIndex, setFactIndex] = useState(0);
+
+  // Rotate fun facts while generating video
+  useEffect(() => {
+    if (!isGeneratingVideo) return;
+    const id = setInterval(() => {
+      setFactIndex((i) => (i + 1) % funFacts.length);
+    }, 3000);
+    return () => clearInterval(id);
+  }, [isGeneratingVideo, funFacts.length]);
 
   useEffect(() => {
     setIsClient(true);
@@ -347,40 +365,49 @@ function TutorPageContent() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 p-4">
+    <div className="min-h-screen bg-gray-50">
+      <div className="py-12 px-4 sm:px-6 lg:px-8">
+        <div className="max-w-3xl mx-auto">
       {!quiz ? (
-        <div className="max-w-2xl mx-auto bg-white rounded-lg shadow-md p-6">
-          <h1 className="text-2xl font-bold text-gray-800 mb-6">Tutor: Create a personalised tutor for me</h1>
+        <div className="bg-white shadow rounded-lg p-6">
+          <div className="text-center mb-6">
+            <h1 className="text-3xl font-bold text-gray-900 mb-2">Personal Tutor</h1>
+            <p className="text-gray-600">Get a short assessment and a personalised explainer video</p>
+          </div>
           {error && (
             <div className="mb-4 p-4 bg-red-50 text-red-700 rounded-md">{error}</div>
           )}
-          <div className="mb-6">
-            <label htmlFor="topic" className="block text-sm font-medium text-gray-700 mb-2">
-              Enter a topic you would like to be assessed on:
+          <div className="mb-2">
+            <label htmlFor="topic" className="block text-sm font-medium text-gray-700 mb-1">
+              What topic would you like to be assessed on?
             </label>
-            <div className="flex gap-2">
-              <input
-                type="text"
-                id="topic"
-                value={quizTopic}
-                onChange={(e) => setQuizTopic(e.target.value)}
-                placeholder="e.g., Jazz Music, Ancient Rome, World History"
-                className="flex-1 px-4 py-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
-              />
-              <button
-                onClick={generateQuiz}
-                disabled={!quizTopic.trim() || isLoading}
-                className="px-6 py-2 bg-blue-600 text-white font-medium rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {isLoading ? 'Generating...' : 'Start Assessment'}
-              </button>
-            </div>
+            <input
+              type="text"
+              id="topic"
+              value={quizTopic}
+              onChange={(e) => setQuizTopic(e.target.value)}
+              placeholder="e.g., Jazz Music, Ancient Rome, World History"
+              className="w-full px-4 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
+              disabled={isLoading}
+            />
+          </div>
+          <div>
+            <button
+              onClick={generateQuiz}
+              disabled={!quizTopic.trim() || isLoading}
+              className={`w-full flex justify-center py-3 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white ${
+                !quizTopic.trim() || isLoading ? 'bg-indigo-300 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700'
+              } focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500`}
+            >
+              {isLoading ? 'Generating Assessment...' : 'Start Assessment'}
+            </button>
           </div>
         </div>
       ) : !result ? (
-        <div className="max-w-3xl mx-auto bg-white rounded-lg shadow-md overflow-hidden">
-          <div className="p-6 border-b border-gray-200">
+        <div className="bg-white shadow rounded-lg overflow-hidden">
+          <div className="p-6 border-b border-gray-200 text-center">
             <h1 className="text-2xl font-bold text-gray-800">Tutor Quiz: {quiz.topic}</h1>
+            <p className="text-gray-600 mt-1">Answer the questions to unlock your personalised video</p>
           </div>
 
           {error && <div className="bg-red-50 text-red-700 p-4">{error}</div>}
@@ -449,51 +476,79 @@ function TutorPageContent() {
               );
             })}
           </div>
-
           <div className="px-6 py-4 bg-gray-50 border-t border-gray-200 flex justify-end">
             <button
               onClick={submitQuiz}
               disabled={Object.keys(answers).length < quiz.questions.length || isLoading}
-              className="px-6 py-2 bg-blue-600 text-white font-medium rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed"
+              className={`px-6 py-2 text-white font-medium rounded-md focus:outline-none focus:ring-2 focus:ring-offset-2 ${
+                Object.keys(answers).length < quiz.questions.length || isLoading
+                  ? 'bg-indigo-300 cursor-not-allowed'
+                  : 'bg-indigo-600 hover:bg-indigo-700 focus:ring-indigo-500'
+              }`}
             >
               {isLoading ? 'Submitting...' : 'Submit Quiz'}
             </button>
           </div>
         </div>
       ) : (
-        <div className="max-w-3xl mx-auto">
-          <div className="bg-white rounded-lg shadow-md overflow-hidden mb-8">
-            <div className="p-6 bg-gradient-to-r from-blue-600 to-blue-700 text-white">
-              <h1 className="text-2xl font-bold">Tutor Results</h1>
-              <p className="mt-2 opacity-90">You scored {result.score} out of {result.total}&#33;</p>
+        <div>
+          <div className="bg-white rounded-lg shadow overflow-hidden mb-8">
+            <div className="p-6 border-b border-gray-200 text-center">
+              <h1 className="text-2xl font-bold text-gray-900">Tutor Results</h1>
+              <p className="mt-2 text-gray-700">You scored {result!.score} out of {result!.total}!</p>
             </div>
-
             <div className="p-6">
-              {result.wrongAnswers.length > 0 ? (
+              {result!.wrongAnswers.length > 0 ? (
                 <div>
                   <div className="flex justify-between items-center mb-6">
                     <h2 className="text-lg font-medium text-gray-900">Areas for Improvement</h2>
                     <button
                       onClick={generateVideo}
                       disabled={isGeneratingVideo}
-                      className={`px-4 py-2 bg-green-600 text-white text-sm font-medium rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 ${isGeneratingVideo ? 'opacity-50 cursor-not-allowed' : ''}`}
+                      className={`px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-md hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 ${isGeneratingVideo ? 'opacity-50 cursor-not-allowed' : ''}`}
                     >
                       {isGeneratingVideo ? 'Generating...' : 'Generate Video'}
                     </button>
                   </div>
                   <div className="space-y-3">
-                    {result.wrongAnswers.map((wrong, index) => (
-                      <div key={`wrong-${index}`} className="flex items-center p-3 bg-gray-50 rounded-md border border-gray-200">
-                        <div className="flex-shrink-0 h-5 w-5 text-red-500">
-                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-                            <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.28 7.22a.75.75 0 00-1.06 1.06L8.94 10l-1.72 1.72a.75.75 0 101.06 1.06L10 11.06l1.72 1.72a.75.75 0 101.06-1.06L11.06 10l1.72-1.72a.75.75 0 00-1.06-1.06L10 8.94 8.28 7.22z" clipRule="evenodd" />
-                          </svg>
+                    {result!.wrongAnswers.map((wrong: { question: string; userAnswer?: string; correctAnswer: string; explanation?: string; }, index: number) => (
+                      <div key={`wrong-${index}`} className="p-4 bg-gray-50 rounded-md border border-gray-200">
+                        <div className="flex items-start">
+                          <div className="flex-shrink-0 h-5 w-5 text-red-500 mt-0.5">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+                              <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.28 7.22a.75.75 0 00-1.06 1.06L8.94 10l-1.72 1.72a.75.75 0 101.06 1.06L10 11.06l1.72 1.72a.75.75 0 101.06-1.06L11.06 10l1.72-1.72a.75.75 0 00-1.06-1.06L10 8.94 8.28 7.22z" clipRule="evenodd" />
+                            </svg>
+                          </div>
+                          <div className="ml-3 text-sm text-gray-700">
+                            <p className="font-medium">{wrong.question}</p>
+                            {wrong.userAnswer && (
+                              <p className="mt-1"><span className="font-semibold">Your answer:</span> {wrong.userAnswer}</p>
+                            )}
+                            {wrong.correctAnswer && (
+                              <p className="mt-0.5"><span className="font-semibold">Correct answer:</span> {wrong.correctAnswer}</p>
+                            )}
+                            {wrong.explanation && (
+                              <p className="mt-0.5 text-gray-600"><span className="font-semibold">Explanation:</span> {wrong.explanation}</p>
+                            )}
+                          </div>
                         </div>
-                        <p className="ml-3 text-sm font-medium text-gray-700">{wrong.question}</p>
                       </div>
                     ))}
                   </div>
-                  {videoError && <div className="mt-4 text-sm text-red-600">{videoError}</div>}
+                  {videoError && <div className="mt-4 p-3 bg-red-50 text-red-700 rounded-md text-sm">{videoError}</div>}
+                  {isGeneratingVideo && (
+                    <div className="mt-6 p-4 bg-white border border-gray-200 rounded-lg">
+                      <h3 className="text-md font-semibold mb-2 text-gray-900">Fun facts while you wait</h3>
+                      <div className="min-h-[48px] flex items-center justify-center text-gray-700 text-sm transition-all">
+                        {funFacts[factIndex]}
+                      </div>
+                      <div className="mt-2 flex justify-center gap-1">
+                        {funFacts.map((_, i) => (
+                          <span key={i} className={`h-1.5 w-1.5 rounded-full ${i === factIndex ? 'bg-indigo-600' : 'bg-gray-300'}`}></span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                   {videoUrl && (
                     <div className="mt-6">
                       <h3 className="text-md font-semibold mb-2">Your Video</h3>
@@ -518,7 +573,7 @@ function TutorPageContent() {
                     <button
                       onClick={generateVideo}
                       disabled={isGeneratingVideo}
-                      className={`inline-flex items-center px-4 py-2 bg-green-600 text-white text-sm font-medium rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 ${isGeneratingVideo ? 'opacity-50 cursor-not-allowed' : ''}`}
+                      className={`inline-flex items-center px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-md hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 ${isGeneratingVideo ? 'opacity-50 cursor-not-allowed' : ''}`}
                     >
                       <svg className="-ml-1 mr-2 h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
@@ -526,7 +581,20 @@ function TutorPageContent() {
                       </svg>
                       {isGeneratingVideo ? 'Generating Video...' : 'Generate Video'}
                     </button>
-                    {videoError && <div className="mt-2 text-sm text-red-600">{videoError}</div>}
+                    {videoError && <div className="mt-2 p-3 bg-red-50 text-red-700 rounded-md text-sm">{videoError}</div>}
+                    {isGeneratingVideo && (
+                      <div className="mt-4 p-4 bg-white border border-gray-200 rounded-lg">
+                        <h3 className="text-md font-semibold mb-2 text-gray-900">Fun facts while you wait</h3>
+                        <div className="min-h-[48px] flex items-center justify-center text-gray-700 text-sm transition-all">
+                          {funFacts[factIndex]}
+                        </div>
+                        <div className="mt-2 flex justify-center gap-1">
+                          {funFacts.map((_, i) => (
+                            <span key={i} className={`h-1.5 w-1.5 rounded-full ${i === factIndex ? 'bg-indigo-600' : 'bg-gray-300'}`}></span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                     {videoUrl && (
                       <div className="mt-6">
                         <h3 className="text-md font-semibold mb-2">Your Video</h3>
@@ -544,6 +612,11 @@ function TutorPageContent() {
           </div>
         </div>
       )}
+        <div className="mt-8 text-center text-sm text-gray-500">
+          <p>Note: Video generation may take a few moments. Please be patient.</p>
+        </div>
+      </div>
+    </div>
     </div>
   );
 }

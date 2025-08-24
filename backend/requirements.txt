@@ -67,3 +67,4 @@ pydantic[email]==1.10.13
 # PostgreSQL driver for SQLAlchemy
 pg8000>=1.16.6,<2.0.0
 openai>=1.0.0,<2.0.0
+requests>=2.31.0,<3.0.0

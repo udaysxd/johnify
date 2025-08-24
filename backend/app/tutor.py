@@ -6,10 +6,13 @@ import time
 import re
 import subprocess
 from pathlib import Path
+import os
+
+import requests
 
 from .slidegen import get_deepseek_client, generate_slide_markdown, save_slides_to_md
-from .pptx_gen import export_slides_to_png_with_marp
 from google.cloud import texttospeech
+from PIL import Image
 
 router = APIRouter(prefix="/api/tutor", tags=["tutor"]) 
 
@@ -121,32 +124,71 @@ def administer(answers, questions=None):
     score = 0
     wrong_indices = []
     wrong_questions = []
+    
+    def _normalize_user_key(ans: Any, opts_list: list[str]) -> str:
+        """Return a normalized letter 'a'..'d' for diverse user inputs.
+        Accepts: 'a'/'A', 'b) Paris', '2', 1-based or 0-based numbers, or full option text.
+        """
+        try:
+            s = str(ans).strip().lower()
+            if not s:
+                return ''
+            # Direct letter
+            if s[0] in ('a','b','c','d'):
+                return s[0]
+            # Numeric indexes: allow '1'..'4' (1-based) and '0'..'3' (0-based)
+            if s[0].isdigit():
+                n = int(s.split()[0])
+                if 1 <= n <= 4:
+                    return chr(ord('a') + (n - 1))
+                if 0 <= n <= 3:
+                    return chr(ord('a') + n)
+            # Match against option text
+            norm_opts = []
+            for o in (opts_list or []):
+                o_str = str(o)
+                # strip leading 'a) ' style label
+                if len(o_str) >= 3 and o_str[:3].lower() in ("a) ", "b) ", "c) ", "d) "):
+                    norm_opts.append(o_str[3:].strip().lower())
+                else:
+                    norm_opts.append(o_str.strip().lower())
+            try:
+                idx = norm_opts.index(s)
+                if 0 <= idx < 4:
+                    return chr(ord('a') + idx)
+            except ValueError:
+                pass
+        except Exception:
+            return ''
+        return ''
     for i, answer in enumerate(answers):
         if i >= len(questions):
             break
         question = questions[i]
-        correct = question.get("a")
-        user_answer = answer.strip().lower() if answer else ""
-        if user_answer == (correct.lower() if correct else ""):
+        correct = (question.get("a") or '').strip().lower()[:1]
+        # Normalize opts to a list of strings
+        opts = question.get("opts") or []
+        if isinstance(opts, dict):
+            opts = [f"{k}) {v}" for k, v in opts.items()]
+        if not isinstance(opts, list):
+            opts = []
+
+        user_answer_key = _normalize_user_key(answer, opts)
+        if user_answer_key == correct:
             score += 1
         else:
-            opts = question.get("opts") or []
-            if isinstance(opts, dict):
-                opts = [f"{k}) {v}" for k, v in opts.items()]
-            if not isinstance(opts, list):
-                opts = []
             correct_answer_text = ""
             try:
-                correct_opt_index = ord(correct.lower()) - ord('a') if correct else -1
+                correct_opt_index = ord(correct) - ord('a') if correct else -1
                 if 0 <= correct_opt_index < len(opts):
                     opt_val = opts[correct_opt_index]
                     correct_answer_text = opt_val[3:] if opt_val[:3].lower() in ["a) ", "b) ", "c) ", "d) "] else opt_val
             except Exception:
                 correct_answer_text = ""
             user_answer_text = ""
-            if user_answer:
+            if user_answer_key:
                 try:
-                    user_opt_index = ord(user_answer[0].lower()) - ord('a')
+                    user_opt_index = ord(user_answer_key) - ord('a')
                     if 0 <= user_opt_index < len(opts):
                         opt_val = opts[user_opt_index]
                         user_answer_text = opt_val[3:] if opt_val[:3].lower() in ["a) ", "b) ", "c) ", "d) "] else opt_val
@@ -155,11 +197,14 @@ def administer(answers, questions=None):
             wrong_question = {
                 "question": question.get("q") or question.get("question", ""),
                 "correct_answer": correct,
-                "user_answer": user_answer if user_answer else "(No answer provided)",
+                "user_answer": user_answer_key if user_answer_key else "(No answer provided)",
                 "options": opts,
                 "explanation": question.get("explanation", ""),
                 "correct_answer_text": correct_answer_text,
                 "user_answer_text": user_answer_text,
+                # explicit for UI convenience
+                "correct_letter": correct,
+                "user_letter": user_answer_key,
                 "question_number": i + 1
             }
             wrong_indices.append(i)
@@ -253,106 +298,282 @@ def _tutor_generate_video_from_request(request: TutorVideoRequest) -> Dict[str, 
     md_file = output_dir / "slides.md"
     save_slides_to_md(slides, str(md_file))
 
-    # 2) Narration
+    # 2) Narration (reuse helper from learn pipeline)
     from .main import generate_narration  # reuse helper
     narrations = generate_narration(slides) or ["Please review this concept carefully."] * len(slides)
 
-    # 3) TTS
-    tts_client = texttospeech.TextToSpeechClient()
-    for idx, narration in enumerate(narrations, 1):
-        speech = tts_client.synthesize_speech(
-            input=texttospeech.SynthesisInput(text=narration),
-            voice=texttospeech.VoiceSelectionParams(language_code="en-GB", name="en-GB-Standard-A"),
-            audio_config=texttospeech.AudioConfig(audio_encoding=texttospeech.AudioEncoding.MP3)
-        )
-        audio_file = audio_dir / f"slide_{idx:03d}.mp3"
-        with open(audio_file, "wb") as out:
-            out.write(speech.audio_content)
+    # 3) Generate slide images using the learn pipeline's Python approach
+    #    Import locally to avoid circular imports
+    from .main import create_simple_slide
+    try:
+        # Read the markdown file content
+        with open(md_file, 'r', encoding='utf-8') as f:
+            markdown_content = f.read()
 
-    # 4) Slide PNGs via Marp
-    export_slides_to_png_with_marp(md_file, images_dir)
+        # Remove YAML front matter
+        markdown_content = re.sub(r'^---\n.*?\n---\n', '', markdown_content, flags=re.DOTALL)
 
-    # 5) Stitch to video
+        # Split into slides
+        slide_contents = [s.strip() for s in markdown_content.split('---') if s.strip()]
+
+        # Generate an image for each slide
+        for i, slide_content in enumerate(slide_contents, 1):
+            slide_content = slide_content.strip()
+            if not slide_content:
+                continue
+
+            # Remove any remaining HTML comments (narration)
+            slide_content = re.sub(r'<!--.*?-->', '', slide_content, flags=re.DOTALL)
+
+            # Default title
+            title = f"Slide {i}"
+            content_lines = []
+
+            # Extract title from '## '
+            for line in slide_content.split('\n'):
+                line = line.strip()
+                if not line:
+                    continue
+                if line.startswith('## '):
+                    if title == f"Slide {i}":
+                        title = line[3:].strip()
+                        continue
+                content_lines.append(line)
+
+            slide_content = '\n'.join(content_lines)
+
+            output_path = images_dir / f"slide_{i:03d}.png"
+            create_simple_slide(slide_content, str(output_path), title=title)
+
+        # Verify images were created
+        png_files_check = sorted(images_dir.glob("*.png"))
+        if not png_files_check:
+            raise FileNotFoundError("No slide images were generated")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate slide images: {e}")
+
+    # 4) TTS using shared helper (matches learn pipeline behavior)
+    try:
+        from . import tts as tts_mod
+        audio_dir_path = tts_mod.narrations_to_mp3(narrations, str(audio_dir))
+        # Ensure filenames align with stitching expectations: tts creates sXXX.mp3
+        # The stitcher is robust (matches *.mp3); no renaming needed
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate audio: {e}")
+
+    # Optional: Generate AI background via Hugging Face (SD 3.5 Medium)
+    def _maybe_generate_ai_bg(topic: str, out_dir: Path) -> Dict[str, Any]:
+        try:
+            enabled = str(os.getenv("TUTOR_BG_ENABLED", "false")).lower() in ("1", "true", "yes")
+            if not enabled:
+                return {"attempted": False, "path": None, "error": "disabled", "status": "skipped"}
+            hf_token = os.getenv("HUGGINGFACE_TOKEN")
+            if not hf_token:
+                print("[tutor] AI background enabled but HUGGINGFACE_TOKEN not set; skipping")
+                return {"attempted": True, "path": None, "error": "no_token", "status": "skipped"}
+            model_env = os.getenv("TUTOR_BG_MODEL", "stabilityai/stable-diffusion-3.5-medium")
+            prompt = f"cinematic, minimalist, high-contrast background related to: {topic}. no text, safe, clean, 16:9 composition"
+            negative = os.getenv("TUTOR_BG_NEGATIVE", "nsfw, text, watermark, logo, low quality, blurry")
+
+            headers = {"Authorization": f"Bearer {hf_token}"}
+            payload = {
+                "inputs": prompt,
+                "parameters": {
+                    "negative_prompt": negative,
+                    "guidance_scale": 6.5,
+                    "num_inference_steps": 20,
+                    "width": 1280,
+                    "height": 720
+                }
+            }
+
+            # Output path for the generated background image
+            out_path = out_dir / "bg_sd.jpg"
+
+            # Try the requested model first, then fallbacks if 404/403
+            candidate_models = [model_env,
+                                "stabilityai/sdxl-turbo",
+                                "stabilityai/stable-diffusion-xl-base-1.0",
+                                "runwayml/stable-diffusion-v1-5"]
+            # The HF Inference API may return 202 for cold-start; retry a few times per model
+            for model in candidate_models:
+                url = f"https://api-inference.huggingface.co/models/{model}"
+                print(f"[tutor] Trying HF model: {model}")
+                max_attempts = 6
+                for attempt in range(1, max_attempts + 1):
+                    resp = requests.post(url, headers=headers, json=payload, timeout=120)
+                    ctype = resp.headers.get("content-type", "")
+                    print(f"[tutor] HF response status={resp.status_code} content-type={ctype}")
+                    if resp.status_code == 200 and resp.content and ctype.startswith("image"):
+                        with open(out_path, "wb") as f:
+                            f.write(resp.content)
+                        size = out_path.stat().st_size if out_path.exists() else 0
+                        print(f"[tutor] Saved AI background to {out_path} size={size} via model={model}")
+                        return {"attempted": True, "path": out_path, "error": None, "status": "ok", "bytes": size, "model": model}
+                    if resp.status_code == 200 and ctype.startswith("application/json"):
+                        try:
+                            print(f"[tutor] HF JSON: {resp.text[:300]}")
+                        except Exception:
+                            pass
+                        # Treat JSON as failure for this attempt
+                    if resp.status_code == 202:
+                        sleep_s = min(10, 1 + attempt * 2)
+                        print(f"[tutor] HF model loading (202). attempt={attempt}/{max_attempts}; sleeping {sleep_s}s")
+                        time.sleep(sleep_s)
+                        continue
+                    if resp.status_code in (403, 404):
+                        print(f"[tutor] HF model unavailable ({resp.status_code}) for {model}. Trying next fallback...")
+                        break  # try next model
+                    # Other errors: log and break to next model
+                    try:
+                        print(f"[tutor] HF error {resp.status_code}: {resp.text[:300]}")
+                    except Exception:
+                        pass
+                    break
+        except Exception as e:
+            print(f"[tutor] Failed to generate AI background: {e}")
+        return {"attempted": enabled, "path": None, "error": "exception", "status": "error"}
+
+    ai_bg_info = _maybe_generate_ai_bg(request.topic, output_dir)
+    ai_bg_path: Optional[Path] = ai_bg_info.get("path") if isinstance(ai_bg_info, dict) else None
+
+    # 5) Choose background image for video (thumbnail background): SD -> Pollinations -> first slide
     png_files = sorted(images_dir.glob("*.png"))
     if not png_files:
         raise HTTPException(status_code=500, detail="No slide images found")
 
+    bg_img_path: Optional[Path] = None
+    if ai_bg_path and isinstance(ai_bg_path, Path) and ai_bg_path.exists():
+        bg_img_path = ai_bg_path
+        print(f"[tutor] Using SD background for video: {bg_img_path}")
+    else:
+        # Try Pollinations to fetch a background
+        try:
+            import urllib.parse
+            prompt = f"clean minimal educational thumbnail for: {request.topic} (tutor review)"
+            encoded = urllib.parse.quote(prompt[:200])
+            url = f"https://image.pollinations.ai/prompt/{encoded}"
+            headers = {"User-Agent": "Johnify/1.0 (+https://johnify.com)"}
+            out_bg = output_dir / "bg_pollinations.jpg"
+            print(f"[tutor] Trying Pollinations background: {url}")
+            last_err = None
+            for attempt in range(3):
+                try:
+                    resp = requests.get(url, headers=headers, timeout=20)
+                    resp.raise_for_status()
+                    out_bg.write_bytes(resp.content)
+                    if out_bg.exists() and out_bg.stat().st_size > 1024:
+                        bg_img_path = out_bg
+                        print(f"[tutor] Background saved via Pollinations (attempt {attempt+1}): {out_bg}")
+                        break
+                    else:
+                        last_err = RuntimeError("Background too small")
+                except Exception as e:
+                    last_err = e
+                    time.sleep(1.0 * (attempt + 1))
+            if not bg_img_path and last_err:
+                raise last_err
+        except Exception as e:
+            print(f"[tutor] Pollinations background failed after retries: {e}")
+
+    if not bg_img_path:
+        bg_img_path = png_files[0]
+        print(f"[tutor] Fallback background set to first slide: {bg_img_path}")
+
+    # 6) Stitch to video with background + transparent slide overlay
+    video_file = output_dir / "lesson_video.mp4"
     temp_dir = output_dir / "temp_segments"
     temp_dir.mkdir(exist_ok=True)
 
-    # Use the first slide PNG as a background thumbnail for subtle motion
-    bg_thumb = png_files[0]
+    # Collect audio files generated by tts (sXXX.mp3) and match with slides
+    mp3_files = sorted(audio_dir.glob("*.mp3"))
+    pair_n = min(len(png_files), len(mp3_files))
+    if pair_n == 0:
+        raise HTTPException(status_code=500, detail="No matching slides/audio found")
 
-    # Create segments
     segments = []
-    for i, png in enumerate(png_files, 1):
-        mp3 = audio_dir / f"slide_{i:03d}.mp3"
-        # duration via ffprobe
+    for i in range(pair_n):
+        png = png_files[i]
+        mp3 = mp3_files[i]
+        seg_path = temp_dir / f"segment_{i+1:03d}.mp4"
         try:
-            result = subprocess.run([
-                "ffprobe", "-v", "error", "-show_entries",
-                "format=duration", "-of", "default=noprint_wrappers=1:nokey=1",
-                str(mp3.absolute())
-            ], capture_output=True, text=True, check=True)
-            duration = float(result.stdout.strip())
-        except Exception:
-            duration = 5.0
-        seg_path = temp_dir / f"segment_{i:03d}.mp4"
-        frames = max(1, int(duration * 30))
-        # Build a GPU-free animation pipeline:
-        # - Background: first slide (thumbnail), slow zoom + tiny rotate + vignette, slight blur, animated noise (particle-like)
-        # - Foreground: current slide scaled to 1280x720 with slight transparency
-        # - Overlay FG on BG, map audio, encode
-        filter_complex = (
-            f"[0:v]scale=1280:720,zoompan=z='min(1.08,zoom+0.00015)':d={frames}:s=1280x720,fps=30,"
-            f"rotate=0.003*t:c=black@0,boxblur=2:1,vignette=PI/6:0.3[bg];"
-            f"[1:v]scale=1280:720,format=rgba,colorchannelmixer=aa=0.92[fg];"
-            f"[bg][fg]overlay=(W-w)/2:(H-h)/2,noise=alls=6:allf=t[outv]"
-        )
-        subprocess.run([
-            "ffmpeg", "-y",
-            "-loop", "1", "-i", str(bg_thumb.absolute()),
-            "-loop", "1", "-i", str(png.absolute()),
-            "-i", str(mp3.absolute()),
-            "-filter_complex", filter_complex,
-            "-map", "[outv]",
-            "-map", "2:a",
-            "-t", str(duration),
-            "-c:v", "libx264",
-            "-pix_fmt", "yuv420p",
-            "-c:a", "aac",
-            "-shortest",
-            str(seg_path.absolute())
-        ], check=True)
-        segments.append(seg_path)
+            # Duration via ffprobe for safety; fall back to 5s
+            try:
+                result = subprocess.run([
+                    "ffprobe", "-v", "error", "-show_entries",
+                    "format=duration", "-of", "default=noprint_wrappers=1:nokey=1",
+                    str(mp3.absolute())
+                ], capture_output=True, text=True, check=True)
+                duration = float(result.stdout.strip())
+            except Exception:
+                duration = 5.0
+
+            # Compose: background scaled to 1280x720, slide overlay centered with alpha
+            filter_complex = (
+                f"[0:v]scale=1280:720,format=rgba[bg];"
+                f"[1:v]scale=1100:619,format=rgba,colorchannelmixer=aa=0.80[fg];"
+                f"[bg][fg]overlay=(W-w)/2:(H-h)/2[outv]"
+            )
+            subprocess.run([
+                "ffmpeg", "-y", "-v", "error",
+                "-loop", "1", "-i", str(bg_img_path.absolute()),
+                "-loop", "1", "-i", str(png.absolute()),
+                "-i", str(mp3.absolute()),
+                "-filter_complex", filter_complex,
+                "-map", "[outv]",
+                "-map", "2:a",
+                "-t", str(duration),
+                "-c:v", "libx264",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac",
+                "-shortest",
+                str(seg_path.absolute())
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True)
+            segments.append(seg_path)
+        except Exception as e:
+            print(f"[tutor] ⚠️ Failed to create segment {i+1}: {e}")
+            continue
+
+    if not segments:
+        raise HTTPException(status_code=500, detail="No segments were created")
 
     # Concat segments
     concat_file = temp_dir / "concat.txt"
-    with open(concat_file, 'w') as f:
+    with open(concat_file, 'w', encoding='utf-8') as f:
         for seg in segments:
             f.write(f"file '{seg.absolute()}'\n")
 
-    video_file = output_dir / "lesson_video.mp4"
     subprocess.run([
-        "ffmpeg", "-y",
+        "ffmpeg", "-y", "-v", "error",
         "-f", "concat", "-safe", "0",
         "-i", str(concat_file.absolute()),
         "-c", "copy",
         str(video_file.absolute())
-    ], check=True)
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True)
 
-    # 6) Generate thumbnail for UI cards
+    # 7) Generate thumbnail from chosen background
     thumb_path = output_dir / "thumbnail.jpg"
     try:
-        subprocess.run([
-            "ffmpeg", "-y",
-            "-i", str(video_file.absolute()),
-            "-ss", "00:00:01.000",
-            "-vframes", "1",
-            str(thumb_path.absolute())
-        ], check=True)
+        with Image.open(bg_img_path) as im:
+            im = im.convert('RGB')
+            target_w, target_h = 1280, 720
+            im_ratio = im.width / im.height
+            target_ratio = target_w / target_h
+            if im_ratio > target_ratio:
+                new_w = target_w
+                new_h = int(new_w / im_ratio)
+            else:
+                new_h = target_h
+                new_w = int(new_h * im_ratio)
+            im_resized = im.resize((new_w, new_h))
+            canvas = Image.new('RGB', (target_w, target_h), color=(20, 32, 48))
+            x = (target_w - new_w) // 2
+            y = (target_h - new_h) // 2
+            canvas.paste(im_resized, (x, y))
+            canvas.save(thumb_path, format='JPEG', quality=90)
+            print(f"[tutor] Thumbnail saved: {thumb_path}")
     except Exception as e:
-        print(f"⚠️ Failed to generate thumbnail for tutor video: {e}")
+        print(f"[tutor] ⚠️ Failed to save thumbnail from background: {e}")
 
     # 7) Record in user_posts (type='tutortemp')
     rel = str(video_file).replace('\\', '/').split('generated/', 1)[-1]
@@ -411,7 +632,15 @@ def _tutor_generate_video_from_request(request: TutorVideoRequest) -> Dict[str, 
         "status": "done",
         "videos": [{"url": video_url}],
         "video_url": video_url,
-        "message": "Tutor video generated successfully"
+        "thumbnail_url": f"/videos/{rel.rsplit('/', 1)[0]}/thumbnail.jpg" if (output_dir / "thumbnail.jpg").exists() else None,
+        "message": "Tutor video generated successfully",
+        # Debug info for AI background
+        # AI background fields maintained for backward-compat, though generation method changed
+        "ai_bg_attempted": bool(ai_bg_info.get("attempted", False)) if isinstance(ai_bg_info, dict) else False,
+        "ai_bg_used": False,
+        "ai_bg_error": ai_bg_info.get("error") if isinstance(ai_bg_info, dict) else None,
+        "ai_bg_path": str(ai_bg_path) if ai_bg_path else None,
+        "bg_chosen": None,
     }
 
 
