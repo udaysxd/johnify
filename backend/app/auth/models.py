@@ -54,6 +54,8 @@ class UserPost(Base):
     post_topic = Column(String(255), nullable=True)
     # 'learn' or 'tutor'
     type = Column(String(50), nullable=True)
+    # Whether this post is publicly visible in the feed
+    public = Column(Boolean, default=True, nullable=True)
     
     # Relationship to user
     user = relationship("User", back_populates="posts")

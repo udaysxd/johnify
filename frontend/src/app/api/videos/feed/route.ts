@@ -37,15 +37,20 @@ function absoluteUrl(url: string | undefined): string {
   if (url.startsWith('http')) {
     try {
       const u = new URL(url);
-      const api = new URL(API_BASE_URL);
-      u.protocol = api.protocol;
-      u.host = api.host;
+      // Fix known path quirk but do not rewrite host for valid absolute URLs
       u.pathname = u.pathname.replace('/videos/../app/', '/videos/');
+      // Only normalize localhost origins to the backend API origin
+      if (u.hostname === 'localhost' || u.hostname === '127.0.0.1') {
+        const api = new URL(API_BASE_URL);
+        u.protocol = api.protocol;
+        u.host = api.host;
+      }
       return u.toString();
     } catch {
       return url;
     }
   }
+  // Relative path from backend
   return `${API_BASE_URL}${url.startsWith('/') ? '' : '/'}${url}`;
 }
 
@@ -60,11 +65,18 @@ function isValidStatus(s: unknown): s is 'processing' | 'completed' | 'failed' {
   return s === 'processing' || s === 'completed' || s === 'failed';
 }
 
-export async function GET(): Promise<NextResponse> {
+export async function GET(request: Request): Promise<NextResponse> {
   try {
+    const cookieHeader = request.headers.get('cookie') ?? undefined;
+    const authHeader = request.headers.get('authorization') ?? undefined;
     const resp = await fetch(`${API_BASE_URL}/api/videos/feed`, {
       method: 'GET',
-      headers: { 'Content-Type': 'application/json' },
+      // Forward cookies and auth so backend can personalize/exclude current user's posts
+      headers: {
+        'Content-Type': 'application/json',
+        ...(cookieHeader ? { 'Cookie': cookieHeader } : {}),
+        ...(authHeader ? { 'Authorization': authHeader } : {}),
+      },
       cache: 'no-store',
     });
 

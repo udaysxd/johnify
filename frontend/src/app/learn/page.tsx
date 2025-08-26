@@ -113,6 +113,8 @@ function LearnPageContent() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    // Prevent early clicks before auth is ready or if already processing
+    if (isAuthLoading || !isAuthenticated || isLoading) return;
     if (!topic.trim()) return;
     await generateVideo(topic);
   };
@@ -167,9 +169,9 @@ function LearnPageContent() {
                 <div>
                   <button
                     type="submit"
-                    disabled={isLoading || !topic.trim()}
+                    disabled={isAuthLoading || !isAuthenticated || isLoading || !topic.trim()}
                     className={`w-full flex justify-center py-3 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white ${
-                      isLoading || !topic.trim()
+                      isAuthLoading || !isAuthenticated || isLoading || !topic.trim()
                         ? 'bg-indigo-300 cursor-not-allowed'
                         : 'bg-indigo-600 hover:bg-indigo-700'
                     } focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500`}

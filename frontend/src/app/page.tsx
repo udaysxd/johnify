@@ -44,7 +44,7 @@ export default function Home() {
             </p>
             <div className="flex justify-center md:justify-start">
               <a
-                href="/quiz"
+                href="/tutor"
                 className="bg-purple-600 hover:bg-purple-700 text-white font-medium py-3 px-8 rounded-lg text-lg transition-colors inline-block"
               >
                 Create Tutor

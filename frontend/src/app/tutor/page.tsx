@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { useAuth } from '@/contexts/AuthContext';
 import LoadingState from '@/components/LoadingState';
 
@@ -61,6 +61,8 @@ function TutorPageContent() {
   const [result, setResult] = useState<QuizResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isClient, setIsClient] = useState(false);
+  const [pendingAuto, setPendingAuto] = useState(false);
+  const searchParams = useSearchParams();
   const funFacts = [
     'Your brain uses about 20% of your body\'s energy—even at rest.',
     'Learning something new builds fresh neural connections.',
@@ -91,7 +93,26 @@ function TutorPageContent() {
     }
   }, [authLoading, isAuthenticated, router]);
 
+  // Prefill topic from URL and optionally autostart
+  useEffect(() => {
+    if (!isClient) return;
+    // Wait until auth status is known; Tutor requires auth
+    if (authLoading) return;
+    const topic = (searchParams.get('topic') || '').trim();
+    const auto = String(searchParams.get('autostart') || '').toLowerCase();
+    const shouldAuto = auto === '1' || auto === 'true';
+    if (topic && topic !== quizTopic) {
+      setQuizTopic(topic);
+    }
+    if (shouldAuto && topic) {
+      setPendingAuto(true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, isClient, authLoading]);
+
   const generateQuiz = useCallback(async () => {
+    // Prevent early clicks before auth is ready or if already processing
+    if (authLoading || !isAuthenticated || isLoading) return;
     if (!quizTopic.trim()) return;
 
     setIsLoading(true);
@@ -122,7 +143,7 @@ function TutorPageContent() {
           id: q.id || `question-${index}`,
           question: q.q || `Question ${index + 1}`,
           correctAnswer: q.a || '',
-          options: (q.opts as any) || {},
+          options: (q.opts as Record<string, string> | string[] | undefined) ?? {},
           explanation: q.explanation,
         }))
       };
@@ -135,9 +156,26 @@ function TutorPageContent() {
     } finally {
       setIsLoading(false);
     }
-  }, [quizTopic]);
+  }, [quizTopic, authLoading, isAuthenticated, isLoading]);
+
+  // Fire generate once when pendingAuto is set and prerequisites are ready
+  useEffect(() => {
+    if (!pendingAuto) return;
+    if (authLoading || !isAuthenticated) return;
+    if (!quizTopic.trim() || isLoading) return;
+    setPendingAuto(false);
+    void generateQuiz();
+  }, [pendingAuto, authLoading, isAuthenticated, quizTopic, isLoading, generateQuiz]);
+
+  const handleStartSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    // Call generateQuiz; it already has guards for auth/loading
+    void generateQuiz();
+  };
 
   const generateVideo = async () => {
+    // Prevent early clicks before auth is ready or if already generating
+    if (authLoading || !isAuthenticated || isGeneratingVideo) return;
     if (!quiz) return;
 
     if (result) {
@@ -162,7 +200,7 @@ function TutorPageContent() {
             formattedOpts[optionKey] = String(value);
           });
         } else if (q.options && typeof q.options === 'object') {
-          Object.entries(q.options).forEach(([_, value], idx) => {
+          Object.values(q.options).forEach((value, idx) => {
             const optionKey = String.fromCharCode(65 + idx);
             formattedOpts[optionKey] = String(value);
           });
@@ -199,6 +237,8 @@ function TutorPageContent() {
         body: JSON.stringify({ topic: quiz.topic, questions: formattedQuestions, answers: formattedAnswers }),
       });
 
+      const initialStatus = response.status;
+      const initialRetryAfter = response.headers.get('retry-after');
       const kickoff = await response.json();
       console.log('Tutor video generation kickoff response:', kickoff);
 
@@ -222,9 +262,43 @@ function TutorPageContent() {
         return;
       }
 
+      // If backend accepted but didn't return a job yet, retry kickoff a few times
+      if (initialStatus === 202 || String(kickoff?.status).toLowerCase() === 'processing') {
+        const maxKickoffRetries = 6;
+        let i = 0;
+        const baseDelay = initialRetryAfter ? Math.min(60000, parseInt(initialRetryAfter, 10) * 1000 || 2000) : 2000;
+        while (i < maxKickoffRetries) {
+          i += 1;
+          await new Promise((r) => setTimeout(r, Math.min(10000, baseDelay * Math.pow(1.5, i - 1))));
+          const reResp = await fetch('/api/tutor/generate-video', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ topic: quiz.topic, questions: formattedQuestions, answers: formattedAnswers }),
+            cache: 'no-store',
+          });
+          const reJson = await reResp.json().catch(() => ({}));
+          console.log('Tutor re-kickoff response:', reJson);
+          if (reResp.ok) {
+            if (reJson && Array.isArray(reJson.videos) && reJson.videos.length > 0 && reJson.videos[0]?.url) {
+              setVideoUrl(String(reJson.videos[0].url));
+              return;
+            }
+            const vAlt = reJson.videoUrl || reJson.video_url;
+            if (vAlt) {
+              setVideoUrl(String(vAlt));
+              return;
+            }
+            if (reJson.job_id || reJson.jobId) {
+              kickoff.job_id = reJson.job_id || reJson.jobId;
+              break;
+            }
+          }
+        }
+      }
+
       const jobId: string | undefined = kickoff.job_id || kickoff.jobId;
       if (!jobId) {
-        throw new Error('No job_id returned from server.');
+        throw new Error('No job_id returned from server. Please try again in a minute.');
       }
 
       let attempt = 0;
@@ -372,36 +446,38 @@ function TutorPageContent() {
         <div className="bg-white shadow rounded-lg p-6">
           <div className="text-center mb-6">
             <h1 className="text-3xl font-bold text-gray-900 mb-2">Personal Tutor</h1>
-            <p className="text-gray-600">Get a short assessment and a personalised explainer video</p>
+            <p className="text-gray-600">Let&apos;s do a short assessment first</p>
           </div>
           {error && (
             <div className="mb-4 p-4 bg-red-50 text-red-700 rounded-md">{error}</div>
           )}
-          <div className="mb-2">
-            <label htmlFor="topic" className="block text-sm font-medium text-gray-700 mb-1">
-              What topic would you like to be assessed on?
-            </label>
-            <input
-              type="text"
-              id="topic"
-              value={quizTopic}
-              onChange={(e) => setQuizTopic(e.target.value)}
-              placeholder="e.g., Jazz Music, Ancient Rome, World History"
-              className="w-full px-4 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
-              disabled={isLoading}
-            />
-          </div>
-          <div>
-            <button
-              onClick={generateQuiz}
-              disabled={!quizTopic.trim() || isLoading}
-              className={`w-full flex justify-center py-3 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white ${
-                !quizTopic.trim() || isLoading ? 'bg-indigo-300 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700'
-              } focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500`}
-            >
-              {isLoading ? 'Generating Assessment...' : 'Start Assessment'}
-            </button>
-          </div>
+          <form onSubmit={handleStartSubmit} className="space-y-3">
+            <div className="mb-2">
+              <label htmlFor="topic" className="block text-sm font-medium text-gray-700 mb-1">
+                What topic would you like to be assessed on?
+              </label>
+              <input
+                type="text"
+                id="topic"
+                value={quizTopic}
+                onChange={(e) => setQuizTopic(e.target.value)}
+                placeholder="e.g., Jazz Music, Ancient Rome, World History"
+                className="w-full px-4 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
+                disabled={isLoading}
+              />
+            </div>
+            <div>
+              <button
+                type="submit"
+                disabled={authLoading || !isAuthenticated || !quizTopic.trim() || isLoading}
+                className={`w-full flex justify-center py-3 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white ${
+                  authLoading || !isAuthenticated || !quizTopic.trim() || isLoading ? 'bg-indigo-300 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700'
+                } focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500`}
+              >
+                {isLoading ? 'Generating Assessment...' : 'Start Assessment'}
+              </button>
+            </div>
+          </form>
         </div>
       ) : !result ? (
         <div className="bg-white shadow rounded-lg overflow-hidden">
@@ -479,9 +555,9 @@ function TutorPageContent() {
           <div className="px-6 py-4 bg-gray-50 border-t border-gray-200 flex justify-end">
             <button
               onClick={submitQuiz}
-              disabled={Object.keys(answers).length < quiz.questions.length || isLoading}
+              disabled={authLoading || !isAuthenticated || Object.keys(answers).length < quiz.questions.length || isLoading}
               className={`px-6 py-2 text-white font-medium rounded-md focus:outline-none focus:ring-2 focus:ring-offset-2 ${
-                Object.keys(answers).length < quiz.questions.length || isLoading
+                authLoading || !isAuthenticated || Object.keys(answers).length < quiz.questions.length || isLoading
                   ? 'bg-indigo-300 cursor-not-allowed'
                   : 'bg-indigo-600 hover:bg-indigo-700 focus:ring-indigo-500'
               }`}
@@ -504,7 +580,7 @@ function TutorPageContent() {
                     <h2 className="text-lg font-medium text-gray-900">Areas for Improvement</h2>
                     <button
                       onClick={generateVideo}
-                      disabled={isGeneratingVideo}
+                      disabled={authLoading || !isAuthenticated || isGeneratingVideo}
                       className={`px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-md hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 ${isGeneratingVideo ? 'opacity-50 cursor-not-allowed' : ''}`}
                     >
                       {isGeneratingVideo ? 'Generating...' : 'Generate Video'}
@@ -538,7 +614,7 @@ function TutorPageContent() {
                   {videoError && <div className="mt-4 p-3 bg-red-50 text-red-700 rounded-md text-sm">{videoError}</div>}
                   {isGeneratingVideo && (
                     <div className="mt-6 p-4 bg-white border border-gray-200 rounded-lg">
-                      <h3 className="text-md font-semibold mb-2 text-gray-900">Fun facts while you wait</h3>
+                      <h3 className="text-md font-semibold mb-2 text-gray-900">Some Fun facts...</h3>
                       <div className="min-h-[48px] flex items-center justify-center text-gray-700 text-sm transition-all">
                         {funFacts[factIndex]}
                       </div>
@@ -572,7 +648,7 @@ function TutorPageContent() {
                   <div className="mt-6">
                     <button
                       onClick={generateVideo}
-                      disabled={isGeneratingVideo}
+                      disabled={authLoading || !isAuthenticated || isGeneratingVideo}
                       className={`inline-flex items-center px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-md hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 ${isGeneratingVideo ? 'opacity-50 cursor-not-allowed' : ''}`}
                     >
                       <svg className="-ml-1 mr-2 h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -584,7 +660,7 @@ function TutorPageContent() {
                     {videoError && <div className="mt-2 p-3 bg-red-50 text-red-700 rounded-md text-sm">{videoError}</div>}
                     {isGeneratingVideo && (
                       <div className="mt-4 p-4 bg-white border border-gray-200 rounded-lg">
-                        <h3 className="text-md font-semibold mb-2 text-gray-900">Fun facts while you wait</h3>
+                        <h3 className="text-md font-semibold mb-2 text-gray-900">Some Fun facts...</h3>
                         <div className="min-h-[48px] flex items-center justify-center text-gray-700 text-sm transition-all">
                           {funFacts[factIndex]}
                         </div>

@@ -11,6 +11,7 @@ interface BackendVideoItem {
   duration?: number;
   created_at?: string;
   status?: 'processing' | 'completed' | 'failed' | string;
+  public?: boolean;
   [key: string]: unknown;
 }
 
@@ -22,6 +23,7 @@ interface FrontendVideoItem {
   duration?: number;
   createdAt: string;
   status: 'processing' | 'completed' | 'failed';
+  public: boolean;
 }
 
 const isProduction = process.env.NODE_ENV === 'production';
@@ -31,16 +33,20 @@ const API_BASE_URL = isProduction
 
 function absoluteUrl(url: string | undefined): string {
   if (!url) return '';
-  // If backend returned an absolute URL, normalize its origin and path quirks
+  // If backend returned an absolute URL, normalize path but don't rewrite non-local hosts
   if (url.startsWith('http')) {
     try {
       const u = new URL(url);
-      const api = new URL(API_BASE_URL);
-      // Replace localhost origin with backend API origin
-      u.protocol = api.protocol;
-      u.host = api.host;
-      // Collapse any `/videos/../app/` to `/videos/`
+      // Fix known path quirk
       u.pathname = u.pathname.replace('/videos/../app/', '/videos/');
+      const api = new URL(API_BASE_URL);
+      const isLocal = u.hostname === 'localhost' || u.hostname === '127.0.0.1';
+      const isSameService = u.hostname === api.hostname || u.hostname.endsWith('.run.app') && api.hostname.endsWith('.run.app');
+      // If URL points to our backend service (including Gen2 run.app with optional port) or localhost, force API_BASE_URL origin
+      if (isLocal || isSameService) {
+        u.protocol = api.protocol;
+        u.host = api.host; // strips any explicit port like :8000
+      }
       return u.toString();
     } catch {
       return url;
@@ -102,6 +108,7 @@ export async function GET(request: Request): Promise<NextResponse> {
               duration: typeof v.duration === 'number' ? v.duration : undefined,
               createdAt: v.created_at || new Date().toISOString(),
               status,
+              public: v.public !== false, // default true if missing
             };
           })
           // Filter out entries with no video URL

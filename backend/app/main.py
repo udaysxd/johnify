@@ -802,7 +802,7 @@ class LearnVideoTask:
             if not os.path.exists(thumb_path):
                 try:
                     # Attempt Pollinations fetch first
-                    prompt = f"clean minimal educational thumbnail for: {self.topic}"
+                    prompt = f"clean minimal educational thumbnail for: {self.topic}, without any text, letters, words, captions, logos, watermarks, signatures, signage, title"
                     encoded = urllib.parse.quote(prompt[:200])
                     url = f"https://image.pollinations.ai/prompt/{encoded}"
                     print(f"🖼️ Generating thumbnail via Pollinations: {url}")
@@ -924,7 +924,8 @@ class LearnVideoTask:
                     post_path=post_playable_path,
                     post_topic=self.topic,
                     created_on=datetime.utcnow(),
-                    type='learn'
+                    type='learn',
+                    public=True
                 )
                 
                 db.add(post)
@@ -1143,13 +1144,13 @@ def generate(req: QuizAnswerRequest, bg: BackgroundTasks):
             print("\n1️⃣ Generating slides...")
             # Transform wrong_questions to expected schema for slidegen
             def extract_correct_answer(qobj):
-                opts = qobj.get("opts", [])
+                opts = qobj.get("opts", {})
                 correct_key = qobj.get("a")
-                if isinstance(opts, list) and correct_key:
+                if isinstance(opts, dict) and correct_key:
                     idx = ord(correct_key.lower()) - ord('a')
                     if 0 <= idx < len(opts):
                         # Remove "a) " etc.
-                        return opts[idx].split(")", 1)[-1].strip() if ")" in opts[idx] else opts[idx]
+                        return opts.get(correct_key, "Unknown")
                 return "Unknown"
 
             slide_inputs = []
@@ -1674,7 +1675,7 @@ def _generate_video_from_request(request: "VideoRequest") -> Dict[str, Any]:
             thumb_ok = False
             # Try Pollinations (aligns with learn flow) with basic retries
             try:
-                prompt = f"clean minimal educational thumbnail for: {request.topic} (quiz review)"
+                prompt = f"clean minimal educational thumbnail for: {request.topic} (quiz review), without any text, letters, words, captions, logos, watermarks, signatures, signage, title"
                 encoded = urllib.parse.quote(prompt[:200])
                 url = f"https://image.pollinations.ai/prompt/{encoded}"
                 headers = {"User-Agent": "Johnify/1.0 (+https://johnify.com)"}
@@ -1792,7 +1793,8 @@ def _generate_video_from_request(request: "VideoRequest") -> Dict[str, Any]:
                             post_path=(gs_post_path or rel_post_path),
                             post_topic=request.topic,
                             created_on=_dt.utcnow(),
-                            type='tutor'
+                            type='tutor',
+                            public=True
                         )
                         db.add(post)
                         try:

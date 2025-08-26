@@ -12,7 +12,7 @@ export default function PromptDemo() {
   const onLearn = () => {
     const topic = value.trim();
     if (!topic) return;
-    const url = `/learn?topic=${encodeURIComponent(topic)}&autostart=1`;
+    const url = `/tutor?topic=${encodeURIComponent(topic)}&autostart=1`;
     router.push(url);
   };
 

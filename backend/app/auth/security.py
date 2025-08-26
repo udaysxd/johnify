@@ -236,3 +236,53 @@ async def get_current_active_user(current_user: models.User = Depends(get_curren
     if not current_user.is_verified:
         raise HTTPException(status_code=400, detail="Inactive user")
     return current_user
+
+# Optional variant: returns None when no/invalid token instead of raising 401.
+async def get_current_user_optional(
+    db: Session = Depends(get_db),
+    token_from_header: Optional[str] = Depends(oauth2_scheme),
+    token_from_cookie: Optional[str] = Depends(get_token_from_cookie)
+):
+    try:
+        token = token_from_header or token_from_cookie
+        if not token:
+            return None
+        # Reuse core logic from get_current_user but swallow auth failures
+        unverified = jwt.get_unverified_claims(token)
+        subject = unverified.get("sub")
+        explicit_user_id = unverified.get("user_id")
+        # Verify token
+        payload = jwt.decode(
+            token,
+            SECRET_KEY,
+            algorithms=[ALGORITHM],
+            options={"verify_exp": True, "verify_aud": False},
+        )
+        subject = payload.get("sub")
+        explicit_user_id = payload.get("user_id")
+        user = None
+        subj_str = str(subject) if subject is not None else None
+        if subj_str and ('@' in subj_str or any(not ch.isdigit() for ch in subj_str)):
+            user = db.query(models.User).filter(models.User.user_email == subj_str).first()
+            if user:
+                return user
+        if not user and subj_str and subj_str.isdigit():
+            try:
+                uid_int = int(subj_str)
+                user = db.query(models.User).filter(models.User.user_id == uid_int).first()
+                if user:
+                    return user
+            except ValueError:
+                pass
+        if not user and explicit_user_id is not None:
+            try:
+                uid_int = int(str(explicit_user_id))
+                user = db.query(models.User).filter(models.User.user_id == uid_int).first()
+                if user:
+                    return user
+            except ValueError:
+                pass
+        return None
+    except Exception:
+        # On any error, treat as unauthenticated for optional flow
+        return None

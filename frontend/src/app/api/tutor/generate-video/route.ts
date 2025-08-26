@@ -36,6 +36,10 @@ function normalizeError(e: unknown): { name: string; message: string } {
   return { name: '', message: String(e) };
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export async function POST(request: Request) {
   try {
     const { topic, questions, answers } = await request.json() as VideoRequest;
@@ -55,38 +59,73 @@ export async function POST(request: Request) {
     });
 
     const backendUrl = getBackendUrl();
+    // Keep kickoff under a minute to avoid platform 300s hard timeout and to return promptly
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 1100_000);
+    const timeoutId = setTimeout(() => controller.abort(), 60_000);
 
     try {
       const incomingCookie = request.headers.get('cookie') || '';
       const incomingAuth = request.headers.get('authorization') || '';
 
-      async function kickoffOnce() {
-        const resp = await fetch(`${backendUrl}/api/tutor/generate-video/start`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(incomingCookie ? { Cookie: incomingCookie } : {}),
-            ...(incomingAuth ? { Authorization: incomingAuth } : {}),
-          },
-          body: JSON.stringify({ topic, questions: formattedQuestions, answers: formattedAnswers }),
-          signal: controller.signal,
-        });
-        const text = await resp.text();
-        if (!resp.ok) {
-          throw new Error(`Backend error: ${resp.status} - ${text}`);
+      async function kickoffWithRetry() {
+        const maxRetries = 5;
+        let attempt = 0;
+        let lastError: unknown;
+        while (attempt <= maxRetries) {
+          const resp = await fetch(`${backendUrl}/api/tutor/generate-video/start`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              ...(incomingCookie ? { Cookie: incomingCookie } : {}),
+              ...(incomingAuth ? { Authorization: incomingAuth } : {}),
+            },
+            body: JSON.stringify({ topic, questions: formattedQuestions, answers: formattedAnswers }),
+            signal: controller.signal,
+          });
+
+          // Success path
+          if (resp.ok) {
+            const text = await resp.text();
+            try { return text ? JSON.parse(text) : {}; } catch (e) { throw e; }
+          }
+
+          // Handle 429 with backoff and respect Retry-After if present
+          if (resp.status === 429 && attempt < maxRetries) {
+            const retryAfter = resp.headers.get('retry-after');
+            let delayMs = Math.min(30_000, 1000 * Math.pow(2, attempt)); // 1s,2s,4s,8s,16s, capped at 30s
+            if (retryAfter) {
+              const seconds = parseInt(retryAfter, 10);
+              if (!Number.isNaN(seconds) && seconds > 0) {
+                delayMs = Math.min(60_000, seconds * 1000);
+              }
+            }
+            await sleep(delayMs);
+            attempt++;
+            continue;
+          }
+
+          // For transient 5xx, do one quick retry
+          if (resp.status >= 500 && resp.status < 600 && attempt < 2) {
+            await sleep(1000 * (attempt + 1));
+            attempt++;
+            continue;
+          }
+
+          const text = await resp.text();
+          lastError = new Error(`Backend error: ${resp.status} - ${text}`);
+          break;
         }
-        try { return text ? JSON.parse(text) : {}; } catch (e) { throw e; }
+        throw lastError instanceof Error ? lastError : new Error('Backend kickoff failed');
       }
 
       let data: unknown;
       try {
-        data = await kickoffOnce();
+        data = await kickoffWithRetry();
       } catch (e: unknown) {
         const { name, message } = normalizeError(e);
         if (name === 'HeadersTimeoutError' || /UND_ERR_HEADERS_TIMEOUT/i.test(message)) {
-          data = await kickoffOnce();
+          // One more attempt after a headers-timeout
+          data = await kickoffWithRetry();
         } else {
           throw e;
         }
@@ -109,7 +148,11 @@ export async function POST(request: Request) {
       clearTimeout(timeoutId);
       if (error instanceof Error) {
         if (error.name === 'AbortError') {
-          return NextResponse.json({ message: 'Video generation is taking longer than expected', details: 'The server is still processing your request. Please try again in a few minutes.' }, { status: 504 });
+          // Treat long-running kickoff as accepted for async processing so the client can poll
+          const res = NextResponse.json({ status: 'processing', message: 'Kickoff accepted; processing continues in background' }, { status: 202 });
+          res.headers.set('Retry-After', '10');
+          res.headers.set('X-Route-Note', 'kickoff-timeout-treated-as-accepted');
+          return res;
         }
         throw error;
       }

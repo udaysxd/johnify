@@ -86,5 +86,5 @@ COPY . .
 # Expose port
 EXPOSE 8000
 
-# Start with Gunicorn (align timeout with Cloud Run's 1200s hard limit)
-CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-b", ":8000", "--timeout", "1200", "app.main:app"]
+# Start with Gunicorn (align timeout with Cloud Run's 1800s service timeout)
+CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-b", ":8000", "--timeout", "1800", "--graceful-timeout", "30", "--keep-alive", "75", "app.main:app"]

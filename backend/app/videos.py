@@ -1,10 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import text as sql_text
 from datetime import datetime
 import os
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from .database import get_db
 from .auth import models, security
@@ -30,6 +32,65 @@ def _gcs_https_from_gs(gs_url: str) -> str:
         return f"https://storage.googleapis.com/{bucket}/{object_path}"
     except Exception:
         return ""
+
+
+def _gcs_prefix_from_url(url: str) -> str:
+    """Given an HTTPS or gs:// URL under the assets bucket, return the object prefix directory.
+    Example: https://storage.googleapis.com/assets-johnify/content/tutor/dir/lesson_video.mp4
+    -> content/tutor/dir
+    """
+    try:
+        from . import gcs_utils  # reuse bucket settings
+        bucket = gcs_utils.ASSETS_BUCKET
+        if url.startswith("gs://"):
+            # gs://bucket/path/to/file
+            without = url[len("gs://"):]
+            parts = without.split("/", 1)
+            if len(parts) == 2 and parts[0] == bucket:
+                obj = parts[1]
+            else:
+                obj = parts[-1] if len(parts) else ""
+        elif url.startswith("https://storage.googleapis.com/"):
+            # https://storage.googleapis.com/bucket/path/to/file
+            without = url[len("https://storage.googleapis.com/"):]
+            parts = without.split("/", 1)
+            obj = parts[1] if len(parts) == 2 else ""
+        else:
+            return ""
+        obj = obj.strip("/")
+        if not obj:
+            return ""
+        # Remove filename segment
+        idx = obj.rfind("/")
+        if idx == -1:
+            return ""
+        return obj[:idx]
+    except Exception:
+        return ""
+
+
+def _delete_gcs_prefix(prefix: str) -> bool:
+    """Delete all objects under the given prefix in the configured bucket. Production-only.
+    Returns True on success or if nothing to delete.
+    """
+    try:
+        from . import gcs_utils
+        if not gcs_utils.IS_PRODUCTION:
+            return True
+        # May raise if storage not available or bucket missing
+        from google.cloud import storage  # type: ignore
+        client = storage.Client()
+        bucket = client.bucket(gcs_utils.ASSETS_BUCKET)
+        # List all blobs under prefix and delete
+        to_delete = list(bucket.list_blobs(prefix=prefix))
+        for blob in to_delete:
+            try:
+                blob.delete()
+            except Exception:
+                pass
+        return True
+    except Exception:
+        return False
 
 
 def _derive_thumb_url_from_video(video_url: str) -> str:
@@ -85,7 +146,8 @@ def get_video_files(user_id: int, db: Session) -> List[Dict[str, Any]]:
                         "video_url": video_url,
                         "thumbnail_url": thumbnail_url,
                         "topic": post.post_topic or "",
-                        "status": "completed"
+                        "status": "completed",
+                        "public": bool(getattr(post, "public", True)),
                     })
                     continue
             if pp.startswith("https://storage.googleapis.com/"):
@@ -98,7 +160,8 @@ def get_video_files(user_id: int, db: Session) -> List[Dict[str, Any]]:
                     "video_url": video_url,
                     "thumbnail_url": thumbnail_url,
                     "topic": post.post_topic or "",
-                    "status": "completed"
+                    "status": "completed",
+                    "public": bool(getattr(post, "public", True)),
                 })
                 continue
 
@@ -116,12 +179,17 @@ def get_video_files(user_id: int, db: Session) -> List[Dict[str, Any]]:
             if normalized_path.startswith('generated/'):
                 normalized_path = normalized_path[10:]
                 
-            # Split into directory and filename
-            path_parts = normalized_path.split('/')
-            
-            # The directory is everything except the last part (filename)
-            directory_name = '/'.join(path_parts[:-1])
-            video_filename = path_parts[-1] if path_parts[-1].endswith('.mp4') else None
+            # Split into directory and filename (post_path may be a directory)
+            path_parts = normalized_path.split('/') if normalized_path else []
+            last_part = path_parts[-1] if path_parts else ''
+            if last_part.lower().endswith('.mp4'):
+                # post_path points to a specific file; scan its parent directory
+                directory_name = '/'.join(path_parts[:-1])
+                video_filename = last_part
+            else:
+                # post_path points to a directory; scan that directory directly
+                directory_name = '/'.join(path_parts)
+                video_filename = None
             
             # Construct the full path to the video directory under the resolved generated root
             video_dir_path = os.path.join(str(GENERATED_ROOT), directory_name)
@@ -193,7 +261,8 @@ def get_video_files(user_id: int, db: Session) -> List[Dict[str, Any]]:
                     "video_url": video_url,
                     "thumbnail_url": thumbnail_url,
                     "topic": post.post_topic or "",
-                    "status": "completed"
+                    "status": "completed",
+                    "public": bool(getattr(post, "public", True)),
                 })
             else:
                 print(f"❌ Video not found at: {video_path}")
@@ -225,7 +294,163 @@ async def get_my_videos(
             detail=f"Error fetching videos: {str(e)}"
         )
 
+
+@router.delete("/{post_id}")
+async def delete_video_post(
+    post_id: int,
+    db: Session = Depends(get_db),
+    current_user: Optional[models.User] = Depends(security.get_current_active_user),
+):
+    """Delete a user's video post and associated storage (GCS in production)."""
+    try:
+        post = db.query(models.UserPost).filter(models.UserPost.post_id == post_id).first()
+        if not post:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Post not found")
+        if getattr(post, "user_id", None) != getattr(current_user, "user_id", None):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to delete this post")
+
+        # Attempt to delete storage assets
+        pp = (post.post_path or "").strip()
+        deleted_storage = True
+        try:
+            if pp.startswith("gs://") or pp.startswith("https://storage.googleapis.com/"):
+                prefix = _gcs_prefix_from_url(pp)
+                if prefix:
+                    deleted_storage = _delete_gcs_prefix(prefix)
+            elif pp.startswith("generated/"):
+                # Dev/local cleanup: remove local directory
+                try:
+                    # Normalize to generated root
+                    directory = pp.replace("\\", "/").split("generated/", 1)[-1]
+                    base = str(GENERATED_ROOT)
+                    full_dir = os.path.normpath(os.path.join(base, directory))
+                    if os.path.isdir(full_dir):
+                        import shutil
+                        shutil.rmtree(full_dir, ignore_errors=True)
+                except Exception:
+                    pass
+        except Exception:
+            deleted_storage = False
+
+        # Delete DB row
+        db.delete(post)
+        db.commit()
+        return {"id": str(post_id), "deleted": True, "storage_deleted": bool(deleted_storage)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to delete post: {str(e)}")
+
 # New: Public feed endpoint aggregating videos from all users
+
+class VisibilityUpdate(BaseModel):
+    public: bool
+
+@router.patch("/{post_id}/visibility")
+async def update_post_visibility(
+    post_id: int,
+    payload: VisibilityUpdate,
+    db: Session = Depends(get_db),
+    current_user: Optional[models.User] = Depends(security.get_current_active_user),
+):
+    try:
+        post = db.query(models.UserPost).filter(models.UserPost.post_id == post_id).first()
+        if not post:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Post not found")
+        if getattr(post, "user_id", None) != getattr(current_user, "user_id", None):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to modify this post")
+        # Update visibility
+        setattr(post, "public", bool(payload.public))
+        db.add(post)
+        db.commit()
+        db.refresh(post)
+        return {"id": str(post.post_id), "public": bool(getattr(post, "public", True))}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to update visibility: {str(e)}")
+
+# --- Likes endpoints ---
+class LikeRequest(BaseModel):
+    action: Optional[str] = None  # e.g., 'like' (optional)
+
+@router.get("/{post_id}/likes")
+async def get_post_likes(
+    post_id: int,
+    db: Session = Depends(get_db),
+):
+    """Return the like count for a post. Defaults to 0 when no row exists."""
+    try:
+        # Use raw SQL to avoid requiring a SQLAlchemy model for the likes table
+        row = db.execute(sql_text(
+            """
+            SELECT likes_count
+            FROM public.user_posts_likes
+            WHERE post_id = :post_id
+            """
+        ), {"post_id": post_id}).fetchone()
+        count = int(row[0]) if row and row[0] is not None else 0
+        return {"likes_count": count}
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to fetch likes: {str(e)}")
+
+@router.post("/{post_id}/likes")
+async def like_post(
+    post_id: int,
+    payload: LikeRequest,
+    db: Session = Depends(get_db),
+    current_user: Optional[models.User] = Depends(security.get_current_active_user),
+):
+    """Increment like count for a post.
+    Rules:
+    - Must be authenticated.
+    - Cannot like your own post.
+    """
+    try:
+        # Validate post exists
+        post = db.query(models.UserPost).filter(models.UserPost.post_id == post_id).first()
+        if not post:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Post not found")
+        # Prevent liking own video
+        if getattr(post, "user_id", None) == getattr(current_user, "user_id", None):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot like your own post")
+
+        # Upsert-like logic: insert row if absent, otherwise increment
+        # 1) Try update
+        updated = db.execute(sql_text(
+            """
+            UPDATE public.user_posts_likes
+            SET likes_count = COALESCE(likes_count, 0) + 1,
+                updated_on = NOW()
+            WHERE post_id = :post_id
+            RETURNING likes_count
+            """
+        ), {"post_id": post_id}).fetchone()
+
+        new_count: Optional[int] = None
+        if updated and len(updated) > 0:
+            new_count = int(updated[0])
+        else:
+            # 2) No row existed; insert with 1
+            inserted = db.execute(sql_text(
+                """
+                INSERT INTO public.user_posts_likes (post_id, likes_count, updated_on)
+                VALUES (:post_id, 1, NOW())
+                RETURNING likes_count
+                """
+            ), {"post_id": post_id}).fetchone()
+            new_count = int(inserted[0]) if inserted and len(inserted) > 0 else 1
+
+        db.commit()
+        return {"likes_count": new_count}
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to like post: {str(e)}")
 def _collect_videos_for_post(post: models.UserPost) -> Dict[str, Any]:
     import os
     from datetime import datetime
@@ -238,7 +463,11 @@ def _collect_videos_for_post(post: models.UserPost) -> Dict[str, Any]:
     elif normalized_path.startswith('generated/'):
         normalized_path = normalized_path[10:]
     path_parts = normalized_path.split('/') if normalized_path else []
-    directory_name = '/'.join(path_parts[:-1]) if path_parts else ''
+    last_part = path_parts[-1] if path_parts else ''
+    if last_part.lower().endswith('.mp4'):
+        directory_name = '/'.join(path_parts[:-1])
+    else:
+        directory_name = '/'.join(path_parts)
     video_dir_path = os.path.normpath(os.path.join(str(GENERATED_ROOT), directory_name))
 
     video_filename = None
@@ -283,7 +512,8 @@ def _collect_videos_for_post(post: models.UserPost) -> Dict[str, Any]:
 
 @router.get("/feed", response_model=List[Dict[str, Any]])
 async def get_feed_videos(
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: Optional[models.User] = Depends(security.get_current_user_optional),
 ):
     """
     Public feed of videos across all users.
@@ -293,12 +523,19 @@ async def get_feed_videos(
             db.query(models.UserPost)
             .options(joinedload(models.UserPost.user))
             .filter(models.UserPost.post_path != None)
+            .filter(models.UserPost.public == True)
             .order_by(models.UserPost.created_on.desc())
             .limit(200)
             .all()
         )
         out: List[Dict[str, Any]] = []
         for post in posts:
+            # Exclude current user's own posts if authenticated
+            try:
+                if current_user is not None and getattr(current_user, "user_id", None) == getattr(post, "user_id", None):
+                    continue
+            except Exception:
+                pass
             # Prefer direct GCS URLs when present
             pp = (post.post_path or "").strip()
             if pp.startswith("gs://"):

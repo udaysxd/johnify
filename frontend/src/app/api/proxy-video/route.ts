@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-// Allow only the backend origin defined in env
+// Allow the backend origin defined in env, and public GCS origin used for assets
 const BACKEND_URL = process.env.BACKEND_URL || process.env.NEXT_PUBLIC_BACKEND_URL || '';
+const GCS_PUBLIC_ORIGIN = 'https://storage.googleapis.com';
 
 function sanitizeBackendUrl(input: string): string | null {
   try {
@@ -14,8 +15,11 @@ function sanitizeBackendUrl(input: string): string | null {
 }
 
 function isAllowedTarget(target: URL, backendOrigin: URL): boolean {
-  // Ensure exact origin match (protocol + hostname + port)
-  return target.origin === backendOrigin.origin;
+  // Allow exact backend origin
+  if (target.origin === backendOrigin.origin) return true;
+  // Allow public GCS origin
+  if (target.origin === GCS_PUBLIC_ORIGIN) return true;
+  return false;
 }
 
 export async function GET(req: NextRequest) {

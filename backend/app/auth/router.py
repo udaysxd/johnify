@@ -251,6 +251,42 @@ async def read_users_me(current_user: models.User = Depends(get_current_active_u
     """
     return current_user
 
+@router.put("/me/name", response_model=schemas.UserResponse)
+async def update_user_name(
+    payload: schemas.UserUpdateName,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_active_user)
+):
+    """Update the current user's display name."""
+    try:
+        current_user.user_name = payload.user_name
+        db.add(current_user)
+        db.commit()
+        db.refresh(current_user)
+        return current_user
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+@router.put("/me/password")
+async def update_user_password(
+    payload: schemas.PasswordUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_active_user)
+):
+    """Change current user's password after verifying current password."""
+    # Verify current password
+    if not current_user.check_password(payload.current_password):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Current password is incorrect")
+    try:
+        current_user.set_password(payload.new_password)
+        db.add(current_user)
+        db.commit()
+        return {"message": "Password updated successfully"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
 @router.post("/logout")
 async def logout(
     request: Request,

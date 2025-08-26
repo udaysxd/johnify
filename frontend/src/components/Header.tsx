@@ -119,6 +119,18 @@ export default function Header() {
                   className="absolute right-0 top-12 w-40 bg-white border border-gray-200 rounded-md shadow-lg py-1 z-50"
                   role="menu"
                 >
+                  {/* Read-only user email */}
+                  <div className="px-4 py-2 text-xs text-gray-500 border-b border-gray-100 select-text break-words">
+                    {user?.user_email || '—'}
+                  </div>
+                  <Link
+                    href="/my-profile"
+                    className="block w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                    role="menuitem"
+                    onClick={() => setMenuOpen(false)}
+                  >
+                    My Profile
+                  </Link>
                   <button
                     onClick={handleSignOutClick}
                     disabled={isSigningOut}

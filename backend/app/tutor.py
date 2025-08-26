@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request, HTTPException, Depends
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import json
@@ -9,10 +9,11 @@ from pathlib import Path
 import os
 
 import requests
+from .auth import models, security
 
 from .slidegen import get_deepseek_client, generate_slide_markdown, save_slides_to_md
 from google.cloud import texttospeech
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 router = APIRouter(prefix="/api/tutor", tags=["tutor"]) 
 
@@ -233,17 +234,25 @@ class TutorVideoRequest(BaseModel):
     questions: List[Dict[str, Any]]
     answers: Dict[str, str]
     user_email: Optional[str] = None
+    user_id: Optional[int] = None
 
 # In-memory job store for tutor-only
 TUTOR_VIDEO_JOBS: Dict[str, Dict[str, Any]] = {}
 
 
-def _tutor_generate_video_from_request(request: TutorVideoRequest) -> Dict[str, Any]:
+def _tutor_generate_video_from_request(request: TutorVideoRequest, status_path: Optional[Path] = None) -> Dict[str, Any]:
     # Lazy import to avoid circular dependency; sanitize_filename lives in main.py
     from .main import sanitize_filename
     safe_topic = sanitize_filename(request.topic or 'tutor')
     timestamp = int(time.time())
-    output_dir = Path(f"generated/Tutor_Results/{safe_topic}_{timestamp}")
+    # Determine base generated dir (prod: /tmp/generated, dev: repo-root/generated)
+    env = os.getenv("ENVIRONMENT", "development").lower()
+    if env == "production":
+        base_dir = Path("/tmp")
+    else:
+        base_dir = Path(__file__).resolve().parent.parent.parent
+    generated_dir = base_dir / "generated"
+    output_dir = generated_dir / "Tutor_Results" / f"{safe_topic}_{timestamp}"
     images_dir = output_dir / "images"
     audio_dir = output_dir / "audio"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -277,6 +286,15 @@ def _tutor_generate_video_from_request(request: TutorVideoRequest) -> Dict[str, 
 
     if not wrong_questions:
         return {"status": "completed", "message": "All answers correct", "videos": [], "video_url": ""}
+
+    # Helper to write status if a path is provided
+    def _write_stage(payload: Dict[str, Any]):
+        if not status_path:
+            return
+        try:
+            status_path.write_text(json.dumps(payload), encoding="utf-8")
+        except Exception:
+            pass
 
     # 1) Slides
     slide_inputs = []
@@ -372,7 +390,7 @@ def _tutor_generate_video_from_request(request: TutorVideoRequest) -> Dict[str, 
                 print("[tutor] AI background enabled but HUGGINGFACE_TOKEN not set; skipping")
                 return {"attempted": True, "path": None, "error": "no_token", "status": "skipped"}
             model_env = os.getenv("TUTOR_BG_MODEL", "stabilityai/stable-diffusion-3.5-medium")
-            prompt = f"cinematic, minimalist, high-contrast background related to: {topic}. no text, safe, clean, 16:9 composition"
+            prompt = f"cinematic, minimalist, high-contrast background related to: {topic}. no text, letters, words, captions, logos, watermarks, signatures, signage, title"
             negative = os.getenv("TUTOR_BG_NEGATIVE", "nsfw, text, watermark, logo, low quality, blurry")
 
             headers = {"Authorization": f"Bearer {hf_token}"}
@@ -437,50 +455,17 @@ def _tutor_generate_video_from_request(request: TutorVideoRequest) -> Dict[str, 
     ai_bg_info = _maybe_generate_ai_bg(request.topic, output_dir)
     ai_bg_path: Optional[Path] = ai_bg_info.get("path") if isinstance(ai_bg_info, dict) else None
 
-    # 5) Choose background image for video (thumbnail background): SD -> Pollinations -> first slide
+    # 5) Choose background image for video (DISABLED for Tutor to simplify like Learn)
     png_files = sorted(images_dir.glob("*.png"))
     if not png_files:
         raise HTTPException(status_code=500, detail="No slide images found")
 
+    # Disable overlay/background path to reduce ffmpeg complexity
+    use_overlay = False
     bg_img_path: Optional[Path] = None
-    if ai_bg_path and isinstance(ai_bg_path, Path) and ai_bg_path.exists():
-        bg_img_path = ai_bg_path
-        print(f"[tutor] Using SD background for video: {bg_img_path}")
-    else:
-        # Try Pollinations to fetch a background
-        try:
-            import urllib.parse
-            prompt = f"clean minimal educational thumbnail for: {request.topic} (tutor review)"
-            encoded = urllib.parse.quote(prompt[:200])
-            url = f"https://image.pollinations.ai/prompt/{encoded}"
-            headers = {"User-Agent": "Johnify/1.0 (+https://johnify.com)"}
-            out_bg = output_dir / "bg_pollinations.jpg"
-            print(f"[tutor] Trying Pollinations background: {url}")
-            last_err = None
-            for attempt in range(3):
-                try:
-                    resp = requests.get(url, headers=headers, timeout=20)
-                    resp.raise_for_status()
-                    out_bg.write_bytes(resp.content)
-                    if out_bg.exists() and out_bg.stat().st_size > 1024:
-                        bg_img_path = out_bg
-                        print(f"[tutor] Background saved via Pollinations (attempt {attempt+1}): {out_bg}")
-                        break
-                    else:
-                        last_err = RuntimeError("Background too small")
-                except Exception as e:
-                    last_err = e
-                    time.sleep(1.0 * (attempt + 1))
-            if not bg_img_path and last_err:
-                raise last_err
-        except Exception as e:
-            print(f"[tutor] Pollinations background failed after retries: {e}")
+    # If needed in future, set use_overlay=True and restore generation code above
 
-    if not bg_img_path:
-        bg_img_path = png_files[0]
-        print(f"[tutor] Fallback background set to first slide: {bg_img_path}")
-
-    # 6) Stitch to video with background + transparent slide overlay
+    # 7) Stitch to video with background + transparent slide overlay
     video_file = output_dir / "lesson_video.mp4"
     temp_dir = output_dir / "temp_segments"
     temp_dir.mkdir(exist_ok=True)
@@ -499,39 +484,81 @@ def _tutor_generate_video_from_request(request: TutorVideoRequest) -> Dict[str, 
         try:
             # Duration via ffprobe for safety; fall back to 5s
             try:
+                # Write progress stage for visibility
+                _write_stage({"status": "running", "stage": f"segment_{i+1}_probe", "progress": {"current": i+1, "total": pair_n}})
                 result = subprocess.run([
                     "ffprobe", "-v", "error", "-show_entries",
                     "format=duration", "-of", "default=noprint_wrappers=1:nokey=1",
                     str(mp3.absolute())
-                ], capture_output=True, text=True, check=True)
+                ], capture_output=True, text=True, check=True, timeout=30)
                 duration = float(result.stdout.strip())
             except Exception:
                 duration = 5.0
 
-            # Compose: background scaled to 1280x720, slide overlay centered with alpha
-            filter_complex = (
-                f"[0:v]scale=1280:720,format=rgba[bg];"
-                f"[1:v]scale=1100:619,format=rgba,colorchannelmixer=aa=0.80[fg];"
-                f"[bg][fg]overlay=(W-w)/2:(H-h)/2[outv]"
-            )
-            subprocess.run([
+            # Adaptive quality: use lower FPS for longer segments to reduce encode time on limited CPU
+            default_fps = 24
+            long_seg = duration > 15.0
+            eff_fps = 12 if long_seg else default_fps
+
+            # Compose: pre-render overlay with PIL if needed to mimic Learn's simple per-segment encode
+            composed_png_path = None
+            if use_overlay and bg_img_path is not None:
+                try:
+                    bg_img = Image.open(bg_img_path).convert('RGBA')
+                    fg_img = Image.open(png).convert('RGBA')
+                    # Resize background and foreground to target sizes
+                    bg_resized = bg_img.resize((bg_w, bg_h), Image.LANCZOS)
+                    fg_resized = fg_img.resize((fg_w, fg_h), Image.LANCZOS)
+                    # Apply 0.8 alpha to foreground
+                    r, g, b, a = fg_resized.split()
+                    a = a.point(lambda x: int(x * 0.8))
+                    fg_resized.putalpha(a)
+                    # Composite centered
+                    canvas = Image.new('RGBA', (bg_w, bg_h))
+                    canvas.paste(bg_resized, (0, 0))
+                    off_x = (bg_w - fg_w) // 2
+                    off_y = (bg_h - fg_h) // 2
+                    canvas.paste(fg_resized, (off_x, off_y), fg_resized)
+                    composed_png_path = temp_dir / f"composed_{i+1:03d}.png"
+                    canvas.convert('RGB').save(composed_png_path, format='PNG')
+                except Exception as ce:
+                    print(f"[tutor] ⚠️ PIL overlay compose failed, falling back to foreground only: {ce}")
+                    composed_png_path = None
+            # Progress status before segment encode
+            _write_stage({"status": "running", "stage": f"segment_{i+1}_encode", "progress": {"current": i+1, "total": pair_n}})
+            # Increase timeout for long segments (fixed values; no env)
+            seg_timeout = 600 if long_seg else 180
+            # Use composed image if available; otherwise the slide image
+            png_for_ffmpeg = composed_png_path if composed_png_path else png
+            # Simple per-segment encode aligned with Learn
+            cmd = [
                 "ffmpeg", "-y", "-v", "error",
-                "-loop", "1", "-i", str(bg_img_path.absolute()),
-                "-loop", "1", "-i", str(png.absolute()),
+                "-loop", "1", "-i", str(png_for_ffmpeg.absolute()),
                 "-i", str(mp3.absolute()),
-                "-filter_complex", filter_complex,
-                "-map", "[outv]",
-                "-map", "2:a",
                 "-t", str(duration),
                 "-c:v", "libx264",
                 "-pix_fmt", "yuv420p",
+                "-vf", "fps=30,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1",
                 "-c:a", "aac",
                 "-shortest",
                 str(seg_path.absolute())
-            ], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True)
+            ]
+
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, check=True, timeout=seg_timeout)
             segments.append(seg_path)
+            try:
+                print(f"[tutor] Created segment {i+1}/{pair_n}: {seg_path.name} (duration ~{duration:.2f}s)")
+                # Update progress after successful segment
+                _write_stage({"status": "running", "stage": f"segment_{i+1}_done", "progress": {"current": i+1, "total": pair_n}})
+            except Exception:
+                pass
+        except subprocess.TimeoutExpired as te:
+            print(f"[tutor] ⚠️ Timeout creating segment {i+1}: {te}")
+            _write_stage({"status": "running", "stage": f"segment_{i+1}_timeout", "progress": {"current": i+1, "total": pair_n}})
+            continue
         except Exception as e:
             print(f"[tutor] ⚠️ Failed to create segment {i+1}: {e}")
+            _write_stage({"status": "running", "stage": f"segment_{i+1}_error", "progress": {"current": i+1, "total": pair_n}, "error": str(e)})
             continue
 
     if not segments:
@@ -543,41 +570,108 @@ def _tutor_generate_video_from_request(request: TutorVideoRequest) -> Dict[str, 
         for seg in segments:
             f.write(f"file '{seg.absolute()}'\n")
 
+    # Mark concat stage
+    _write_stage({"status": "running", "stage": "concat"})
     subprocess.run([
         "ffmpeg", "-y", "-v", "error",
         "-f", "concat", "-safe", "0",
         "-i", str(concat_file.absolute()),
         "-c", "copy",
         str(video_file.absolute())
-    ], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True)
-
-    # 7) Generate thumbnail from chosen background
-    thumb_path = output_dir / "thumbnail.jpg"
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, check=True, timeout=600)
     try:
-        with Image.open(bg_img_path) as im:
-            im = im.convert('RGB')
-            target_w, target_h = 1280, 720
-            im_ratio = im.width / im.height
-            target_ratio = target_w / target_h
-            if im_ratio > target_ratio:
-                new_w = target_w
-                new_h = int(new_w / im_ratio)
-            else:
-                new_h = target_h
-                new_w = int(new_h * im_ratio)
-            im_resized = im.resize((new_w, new_h))
-            canvas = Image.new('RGB', (target_w, target_h), color=(20, 32, 48))
-            x = (target_w - new_w) // 2
-            y = (target_h - new_h) // 2
-            canvas.paste(im_resized, (x, y))
-            canvas.save(thumb_path, format='JPEG', quality=90)
-            print(f"[tutor] Thumbnail saved: {thumb_path}")
-    except Exception as e:
-        print(f"[tutor] ⚠️ Failed to save thumbnail from background: {e}")
+        size_mb = video_file.stat().st_size / (1024*1024) if video_file.exists() else 0
+        print(f"[tutor] Concatenated {len(segments)} segments into {video_file} ({size_mb:.2f} MB)")
+    except Exception:
+        pass
 
-    # 7) Record in user_posts (type='tutortemp')
+    # Generate thumbnail.jpg similar to Learn pipeline (Pollinations first, then PIL fallback)
+    thumb_path = output_dir / "thumbnail.jpg"
+    if not thumb_path.exists():
+        try:
+            import urllib.parse
+            prompt = f"clean minimal educational thumbnail for: {request.topic} (tutor), without any text, letters, words, captions, logos, watermarks, signatures, signage, title"
+            encoded = urllib.parse.quote(str(prompt)[:200])
+            url = f"https://image.pollinations.ai/prompt/{encoded}"
+            print(f"[tutor] Generating thumbnail via Pollinations: {url}")
+            resp = requests.get(url, timeout=20)
+            resp.raise_for_status()
+            with open(thumb_path, 'wb') as f:
+                f.write(resp.content)
+            if thumb_path.stat().st_size < 1024:
+                raise RuntimeError("Thumbnail too small; treating as failure")
+        except Exception as e:
+            print(f"[tutor] Pollinations thumbnail failed: {e}. Using simple PIL fallback.")
+            try:
+                img = Image.new('RGB', (1280, 720), color=(20, 32, 48))
+                draw = ImageDraw.Draw(img)
+                title = (request.topic or "Tutor").strip()[:60]
+                font = ImageFont.load_default()
+                try:
+                    bbox = draw.textbbox((0, 0), title, font=font)
+                    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                except Exception:
+                    try:
+                        tw = draw.textlength(title, font=font)  # type: ignore[attr-defined]
+                        th = 56
+                    except Exception:
+                        tw, th = 400, 56
+                x = max(0, (1280 - int(tw)) // 2)
+                y = max(0, (720 - int(th)) // 2)
+                draw.text((x, y), title, fill=(235, 245, 255), font=font)
+                img.save(thumb_path, format='JPEG', quality=85)
+                print(f"[tutor] Fallback thumbnail saved: {thumb_path}")
+            except Exception as e2:
+                print(f"[tutor] ⚠️ Failed to save fallback thumbnail: {e2}")
+
+    # 7) Optionally upload to GCS (production) and compute public URLs
+    #    Mirror learn pipeline behavior: prefer GCS HTTPS in production
     rel = str(video_file).replace('\\', '/').split('generated/', 1)[-1]
-    video_url = f"/videos/{rel}"
+    video_filename = Path(rel).name
+    gcs_used = False
+    gcs_video_https = ""
+    gcs_thumb_https = ""
+    # Mark upload stage
+    _write_stage({"status": "running", "stage": "upload"})
+    try:
+        from . import gcs_utils
+        ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
+        IS_PRODUCTION = ENVIRONMENT == "production"
+        if IS_PRODUCTION:
+            try:
+                # e.g., tutor/tutor_<safe_topic>_<timestamp>/lesson_video.mp4
+                # Keep a separate namespace from learn/
+                safe_topic = Path(rel).parts[1] if len(Path(rel).parts) > 1 else "tutor"
+                # Use the output directory name as the folder under tutor/
+                gcs_dir = f"tutor/{Path(rel).parent.name}"
+                up_video = gcs_utils.maybe_upload_and_url(
+                    str(video_file),
+                    parts=[gcs_dir, video_filename],
+                )
+                if isinstance(up_video, dict):
+                    gcs_video_https = up_video.get("https_url", "")
+                thumb_local = output_dir / "thumbnail.jpg"
+                if thumb_local.exists():
+                    up_thumb = gcs_utils.maybe_upload_and_url(
+                        str(thumb_local),
+                        parts=[gcs_dir, "thumbnail.jpg"],
+                    )
+                    if isinstance(up_thumb, dict):
+                        gcs_thumb_https = up_thumb.get("https_url", "")
+                gcs_used = bool(gcs_video_https)
+                if gcs_used:
+                    print(f"[tutor] Uploaded to GCS under {gcs_dir}")
+            except Exception as e:
+                print(f"⚠️ GCS upload failed (tutor): {e}")
+    except Exception:
+        # gcs_utils import not available; skip upload
+        pass
+
+    # Prefer GCS URL if available; otherwise fall back to backend-served path
+    video_url = gcs_video_https if (gcs_used and gcs_video_https) else f"/videos/{rel}"
+    thumb_url = (
+        gcs_thumb_https if (gcs_used and gcs_thumb_https) else f"/videos/{rel.rsplit('/', 1)[0]}/thumbnail.jpg"
+    ) if (output_dir / "thumbnail.jpg").exists() else None
     try:
         from .database import SessionLocal
         from .auth.models import User, UserPost
@@ -588,32 +682,35 @@ def _tutor_generate_video_from_request(request: TutorVideoRequest) -> Dict[str, 
         try:
             db = SessionLocal()
             user = None
-            if request.user_email:
+            # Prefer explicit user_id if provided
+            if getattr(request, "user_id", None):
+                user = db.query(User).filter(User.user_id == request.user_id).first()
+            # Fallback to email lookup
+            if not user and request.user_email:
                 user = db.query(User).filter(User.user_email == request.user_email).first()
-            if not user:
-                # Fallback to first user for testing environments
-                users = db.query(User).all()
-                if users:
-                    user = users[0]
             if user:
+                # If we uploaded to GCS in production, prefer storing the HTTPS URL in post_path
+                # so that videos service can short-circuit to public URLs without filesystem access.
+                # Otherwise, store a generated/ relative path for local discovery.
+                db_post_path = gcs_video_https if (gcs_used and gcs_video_https) else f"generated/{rel}"
                 post = UserPost(
                     user_id=user.user_id,
-                    # Store a resolvable generated/ path for videos service to locate files
-                    post_path=f"generated/{rel}",
+                    post_path=db_post_path,
                     post_topic=request.topic,
                     created_on=datetime.utcnow(),
-                    type='tutortemp'
+                    type='tutortemp',
+                    public=True
                 )
                 db.add(post)
                 try:
                     db.commit()
                     db.refresh(post)
-                    print(f"✅ Saved tutor post to user_posts id={post.post_id} type='tutortemp'")
+                    print(f"✅ Saved tutor post to user_posts id={post.post_id} type='tutortemp' post_path={post.post_path}")
                 except IntegrityError as ie:
                     db.rollback()
                     print(f"❌ Integrity error saving tutor post: {ie}")
             else:
-                print("⚠️ No user found; skipping user_posts insert for tutor video")
+                print("⚠️ No matching user for provided user_id/email; skipping user_posts insert for tutor video")
         except SQLAlchemyError as sae:
             if db:
                 db.rollback()
@@ -627,12 +724,12 @@ def _tutor_generate_video_from_request(request: TutorVideoRequest) -> Dict[str, 
     except Exception as e:
         print(f"⚠️ Unexpected error inserting tutor post: {e}")
 
-    # Return local served URL
+    # Return final URLs (prefer GCS in production when available)
     return {
         "status": "done",
         "videos": [{"url": video_url}],
         "video_url": video_url,
-        "thumbnail_url": f"/videos/{rel.rsplit('/', 1)[0]}/thumbnail.jpg" if (output_dir / "thumbnail.jpg").exists() else None,
+        "thumbnail_url": thumb_url,
         "message": "Tutor video generated successfully",
         # Debug info for AI background
         # AI background fields maintained for backward-compat, though generation method changed
@@ -645,22 +742,76 @@ def _tutor_generate_video_from_request(request: TutorVideoRequest) -> Dict[str, 
 
 
 @router.post("/generate-video")
-async def tutor_generate_video_endpoint(request: TutorVideoRequest):
+async def tutor_generate_video_endpoint(
+    request: TutorVideoRequest,
+    current_user: models.User = Depends(security.get_current_active_user),
+):
+    # Ensure we tag the job with the authenticated user's email for DB insertion
+    try:
+        if not request.user_email and getattr(current_user, "user_email", None):
+            request.user_email = current_user.user_email
+        if not request.user_id and getattr(current_user, "user_id", None):
+            request.user_id = current_user.user_id
+    except Exception:
+        pass
     return _tutor_generate_video_from_request(request)
 
 
 @router.post("/generate-video/start")
-async def tutor_generate_video_start(request: TutorVideoRequest):
+async def tutor_generate_video_start(
+    request: TutorVideoRequest,
+    current_user: models.User = Depends(security.get_current_active_user),
+):
     import uuid, asyncio
     job_id = uuid.uuid4().hex
     TUTOR_VIDEO_JOBS[job_id] = {"status": "running"}
 
+    # Persist status to disk. In Cloud Run only /tmp is writable; use that in production
+    env = os.getenv("ENVIRONMENT", "development").lower()
+    async_dir = Path("/tmp/async") if env == "production" else Path("generated/async")
+    try:
+        async_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    status_path = async_dir / f"{job_id}.json"
+    try:
+        status_path.write_text(json.dumps({"status": "running", "stage": "queued"}), encoding="utf-8")
+    except Exception:
+        # Non-fatal if writing status file fails
+        pass
+
     async def worker():
         try:
-            result = _tutor_generate_video_from_request(request)
-            TUTOR_VIDEO_JOBS[job_id] = {"status": "done", **result}
+            # Attach current user email if missing
+            try:
+                if not request.user_email and getattr(current_user, "user_email", None):
+                    request.user_email = current_user.user_email
+                if not request.user_id and getattr(current_user, "user_id", None):
+                    request.user_id = current_user.user_id
+            except Exception:
+                pass
+            # Mark stage before heavy work
+            try:
+                status_path.write_text(json.dumps({"status": "running", "stage": "starting"}), encoding="utf-8")
+            except Exception:
+                pass
+            # Run the heavy synchronous pipeline in a background thread to avoid blocking the event loop
+            result = await asyncio.to_thread(_tutor_generate_video_from_request, request, status_path)
+            final = {"status": "done", **result}
+            TUTOR_VIDEO_JOBS[job_id] = final
+            try:
+                status_path.write_text(json.dumps(final), encoding="utf-8")
+                print(f"[tutor] Job {job_id} status=done written to {status_path}")
+            except Exception:
+                pass
         except Exception as e:
-            TUTOR_VIDEO_JOBS[job_id] = {"status": "error", "error": str(e)}
+            err = {"status": "error", "error": str(e)}
+            TUTOR_VIDEO_JOBS[job_id] = err
+            try:
+                status_path.write_text(json.dumps(err), encoding="utf-8")
+                print(f"[tutor] Job {job_id} status=error written to {status_path}: {e}")
+            except Exception:
+                pass
 
     asyncio.create_task(worker())
     return {"job_id": job_id, "status": "queued"}
@@ -669,6 +820,20 @@ async def tutor_generate_video_start(request: TutorVideoRequest):
 @router.get("/generate-video/status/{job_id}")
 async def tutor_generate_video_status(job_id: str):
     job = TUTOR_VIDEO_JOBS.get(job_id)
-    if not job:
-        return {"status": "unknown", "error": "Invalid job_id"}
-    return job
+    if job:
+        return job
+    # Fallback to disk status (cross-instance best-effort). Use prod/dev path logic
+    try:
+        env = os.getenv("ENVIRONMENT", "development").lower()
+        base = Path("/tmp/async") if env == "production" else Path("generated/async")
+        status_path = base / f"{job_id}.json"
+        if status_path.exists():
+            with open(status_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                # Also repopulate in-memory cache for subsequent reads
+                if isinstance(data, dict):
+                    TUTOR_VIDEO_JOBS[job_id] = data
+                return data
+    except Exception:
+        pass
+    return {"status": "unknown", "error": "Invalid job_id"}

@@ -19,7 +19,9 @@ function isBackendStatus(value: unknown): value is BackendStatus {
 function getBackendUrl(): string {
   const serverUrl = process.env.BACKEND_URL || process.env.NEXT_PUBLIC_BACKEND_URL;
   if (serverUrl) return serverUrl.replace(/\/$/, '');
-  return 'http://localhost:8000';
+  if (process.env.NODE_ENV === 'development') return 'http://localhost:8000';
+  // Production fallback to known Cloud Run URL if env not set
+  return 'https://johnify-backend-873155673176.us-central1.run.app';
 }
 
 export async function GET(request: Request) {

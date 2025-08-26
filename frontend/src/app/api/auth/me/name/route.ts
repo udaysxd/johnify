@@ -1,0 +1,36 @@
+import { NextResponse } from 'next/server';
+
+export async function PUT(request: Request) {
+  try {
+    const isProduction = process.env.NODE_ENV === 'production';
+    const backendUrl = isProduction 
+      ? 'https://johnify-backend-873155673176.us-central1.run.app'
+      : process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+
+    const cookieHeader = request.headers.get('cookie') || '';
+    const body = await request.text();
+
+    const resp = await fetch(`${backendUrl}/api/auth/me/name`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Cookie': cookieHeader,
+      },
+      body,
+    });
+
+    const text = await resp.text();
+    if (!resp.ok) {
+      return NextResponse.json({ error: text || 'Backend error' }, { status: resp.status });
+    }
+
+    return new NextResponse(text, {
+      status: resp.status,
+      headers: { 'Content-Type': resp.headers.get('Content-Type') || 'application/json' },
+    });
+  } catch (err) {
+    console.error('Error forwarding PUT /api/auth/me/name:', err);
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+  }
+}

@@ -14,6 +14,7 @@ type Video = {
   videoUrl: string;
   createdAt: string;
   status: 'processing' | 'completed' | 'failed';
+  public: boolean;
 };
 
 
@@ -22,12 +23,112 @@ export default function HomePage() {
   const { user, loading: isAuthLoading } = useAuth();
   const isAuthenticated = !!user;
   const router = useRouter();
+  const timeAgo = (isoDate: string): string => {
+    const now = Date.now();
+    const then = new Date(isoDate).getTime();
+    if (isNaN(then)) return '';
+    const diff = Math.max(0, now - then);
+    const sec = Math.floor(diff / 1000);
+    if (sec < 60) return `${sec || 1} second${sec === 1 ? '' : 's'} ago`;
+    const min = Math.floor(sec / 60);
+    if (min < 60) return `${min} minute${min === 1 ? '' : 's'} ago`;
+    const hr = Math.floor(min / 60);
+    if (hr < 24) return `${hr} hour${hr === 1 ? '' : 's'} ago`;
+    const day = Math.floor(hr / 24);
+    if (day < 30) return `${day} day${day === 1 ? '' : 's'} ago`;
+    const mon = Math.floor(day / 30);
+    if (mon < 12) return `${mon} month${mon === 1 ? '' : 's'} ago`;
+    const yr = Math.floor(day / 365);
+    return `${yr} year${yr === 1 ? '' : 's'} ago`;
+  };
   const [videos, setVideos] = useState<Video[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedVideo, setSelectedVideo] = useState<Video | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const modalRef = useRef<HTMLDivElement>(null);
+  const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
+  const [deleteConfirm, setDeleteConfirm] = useState<{ open: boolean; video: Video | null }>({ open: false, video: null });
+
+  // Close the card action menu when clicking outside or pressing Escape
+  useEffect(() => {
+    const handleDocClick = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      // Ignore clicks inside menu trigger or panel
+      if (target.closest('[data-ml-menu-trigger]') || target.closest('[data-ml-menu-panel]')) return;
+      if (menuOpenId) setMenuOpenId(null);
+    };
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && menuOpenId) setMenuOpenId(null);
+    };
+    document.addEventListener('mousedown', handleDocClick);
+    document.addEventListener('keydown', handleKey);
+    return () => {
+      document.removeEventListener('mousedown', handleDocClick);
+      document.removeEventListener('keydown', handleKey);
+    };
+  }, [menuOpenId]);
+
+  const openDeleteConfirm = (video: Video) => {
+    setMenuOpenId(null);
+    setDeleteConfirm({ open: true, video });
+  };
+
+  const performDeleteVideo = async () => {
+    const video = deleteConfirm.video;
+    if (!video) return;
+    try {
+      console.log('[MyLearning] Deleting video', video.id);
+      // Optimistic remove
+      setVideos((prev) => prev.filter((v) => v.id !== video.id));
+      setMenuOpenId(null);
+      setDeleteConfirm({ open: false, video: null });
+      const resp = await fetch(`/api/videos/${encodeURIComponent(video.id)}`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+      });
+      if (!resp.ok) {
+        const err: { error?: string; detail?: string } = await resp.json().catch(() => ({}));
+        setError(err?.error || err?.detail || 'Failed to delete video');
+        // Attempt to refetch to restore state accurately
+        try {
+          const r = await fetch('/api/videos/my-videos', { cache: 'no-store' });
+          if (r.ok) {
+            const data = await r.json();
+            if (Array.isArray(data)) setVideos(data);
+          }
+        } catch {}
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to delete video');
+    }
+  };
+
+  const handleToggleVisibility = async (video: Video, nextPublic: boolean) => {
+    try {
+      // Optimistic update
+      setVideos((prev) => prev.map((v) => (v.id === video.id ? { ...v, public: nextPublic } : v)));
+      setMenuOpenId(null);
+      const resp = await fetch(`/api/videos/${encodeURIComponent(video.id)}/visibility`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ public: nextPublic }),
+      });
+      if (!resp.ok) {
+        // Revert on error
+        setVideos((prev) => prev.map((v) => (v.id === video.id ? { ...v, public: !nextPublic } : v)));
+        const err: { error?: string; detail?: string } = await resp
+          .json()
+          .catch(() => ({}));
+        setError(err?.error || err?.detail || 'Failed to update visibility');
+      }
+    } catch (e) {
+      setVideos((prev) => prev.map((v) => (v.id === video.id ? { ...v, public: !nextPublic } : v)));
+      setError(e instanceof Error ? e.message : 'Failed to update visibility');
+    }
+  };
 
   // Handle unauthenticated state - this needs to be the first effect
   useEffect(() => {
@@ -185,10 +286,12 @@ export default function HomePage() {
       <div className="py-8 px-4 sm:px-6 lg:px-8">
         <div className="max-w-7xl mx-auto">
           <div className="flex justify-between items-center mb-8">
-            <h1 className="text-3xl font-bold text-gray-900">Your Library</h1>
+            <h1 className="text-3xl font-bold text-gray-900">
+              My Learning<span className="ml-1 align-middle text-sm font-normal text-gray-500">({videos.length})</span>
+            </h1>
             {videos.length > 0 && (
               <Link
-                href="/quiz"
+                href="/tutor"
                 className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
               >
                 Create My Tutor
@@ -233,7 +336,7 @@ export default function HomePage() {
               <p className="mt-1 text-sm text-gray-500">Get started by creating your first AI tutor.</p>
               <div className="mt-6">
                 <Link
-                  href="/quiz"
+                  href="/tutor"
                   className="inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
                 >
                   <svg
@@ -258,10 +361,10 @@ export default function HomePage() {
               {videos.map((video) => (
                 <div 
                   key={video.id} 
-                  className="bg-white overflow-hidden shadow rounded-lg hover:shadow-lg transition-shadow duration-200 cursor-pointer"
+                  className="relative bg-white shadow rounded-lg hover:shadow-lg transition-shadow duration-200 cursor-pointer overflow-visible z-10"
                   onClick={() => setSelectedVideo(video)}
                 >
-                  <div className="relative pb-[56.25%] bg-black">
+                  <div className="relative pb-[56.25%] bg-black rounded-t-lg overflow-hidden">
                     {video.thumbnailUrl ? (
                       <div className="absolute inset-0">
                         <Image
@@ -286,6 +389,10 @@ export default function HomePage() {
                         {/* No title text on top of the image */}
                       </div>
                     )}
+                    {/* Visibility badge */}
+                    <span className={`absolute bottom-2 left-2 text-xs px-2 py-1 rounded ${video.public ? 'bg-green-600 text-white' : 'bg-gray-700 text-white'}`}>
+                      {video.public ? 'Public' : 'Private'}
+                    </span>
                     {video.status === 'processing' && (
                       <div className="absolute inset-0 bg-black bg-opacity-50 flex items-center justify-center">
                         <div className="text-white text-center">
@@ -304,13 +411,50 @@ export default function HomePage() {
                     </div>
                   </div>
                   <div className="mx-4 border-t border-gray-300" />
-                  <div className="px-4 pb-3 pt-3">
-                    <h3 className="text-base font-medium text-gray-900 truncate">
-                      {video.title || 'Untitled Video'}
-                    </h3>
-                    <p className="text-sm text-gray-500">
-                      Created on {new Date(video.createdAt).toLocaleDateString()}
-                    </p>
+                  <div className="px-4 pb-3 pt-3 relative">
+                    <div className="flex items-start justify-between gap-2">
+                      <h3 className="text-base font-medium text-gray-900 truncate">
+                        {video.title || 'Untitled Video'}
+                      </h3>
+                      {/* Three-dot menu next to title (vertical) */}
+                      <div
+                        className="relative"
+                        onClick={(e) => e.stopPropagation()}
+                        data-ml-menu-trigger
+                      >
+                        <button
+                          aria-label="Options"
+                          onClick={() => setMenuOpenId((prev) => (prev === video.id ? null : video.id))}
+                          className="p-1 rounded hover:bg-gray-100 text-gray-700"
+                        >
+                          {/* Vertical dots icon */}
+                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">
+                            <path d="M10 4a2 2 0 110-4 2 2 0 010 4zM10 12a2 2 0 110-4 2 2 0 010 4zM10 20a2 2 0 110-4 2 2 0 010 4z" />
+                          </svg>
+                        </button>
+                        {menuOpenId === video.id && (
+                          <div
+                            className="absolute right-0 bottom-full mb-2 w-44 bg-white text-gray-700 rounded shadow-lg border border-gray-200 z-50"
+                            onClick={(e) => e.stopPropagation()}
+                            data-ml-menu-panel
+                          >
+                            <button
+                              className="w-full text-left px-4 py-2 hover:bg-gray-100"
+                              onClick={() => handleToggleVisibility(video, !video.public)}
+                            >
+                              {video.public ? 'Make Private' : 'Make Public'}
+                            </button>
+                            <button
+                              className="w-full text-left px-4 py-2 hover:bg-gray-100 text-red-600"
+                              onClick={() => openDeleteConfirm(video)}
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    <p className="mt-1 text-sm text-gray-500">{timeAgo(video.createdAt)}</p>
                   </div>
                 </div>
               ))}
@@ -318,6 +462,33 @@ export default function HomePage() {
           )}
         </div>
       </div>
+
+      {/* Delete confirmation modal */}
+      {deleteConfirm.open && deleteConfirm.video && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/60 z-0" onClick={() => setDeleteConfirm({ open: false, video: null })} />
+          <div className="relative z-10 w-full max-w-md mx-auto bg-white rounded-lg shadow-xl overflow-hidden" onClick={(e) => e.stopPropagation()}>
+            <div className="px-6 pt-6">
+              <h3 className="text-lg font-semibold text-gray-900">Delete video?</h3>
+              <p className="mt-2 text-sm text-gray-600">This action cannot be undone. The video will be permanently removed from your account.</p>
+            </div>
+            <div className="mt-6 px-6 pb-6 flex justify-end gap-3">
+              <button
+                onClick={() => setDeleteConfirm({ open: false, video: null })}
+                className="px-4 py-2 rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={performDeleteVideo}
+                className="px-4 py-2 rounded-md bg-red-600 text-white hover:bg-red-700"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Video Modal */}
       {selectedVideo && (
@@ -347,7 +518,7 @@ export default function HomePage() {
                     console.log('Auto-play blocked on metadata:', e);
                   });
                 }}
-                onError={(e) => {
+                onError={() => {
                   const v = videoRef.current;
                   const err = v?.error;
                   console.error('Video error event', {
@@ -376,9 +547,7 @@ export default function HomePage() {
             </div>
             <div className="p-6">
               <h2 className="text-2xl font-bold text-gray-900">{selectedVideo.title}</h2>
-              <p className="mt-2 text-gray-600">
-                Created on {new Date(selectedVideo.createdAt).toLocaleDateString()}
-              </p>
+              <p className="mt-2 text-gray-600">{timeAgo(selectedVideo.createdAt)}</p>
             </div>
           </div>
         </div>
