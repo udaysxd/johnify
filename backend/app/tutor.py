@@ -259,6 +259,45 @@ def _tutor_generate_video_from_request(request: TutorVideoRequest, status_path: 
     images_dir.mkdir(exist_ok=True)
     audio_dir.mkdir(exist_ok=True)
 
+    # Pre-generate thumbnail early so we can use it for a title slide background
+    thumb_path = output_dir / "thumbnail.jpg"
+    if not thumb_path.exists():
+        try:
+            import urllib.parse
+            prompt = f"clean minimal educational thumbnail for: {request.topic} (tutor), without any text, letters, words, captions, logos, watermarks, signatures, signage, title"
+            encoded = urllib.parse.quote(str(prompt)[:200])
+            url = f"https://image.pollinations.ai/prompt/{encoded}"
+            print(f"[tutor] Generating thumbnail via Pollinations (early): {url}")
+            resp = requests.get(url, timeout=20)
+            resp.raise_for_status()
+            with open(thumb_path, 'wb') as f:
+                f.write(resp.content)
+            if thumb_path.stat().st_size < 1024:
+                raise RuntimeError("Thumbnail too small; treating as failure")
+        except Exception as e:
+            print(f"[tutor] Early thumbnail fetch failed: {e}. Using simple PIL fallback.")
+            try:
+                img = Image.new('RGB', (1280, 720), color=(20, 32, 48))
+                draw = ImageDraw.Draw(img)
+                title_txt = (request.topic or "Tutor").strip()[:60]
+                font = ImageFont.load_default()
+                try:
+                    bbox = draw.textbbox((0, 0), title_txt, font=font)
+                    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                except Exception:
+                    try:
+                        tw = draw.textlength(title_txt, font=font)  # type: ignore[attr-defined]
+                        th = 56
+                    except Exception:
+                        tw, th = 400, 56
+                x = max(0, (1280 - int(tw)) // 2)
+                y = max(0, (720 - int(th)) // 2)
+                draw.text((x, y), title_txt, fill=(235, 245, 255), font=font)
+                img.save(thumb_path, format='JPEG', quality=85)
+                print(f"[tutor] Early fallback thumbnail saved: {thumb_path}")
+            except Exception as e2:
+                print(f"[tutor] ⚠️ Failed to save early fallback thumbnail: {e2}")
+
     # Prepare wrong questions from provided questions/answers
     wrong_questions: List[Dict[str, Any]] = []
     for idx, question in enumerate(request.questions):
@@ -324,6 +363,58 @@ def _tutor_generate_video_from_request(request: TutorVideoRequest, status_path: 
     #    Import locally to avoid circular imports
     from .main import create_simple_slide
     try:
+        # 3a) Title slide using thumbnail as background with centered title text
+        try:
+            if thumb_path.exists():
+                bg = Image.open(thumb_path).convert('RGB')
+                # Resize to 1920x1080 for consistency with slides
+                bg = bg.resize((1920, 1080))
+                # Apply semi-transparent dark overlay for readability
+                bg = bg.convert('RGBA')
+                overlay = Image.new('RGBA', bg.size, (0, 0, 0, 120))  # ~47% opacity
+                bg = Image.alpha_composite(bg, overlay)
+                draw = ImageDraw.Draw(bg)
+                title_txt = (request.topic or "Tutor").strip()
+                # Try a larger TrueType font; fallback to default
+                font = None
+                try:
+                    # Attempt common fonts
+                    for fp in [
+                        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                        "C:/Windows/Fonts/arialbd.ttf",
+                        "C:/Windows/Fonts/segoeuib.ttf",
+                    ]:
+                        if os.path.exists(fp):
+                            font = ImageFont.truetype(fp, 96)
+                            break
+                except Exception:
+                    font = None
+                if font is None:
+                    try:
+                        font = ImageFont.load_default()
+                    except Exception:
+                        font = None
+                # Measure and center
+                try:
+                    bbox = draw.textbbox((0, 0), title_txt, font=font)
+                    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                except Exception:
+                    try:
+                        tw = draw.textlength(title_txt, font=font)  # type: ignore[attr-defined]
+                        th = 96
+                    except Exception:
+                        tw, th = 800, 96
+                x = max(0, (1920 - int(tw)) // 2)
+                y = max(0, (1080 - int(th)) // 2)
+                # Add a soft shadow for contrast
+                draw.text((x + 3, y + 3), title_txt, fill=(0, 0, 0), font=font)
+                draw.text((x, y), title_txt, fill=(250, 250, 250), font=font)
+                title_png = images_dir / "slide_000.png"
+                bg.convert('RGB').save(title_png, format='PNG')
+                print(f"[tutor] Title slide created: {title_png}")
+        except Exception as te:
+            print(f"[tutor] ⚠️ Failed to create title slide: {te}")
+
         # Read the markdown file content
         with open(md_file, 'r', encoding='utf-8') as f:
             markdown_content = f.read()
@@ -361,7 +452,7 @@ def _tutor_generate_video_from_request(request: TutorVideoRequest, status_path: 
             slide_content = '\n'.join(content_lines)
 
             output_path = images_dir / f"slide_{i:03d}.png"
-            create_simple_slide(slide_content, str(output_path), title=title)
+            create_simple_slide(slide_content, str(output_path), title=title, theme="johnify")
 
         # Verify images were created
         png_files_check = sorted(images_dir.glob("*.png"))
@@ -477,8 +568,36 @@ def _tutor_generate_video_from_request(request: TutorVideoRequest, status_path: 
         raise HTTPException(status_code=500, detail="No matching slides/audio found")
 
     segments = []
+    # Optional: prepend a silent title segment if slide_000.png exists
+    title_png = images_dir / "slide_000.png"
+    if title_png.exists():
+        seg0_path = temp_dir / "segment_000_title.mp4"
+        try:
+            _write_stage({"status": "running", "stage": "segment_0_title"})
+            subprocess.run([
+                "ffmpeg", "-y", "-v", "error",
+                # Video input (looping image)
+                "-loop", "1", "-i", str(title_png.absolute()),
+                # Silent audio input to keep stream layout consistent across segments
+                "-f", "lavfi", "-t", "1.5", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                # Duration and codecs
+                "-t", "1.5",
+                "-shortest",
+                "-c:v", "libx264",
+                "-pix_fmt", "yuv420p",
+                "-vf", "fps=30,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1",
+                "-c:a", "aac",
+                str(seg0_path.absolute())
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, check=True, timeout=120)
+            segments.append(seg0_path)
+            print(f"[tutor] Created title segment: {seg0_path.name}")
+        except Exception as e:
+            print(f"[tutor] ⚠️ Failed to create title segment: {e}")
+    # Exclude title slide from audio-paired segments
+    png_files_no_title = [p for p in png_files if p.name != "slide_000.png"]
+    pair_n = min(len(png_files_no_title), len(mp3_files))
     for i in range(pair_n):
-        png = png_files[i]
+        png = png_files_no_title[i]
         mp3 = mp3_files[i]
         seg_path = temp_dir / f"segment_{i+1:03d}.mp4"
         try:
@@ -540,6 +659,8 @@ def _tutor_generate_video_from_request(request: TutorVideoRequest, status_path: 
                 "-pix_fmt", "yuv420p",
                 "-vf", "fps=30,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1",
                 "-c:a", "aac",
+                "-ar", "44100",
+                "-ac", "2",
                 "-shortest",
                 str(seg_path.absolute())
             ]

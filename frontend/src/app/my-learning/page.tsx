@@ -23,6 +23,14 @@ export default function HomePage() {
   const { user, loading: isAuthLoading } = useAuth();
   const isAuthenticated = !!user;
   const router = useRouter();
+  // Capitalize the first alphabetical character, ignoring leading spaces/punctuation
+  const capitalizeFirst = (s?: string): string => {
+    if (!s) return 'Untitled Video';
+    const match = s.match(/[A-Za-z]/);
+    if (!match) return s.trim() ? s : 'Untitled Video';
+    const i = match.index as number;
+    return s.slice(0, i) + s.charAt(i).toUpperCase() + s.slice(i + 1);
+  };
   const timeAgo = (isoDate: string): string => {
     const now = Date.now();
     const then = new Date(isoDate).getTime();
@@ -414,7 +422,7 @@ export default function HomePage() {
                   <div className="px-4 pb-3 pt-3 relative">
                     <div className="flex items-start justify-between gap-2">
                       <h3 className="text-base font-medium text-gray-900 truncate">
-                        {video.title || 'Untitled Video'}
+                        {capitalizeFirst(video.title)}
                       </h3>
                       {/* Three-dot menu next to title (vertical) */}
                       <div

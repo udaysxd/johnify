@@ -127,7 +127,8 @@ def _find_ttf_font(preferred: list) -> Optional[str]:
     return None
 
 def create_simple_slide(text, output_path, width=1920, height=1080, bg_color=(255, 255, 255), 
-                      text_color=(0, 0, 0), padding=50, title_size=60, body_size=40, title=None):
+                      text_color=(0, 0, 0), padding=50, title_size=60, body_size=40, title=None,
+                      theme: str | None = None):
     """
     Create a simple slide image with the given text.
     
@@ -150,6 +151,25 @@ def create_simple_slide(text, output_path, width=1920, height=1080, bg_color=(25
         # Create a new image with white background
         img = Image.new('RGB', (width, height), color=bg_color)
         draw = ImageDraw.Draw(img)
+
+        # Theming: optional branded background for tutor pipeline
+        if theme == "johnify":
+            try:
+                # Right-side solid band (reduced width by ~80% from previous 28% => ~5.6%)
+                band_w = max(1, int(width * 0.056))
+                band_x0 = width - band_w
+                solid = (240, 234, 210)  # #f0ead2
+                draw.rectangle([(band_x0, 0), (width, height)], fill=solid)
+
+                # Circle slice in the top-left corner using the same solid color
+                circle_radius = max(40, int(min(width, height) * 0.06))
+                # Place center at (0,0) so only the top-left quarter appears inside the canvas
+                cx, cy = 0, 0
+                circle_bbox = [cx - circle_radius, cy - circle_radius, cx + circle_radius, cy + circle_radius]
+                draw.ellipse(circle_bbox, fill=(240, 234, 210))  # #f0ead2
+            except Exception as _:
+                # Non-fatal; continue without theme if drawing fails
+                pass
         
         # Try to load a TrueType font across platforms; avoid tiny default bitmap font
         repo_root = Path(__file__).resolve().parent.parent.parent
@@ -279,6 +299,22 @@ def create_simple_slide(text, output_path, width=1920, height=1080, bg_color=(25
                 # Add extra space after each logical line (not wrapped lines)
                 y += 10
         
+        # Watermark (applied for johnify theme)
+        if theme == "johnify":
+            try:
+                wm_text = "johnify"
+                # Use a subtle gray color; if transparency is desired, use an overlay
+                # Compute text size
+                bbox = draw.textbbox((0, 0), wm_text, font=body_font)
+                tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                wx = max(padding, width - padding - tw)
+                wy = max(padding, height - padding - th)
+                # Slight shadow for readability
+                draw.text((wx + 2, wy + 2), wm_text, font=body_font, fill=(0, 0, 0))
+                draw.text((wx, wy), wm_text, font=body_font, fill=(90, 90, 90))
+            except Exception:
+                pass
+
         # Save the image
         img.save(output_path)
         return True

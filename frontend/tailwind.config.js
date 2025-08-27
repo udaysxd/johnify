@@ -9,13 +9,41 @@ module.exports = {
   theme: {
     extend: {
       colors: {
+        // Brand palette
         primary: {
-          DEFAULT: '#4f46e5',
-          dark: '#4338ca',
+          // Teal
+          DEFAULT: '#80CBC4',
+          50: '#ECF8F7',
+          100: '#D9F1EF',
+          200: '#B4EBE6',
+          300: '#80CBC4',
+          400: '#5FB9B0',
+          500: '#3FA59A',
+          600: '#2F8179',
+          700: '#225F59',
+          800: '#153E3A',
+          900: '#0B2321',
         },
+        accent: {
+          // Amber
+          DEFAULT: '#FFB433',
+          50: '#FFF4DE',
+          100: '#FFE9BD',
+          200: '#FFD98A',
+          300: '#FFCA57',
+          400: '#FFB433',
+          500: '#E99F1E',
+          600: '#C28010',
+          700: '#996508',
+          800: '#704904',
+          900: '#4A3002',
+        },
+        surface: '#B4EBE6',
+        background: '#FBF8EF',
+        // Backwards compat alias
         secondary: {
-          DEFAULT: '#10b981',
-          dark: '#059669',
+          DEFAULT: '#FFB433',
+          dark: '#C28010',
         },
       },
     },

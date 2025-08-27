@@ -40,6 +40,14 @@ export default function FeedPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const modalRef = useRef<HTMLDivElement>(null);
   const { user } = useAuth();
+  // Capitalize the first alphabetical character, ignoring leading spaces/punctuation
+  const capitalizeFirst = (s?: string): string => {
+    if (!s) return 'Untitled Video';
+    const match = s.match(/[A-Za-z]/);
+    if (!match) return s.trim() ? s : 'Untitled Video';
+    const i = match.index as number;
+    return s.slice(0, i) + s.charAt(i).toUpperCase() + s.slice(i + 1);
+  };
   const timeAgo = (isoDate: string): string => {
     const now = Date.now();
     const then = new Date(isoDate).getTime();
@@ -304,7 +312,7 @@ export default function FeedPage() {
                   <div className="px-4 pb-3 pt-3">
                     <div className="flex items-center justify-between gap-3">
                       <h3 className="text-base font-medium text-gray-900 truncate">
-                        {video.title || 'Untitled Video'}
+                        {capitalizeFirst(video.title || 'Untitled Video')}
                       </h3>
                       <button
                         className={`flex items-center gap-1 px-2 py-1 rounded text-sm ${
@@ -329,7 +337,7 @@ export default function FeedPage() {
                         ) : (
                           // Outline heart (not liked)
                           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-4 w-4">
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M21 8.25c0-2.485-2.015-4.5-4.5-4.5-1.86 0-3.456 1.116-4.125 2.709-.669-1.593-2.265-2.709-4.125-2.709C5.015 3.75 3 5.765 3 8.25c0 7.22 9 12 9 12s9-4.78 9-12z" />
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 8.25c0-2.485-2.015-4.5-4.5-4.5-1.86 0-3.456 1.116-4.125 2.709-.669-1.593-2.265-2.709-4.125-2.709C5.015 3.75 3 5.765 3 8.25c0 7.22 9 12 9 12s9-4.78 9-12z" />
                           </svg>
                         )}
                         <span>{likeCounts[video.id] ?? 0}</span>
@@ -390,7 +398,7 @@ export default function FeedPage() {
               </button>
             </div>
             <div className="p-6">
-              <h2 className="text-2xl font-bold text-gray-900">{selectedVideo.title}</h2>
+              <h2 className="text-2xl font-bold text-gray-900">{capitalizeFirst(selectedVideo.title)}</h2>
               {(() => {
                 const creatorName = extractCreatorName(selectedVideo);
                 return creatorName ? (
