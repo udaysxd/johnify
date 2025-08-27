@@ -1,7 +1,7 @@
 from datetime import datetime, time, timedelta
 from uuid import uuid4
 from sqlalchemy import Column, Integer, String, DateTime, Time, Boolean, ForeignKey
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 import bcrypt
@@ -56,6 +56,8 @@ class UserPost(Base):
     type = Column(String(50), nullable=True)
     # Whether this post is publicly visible in the feed
     public = Column(Boolean, default=True, nullable=True)
+    # Tags describing genre/industry/segment/category for the video (array of strings)
+    tags = Column(JSONB, nullable=True)
     
     # Relationship to user
     user = relationship("User", back_populates="posts")

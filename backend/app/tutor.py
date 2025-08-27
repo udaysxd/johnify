@@ -296,9 +296,76 @@ class TutorVideoRequest(BaseModel):
     answers: Dict[str, str]
     user_email: Optional[str] = None
     user_id: Optional[int] = None
+    # Optional list of tags to classify the video (genre/industry/segment/category)
+    tags: Optional[List[str]] = None
 
 # In-memory job store for tutor-only
 TUTOR_VIDEO_JOBS: Dict[str, Dict[str, Any]] = {}
+
+def _generate_topic_tags(topic: str) -> List[str]:
+    """Generate exactly 7 concise tags for the given topic using DeepSeek.
+    Returns a sanitized list of up to 7 strings. Empty list on failure.
+    """
+    try:
+        client = get_deepseek_client()
+    except Exception as e:
+        # DeepSeek not configured
+        print(f"\u26a0\ufe0f DeepSeek unavailable for tags: {e}")
+        return []
+
+    sys_msg = (
+        "You are an expert taxonomy generator. "
+        "Return only valid JSON: an array of exactly 7 lowercase tags (strings). "
+        "Each tag must be a single word or short phrase (<= 3 words), no punctuation, no emojis."
+    )
+    user_msg = (
+        f"Topic: {topic}\n\n"
+        "Produce exactly 7 concise, descriptive tags capturing genre, industry, segment, and category.\n"
+        "Output strictly as JSON array, no commentary. Example: [\"education\", \"biology\", \"k12\", \"science\", \"fundamentals\", \"tutorial\", \"intro\"]"
+    )
+    try:
+        resp = client.chat.completions.create(
+            model="deepseek-chat",
+            temperature=0.2,
+            max_tokens=200,
+            messages=[
+                {"role": "system", "content": sys_msg},
+                {"role": "user", "content": user_msg},
+            ],
+        )
+        content = (resp.choices[0].message.content or "").strip()
+    except Exception as e:
+        print(f"\u274c DeepSeek tags request failed: {e}")
+        return []
+
+    tags: List[str] = []
+    # Try JSON parse first
+    import json as _json
+    try:
+        data = _json.loads(content)
+        if isinstance(data, list):
+            tags = [str(x) for x in data]
+    except Exception:
+        # Fallback: try to parse as comma or newline separated
+        raw = content.replace("[", "").replace("]", "")
+        parts = [p.strip().strip('-').strip('\"\'') for p in raw.replace("\n", ",").split(",")]
+        tags = [p for p in parts if p]
+
+    # Sanitize: lowercase, trim, dedupe, max 3 words and 64 chars, first 7
+    cleaned: List[str] = []
+    seen = set()
+    for t in tags:
+        s = str(t).strip().lower()
+        if not s:
+            continue
+        words = s.split()
+        s = " ".join(words[:3])[:64]
+        if s and s not in seen:
+            seen.add(s)
+            cleaned.append(s)
+        if len(cleaned) >= 7:
+            break
+    return cleaned[:7]
 
 
 def _tutor_generate_video_from_request(request: TutorVideoRequest, status_path: Optional[Path] = None) -> Dict[str, Any]:
@@ -799,19 +866,72 @@ def _tutor_generate_video_from_request(request: TutorVideoRequest, status_path: 
 
     # Concat segments
     concat_file = temp_dir / "concat.txt"
-    with open(concat_file, 'w', encoding='utf-8') as f:
+    # Use LF newlines for ffmpeg. Write in the simple concat list format with single quotes.
+    # This avoids Windows interpreting double quotes as literal characters.
+    with open(concat_file, 'w', encoding='utf-8', newline='\n') as f:
         for seg in segments:
-            f.write(f"file '{seg.absolute()}'\n")
+            p = seg.resolve().as_posix()
+            # Escape single quotes if present (rare on Windows paths)
+            p = p.replace("'", "'\\''")
+            f.write(f"file '{p}'\n")
+
+    # Quick sanity check for referenced files and log concat file contents
+    try:
+        missing_or_empty = []
+        for seg in segments:
+            try:
+                if (not seg.exists()) or (seg.stat().st_size == 0):
+                    missing_or_empty.append(str(seg))
+            except Exception:
+                missing_or_empty.append(str(seg))
+        print(f"[tutor] Concat file written at: {concat_file}")
+        try:
+            preview = concat_file.read_text(encoding='utf-8')
+            print(f"[tutor] concat.txt contents (first 20 lines):\n" + "\n".join(preview.splitlines()[:20]))
+        except Exception as _e:
+            print(f"[tutor] Unable to read concat.txt for preview: {_e}")
+        if missing_or_empty:
+            msg = f"Some segments are missing or empty: {missing_or_empty[:5]}" + (" (and more)" if len(missing_or_empty) > 5 else "")
+            print(f"[tutor] WARNING: {msg}")
+            _write_stage({"status": "running", "stage": "concat_validation", "warning": msg})
+    except Exception as _e:
+        print(f"[tutor] Concat validation failed: {_e}")
 
     # Mark concat stage
     _write_stage({"status": "running", "stage": "concat"})
-    subprocess.run([
-        "ffmpeg", "-y", "-v", "error",
-        "-f", "concat", "-safe", "0",
-        "-i", str(concat_file.absolute()),
-        "-c", "copy",
-        str(video_file.absolute())
-    ], stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, check=True, timeout=600)
+    try:
+        res1 = subprocess.run([
+            "ffmpeg", "-y", "-v", "error",
+            "-f", "concat", "-safe", "0",
+            "-i", str(concat_file.absolute()),
+            "-c", "copy",
+            str(video_file.absolute())
+        ], capture_output=True, text=True, check=True, timeout=600)
+        if res1.stderr:
+            print(f"[tutor] ffmpeg concat (copy) stderr:\n{res1.stderr.strip()}")
+    except subprocess.CalledProcessError as e:
+        err = (e.stderr or "").strip() if hasattr(e, 'stderr') else str(e)
+        print(f"[tutor] ffmpeg concat (copy) failed. stderr:\n{err}")
+        _write_stage({"status": "running", "stage": "concat_copy_error", "error": err})
+        # Retry with re-encode to handle any slight codec/parameter mismatches across segments
+        _write_stage({"status": "running", "stage": "concat_retry_encode"})
+        try:
+            res2 = subprocess.run([
+                "ffmpeg", "-y", "-v", "error",
+                "-f", "concat", "-safe", "0",
+                "-i", str(concat_file.absolute()),
+                "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "192k",
+                "-movflags", "+faststart",
+                str(video_file.absolute())
+            ], capture_output=True, text=True, check=True, timeout=1800)
+            if res2.stderr:
+                print(f"[tutor] ffmpeg concat (reencode) stderr:\n{res2.stderr.strip()}")
+        except subprocess.CalledProcessError as e2:
+            err2 = (e2.stderr or "").strip() if hasattr(e2, 'stderr') else str(e2)
+            print(f"[tutor] ffmpeg concat (reencode) failed. stderr:\n{err2}")
+            _write_stage({"status": "error", "stage": "concat_retry_encode", "error": err2})
+            raise
     try:
         size_mb = video_file.stat().st_size / (1024*1024) if video_file.exists() else 0
         print(f"[tutor] Concatenated {len(segments)} segments into {video_file} ({size_mb:.2f} MB)")
@@ -922,6 +1042,31 @@ def _tutor_generate_video_from_request(request: TutorVideoRequest, status_path: 
             if not user and request.user_email:
                 user = db.query(User).filter(User.user_email == request.user_email).first()
             if user:
+                # Generate 7 tags via DeepSeek based on the display title/topic
+                req_tags = _generate_topic_tags(display_title or request.topic)
+                # Fallback: lightly sanitize any client-provided tags if DeepSeek failed
+                if not req_tags:
+                    try:
+                        if isinstance(getattr(request, "tags", None), list):
+                            tmp = []
+                            for t in request.tags:
+                                try:
+                                    s = str(t).strip()
+                                    if s:
+                                        tmp.append(s[:64])
+                                except Exception:
+                                    continue
+                            seen = set()
+                            req_tags = []
+                            for s in tmp:
+                                k = s.lower()
+                                if k not in seen:
+                                    seen.add(k)
+                                    req_tags.append(s)
+                            req_tags = req_tags[:7]
+                    except Exception:
+                        req_tags = []
+
                 # If we uploaded to GCS in production, prefer storing the HTTPS URL in post_path
                 # so that videos service can short-circuit to public URLs without filesystem access.
                 # Otherwise, store a generated/ relative path for local discovery.
@@ -932,7 +1077,8 @@ def _tutor_generate_video_from_request(request: TutorVideoRequest, status_path: 
                     post_topic=display_title,
                     created_on=datetime.utcnow(),
                     type='tutortemp',
-                    public=True
+                    public=True,
+                    tags=req_tags or []
                 )
                 db.add(post)
                 try:

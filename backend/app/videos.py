@@ -148,6 +148,7 @@ def get_video_files(user_id: int, db: Session) -> List[Dict[str, Any]]:
                         "topic": post.post_topic or "",
                         "status": "completed",
                         "public": bool(getattr(post, "public", True)),
+                        "tags": getattr(post, "tags", None) or [],
                     })
                     continue
             if pp.startswith("https://storage.googleapis.com/"):
@@ -162,6 +163,7 @@ def get_video_files(user_id: int, db: Session) -> List[Dict[str, Any]]:
                     "topic": post.post_topic or "",
                     "status": "completed",
                     "public": bool(getattr(post, "public", True)),
+                    "tags": getattr(post, "tags", None) or [],
                 })
                 continue
 
@@ -263,6 +265,7 @@ def get_video_files(user_id: int, db: Session) -> List[Dict[str, Any]]:
                     "topic": post.post_topic or "",
                     "status": "completed",
                     "public": bool(getattr(post, "public", True)),
+                    "tags": getattr(post, "tags", None) or [],
                 })
             else:
                 print(f"❌ Video not found at: {video_path}")
@@ -508,6 +511,7 @@ def _collect_videos_for_post(post: models.UserPost) -> Dict[str, Any]:
         "status": "completed",
         "user_id": post.user_id,
         "user_name": getattr(post.user, "user_name", None) if getattr(post, "user", None) is not None else None,
+        "tags": getattr(post, "tags", None) or [],
     }
 
 @router.get("/feed", response_model=List[Dict[str, Any]])
@@ -552,6 +556,7 @@ async def get_feed_videos(
                         "status": "completed",
                         "user_id": post.user_id,
                         "user_name": getattr(post, "user", None) and getattr(post.user, "user_name", None),
+                        "tags": getattr(post, "tags", None) or [],
                     })
                     continue
             if pp.startswith("https://storage.googleapis.com/"):
@@ -567,6 +572,7 @@ async def get_feed_videos(
                     "status": "completed",
                     "user_id": post.user_id,
                     "user_name": getattr(post, "user", None) and getattr(post.user, "user_name", None),
+                    "tags": getattr(post, "tags", None) or [],
                 })
                 continue
 
