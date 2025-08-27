@@ -57,6 +57,7 @@ function TutorPageContent() {
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [quizTopic, setQuizTopic] = useState('');
   const [quiz, setQuiz] = useState<QuizData | null>(null);
+  const [displayTitle, setDisplayTitle] = useState<string | null>(null);
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [result, setResult] = useState<QuizResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -71,16 +72,18 @@ function TutorPageContent() {
     'Sleep consolidates memories—review before bedtime!',
     'Curiosity triggers dopamine, enhancing learning.',
   ];
+  const [dynamicFunFacts, setDynamicFunFacts] = useState<string[] | null>(null);
   const [factIndex, setFactIndex] = useState(0);
 
   // Rotate fun facts while generating video
   useEffect(() => {
     if (!isGeneratingVideo) return;
+    const currentFacts = dynamicFunFacts && dynamicFunFacts.length > 0 ? dynamicFunFacts : funFacts;
     const id = setInterval(() => {
-      setFactIndex((i) => (i + 1) % funFacts.length);
-    }, 3000);
+      setFactIndex((i) => (i + 1) % currentFacts.length);
+    }, 6000);
     return () => clearInterval(id);
-  }, [isGeneratingVideo, funFacts.length]);
+  }, [isGeneratingVideo, dynamicFunFacts, funFacts.length]);
 
   useEffect(() => {
     setIsClient(true);
@@ -150,6 +153,22 @@ function TutorPageContent() {
 
       console.log('Processed tutor quiz data:', JSON.stringify(quizData, null, 2));
       setQuiz(quizData);
+      // Wire corrected title (display-only) and dynamic fun facts if provided
+      if (responseData.corrected_title && typeof responseData.corrected_title === 'string') {
+        try {
+          const t = String(responseData.corrected_title).trim().slice(0, 100);
+          if (t) setDisplayTitle(t);
+        } catch {}
+      } else {
+        setDisplayTitle(null);
+      }
+      if (Array.isArray(responseData.fun_facts) && responseData.fun_facts.length > 0) {
+        const cleaned = responseData.fun_facts.map((s: unknown) => String(s || '').trim()).filter((s: string) => !!s);
+        if (cleaned.length > 0) setDynamicFunFacts(cleaned.slice(0, 10));
+        else setDynamicFunFacts(null);
+      } else {
+        setDynamicFunFacts(null);
+      }
     } catch (err) {
       const error = err as Error;
       setError(error.message || 'Failed to generate quiz. Please try again.');
@@ -226,7 +245,7 @@ function TutorPageContent() {
       });
 
       console.log('Tutor sending to generate-video API:', {
-        topic: quiz.topic,
+        topic: displayTitle || quiz.topic,
         questions: formattedQuestions,
         answers: formattedAnswers,
       });
@@ -234,7 +253,7 @@ function TutorPageContent() {
       const response = await fetch('/api/tutor/generate-video', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ topic: quiz.topic, questions: formattedQuestions, answers: formattedAnswers }),
+        body: JSON.stringify({ topic: displayTitle || quiz.topic, questions: formattedQuestions, answers: formattedAnswers }),
       });
 
       const initialStatus = response.status;
@@ -273,7 +292,7 @@ function TutorPageContent() {
           const reResp = await fetch('/api/tutor/generate-video', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ topic: quiz.topic, questions: formattedQuestions, answers: formattedAnswers }),
+            body: JSON.stringify({ topic: displayTitle || quiz.topic, questions: formattedQuestions, answers: formattedAnswers }),
             cache: 'no-store',
           });
           const reJson = await reResp.json().catch(() => ({}));
@@ -482,7 +501,7 @@ function TutorPageContent() {
       ) : !result ? (
         <div className="bg-white shadow rounded-lg overflow-hidden">
           <div className="p-6 border-b border-gray-200 text-center">
-            <h1 className="text-2xl font-bold text-gray-800">Tutor Quiz: {quiz.topic}</h1>
+            <h1 className="text-2xl font-bold text-gray-800">Tutor Quiz: {displayTitle || quiz.topic}</h1>
             <p className="text-gray-600 mt-1">Answer the questions to unlock your personalised video</p>
           </div>
 
@@ -613,14 +632,19 @@ function TutorPageContent() {
                   </div>
                   {videoError && <div className="mt-4 p-3 bg-red-50 text-red-700 rounded-md text-sm">{videoError}</div>}
                   {isGeneratingVideo && (
-                    <div className="mt-6 p-4 bg-white border border-gray-200 rounded-lg">
-                      <h3 className="text-md font-semibold mb-2 text-gray-900">Some Fun facts...</h3>
-                      <div className="min-h-[48px] flex items-center justify-center text-gray-700 text-sm transition-all">
-                        {funFacts[factIndex]}
+                    <div className="mt-6 p-4 rounded-lg border border-yellow-300 bg-[#f7b801]/15">
+                      <div className="flex items-center justify-center gap-2 mb-2">
+                        <svg className="h-5 w-5 text-[#f7b801]" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                          <path d="M11 3a7 7 0 00-4.546 12.316c.3.26.546.585.71.953l.087.205c.177.415.597.676 1.05.676h3.398a1.2 1.2 0 001.097-.676l.087-.205c.164-.368.41-.693.71-.953A7 7 0 0011 3zm-1 14a1 1 0 102 0h-2z" />
+                        </svg>
+                        <h3 className="text-md font-semibold text-gray-900">Some fun facts…</h3>
+                      </div>
+                      <div className="min-h-[56px] flex items-center justify-center text-gray-900 font-semibold text-base text-center px-4 transition-all">
+                        {(dynamicFunFacts && dynamicFunFacts.length > 0 ? dynamicFunFacts : funFacts)[factIndex]}
                       </div>
                       <div className="mt-2 flex justify-center gap-1">
-                        {funFacts.map((_, i) => (
-                          <span key={i} className={`h-1.5 w-1.5 rounded-full ${i === factIndex ? 'bg-indigo-600' : 'bg-gray-300'}`}></span>
+                        {(dynamicFunFacts && dynamicFunFacts.length > 0 ? dynamicFunFacts : funFacts).map((_, i) => (
+                          <span key={i} className={`h-1.5 w-1.5 rounded-full ${i === factIndex ? 'bg-[#f7b801]' : 'bg-gray-300'}`}></span>
                         ))}
                       </div>
                     </div>
@@ -659,14 +683,19 @@ function TutorPageContent() {
                     </button>
                     {videoError && <div className="mt-2 p-3 bg-red-50 text-red-700 rounded-md text-sm">{videoError}</div>}
                     {isGeneratingVideo && (
-                      <div className="mt-4 p-4 bg-white border border-gray-200 rounded-lg">
-                        <h3 className="text-md font-semibold mb-2 text-gray-900">Some Fun facts...</h3>
-                        <div className="min-h-[48px] flex items-center justify-center text-gray-700 text-sm transition-all">
-                          {funFacts[factIndex]}
+                      <div className="mt-4 p-4 rounded-lg border border-yellow-300 bg-[#f7b801]/15">
+                        <div className="flex items-center justify-center gap-2 mb-2">
+                          <svg className="h-5 w-5 text-[#f7b801]" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                            <path d="M11 3a7 7 0 00-4.546 12.316c.3.26.546.585.71.953l.087.205c.177.415.597.676 1.05.676h3.398a1.2 1.2 0 001.097-.676l.087-.205c.164-.368.41-.693.71-.953A7 7 0 0011 3zm-1 14a1 1 0 102 0h-2z" />
+                          </svg>
+                          <h3 className="text-md font-semibold text-gray-900">Some fun facts…</h3>
+                        </div>
+                        <div className="min-h-[56px] flex items-center justify-center text-gray-900 font-semibold text-base text-center px-4 transition-all">
+                          {(dynamicFunFacts && dynamicFunFacts.length > 0 ? dynamicFunFacts : funFacts)[factIndex]}
                         </div>
                         <div className="mt-2 flex justify-center gap-1">
-                          {funFacts.map((_, i) => (
-                            <span key={i} className={`h-1.5 w-1.5 rounded-full ${i === factIndex ? 'bg-indigo-600' : 'bg-gray-300'}`}></span>
+                          {(dynamicFunFacts && dynamicFunFacts.length > 0 ? dynamicFunFacts : funFacts).map((_, i) => (
+                            <span key={i} className={`h-1.5 w-1.5 rounded-full ${i === factIndex ? 'bg-[#f7b801]' : 'bg-gray-300'}`}></span>
                           ))}
                         </div>
                       </div>

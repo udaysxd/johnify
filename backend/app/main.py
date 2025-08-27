@@ -158,7 +158,7 @@ def create_simple_slide(text, output_path, width=1920, height=1080, bg_color=(25
                 # Right-side solid band (reduced width by ~80% from previous 28% => ~5.6%)
                 band_w = max(1, int(width * 0.056))
                 band_x0 = width - band_w
-                solid = (240, 234, 210)  # #f0ead2
+                solid = (247, 184, 1)  # #f7b801
                 draw.rectangle([(band_x0, 0), (width, height)], fill=solid)
 
                 # Circle slice in the top-left corner using the same solid color
@@ -166,7 +166,7 @@ def create_simple_slide(text, output_path, width=1920, height=1080, bg_color=(25
                 # Place center at (0,0) so only the top-left quarter appears inside the canvas
                 cx, cy = 0, 0
                 circle_bbox = [cx - circle_radius, cy - circle_radius, cx + circle_radius, cy + circle_radius]
-                draw.ellipse(circle_bbox, fill=(240, 234, 210))  # #f0ead2
+                draw.ellipse(circle_bbox, fill=(247, 184, 1))  # #f7b801
             except Exception as _:
                 # Non-fatal; continue without theme if drawing fails
                 pass

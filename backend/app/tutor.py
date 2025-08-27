@@ -53,12 +53,21 @@ def mock_test() -> List[Dict]:
     ]
 
 
-def generate_topic_quiz(topic: str, num_questions: int = 10) -> List[Dict]:
+def generate_topic_quiz(topic: str, num_questions: int = 10) -> Dict[str, Any]:
+    """Call Deepseek once to get questions plus extras.
+
+    Returns a dict with keys:
+      - questions: List[Dict]
+      - fun_facts: List[str]
+      - corrected_title: str
+    """
     client = get_deepseek_client()
     num = max(1, min(20, int(num_questions)))
     system = (
-        "You generate multiple-choice quizzes. Return STRICT JSON ONLY. "
-        "Each question must have: q (string), opts (array of 4 strings), a (one of 'a','b','c','d'), explanation (string)."
+        "You generate a topic-based multiple-choice quiz along with extras. Return STRICT JSON ONLY with this shape: "
+        "{\n  \"questions\": [ { q, opts, a, explanation } x N ],\n  \"fun_facts\": [string, ...],\n  \"corrected_title\": string\n}. "
+        "Each question must have: q (string), opts (array of 4 short strings), a (one of 'a','b','c','d'), explanation (string). "
+        "fun_facts should be 10 short, accurate facts about the topic. corrected_title must be <= 100 chars, typo/spell checked, concise."
     )
     user = (
         f"Create a {num}-question multiple-choice quiz on the topic: '{topic}'.\n"
@@ -67,7 +76,8 @@ def generate_topic_quiz(topic: str, num_questions: int = 10) -> List[Dict]:
         "- opts must be exactly 4 distinct plausible choices. Prefer short options.\n"
         "- a must be the correct option's letter (a/b/c/d).\n"
         "- Provide a one-sentence explanation for the correct answer.\n"
-        "Return ONLY a JSON array, no code fences, no extra text."
+        "Also provide exactly 10 fun_facts based on the topic and a corrected_title (<=100 chars, typo/spell-checked, concise).\n"
+        "Return ONLY a single JSON object matching the specified schema. No code fences, no extra text."
     )
     resp = client.chat.completions.create(
         model="deepseek-chat",
@@ -76,22 +86,39 @@ def generate_topic_quiz(topic: str, num_questions: int = 10) -> List[Dict]:
             {"role": "user", "content": user},
         ],
         temperature=0.7,
-        max_tokens=1500,
+        max_tokens=2000,
     )
     content = resp.choices[0].message.content.strip()
+
+    # Parse flexible: accept dict (new) or list (legacy)
+    data_obj: Dict[str, Any]
     try:
-        data = json.loads(content)
+        parsed = json.loads(content)
     except Exception:
-        import re
-        m = re.search(r"\[.*\]", content, re.DOTALL)
-        if not m:
-            data = []
+        # Legacy array fallback: extract first JSON array present
+        m = re.search(r"\{.*\}|\[.*\]", content, re.DOTALL)
+        if m:
+            try:
+                parsed = json.loads(m.group(0))
+            except Exception:
+                parsed = []
         else:
-            data = json.loads(m.group(0))
-    if not isinstance(data, list):
-        data = []
+            parsed = []
+
+    if isinstance(parsed, dict):
+        data_obj = parsed
+    elif isinstance(parsed, list):
+        # Legacy: wrap into object
+        data_obj = {"questions": parsed}
+    else:
+        data_obj = {"questions": []}
+
+    raw_questions = data_obj.get("questions") or []
+    if not isinstance(raw_questions, list):
+        raw_questions = []
+
     normalized: List[Dict] = []
-    for item in data[:num]:
+    for item in raw_questions[:num]:
         try:
             normalized.append(_validate_question(item))
         except Exception:
@@ -103,7 +130,35 @@ def generate_topic_quiz(topic: str, num_questions: int = 10) -> List[Dict]:
             normalized.append(mt[idx])
         else:
             break
-    return normalized
+
+    # Fun facts normalization
+    fun_facts_raw = data_obj.get("fun_facts") or []
+    if not isinstance(fun_facts_raw, list):
+        fun_facts_raw = []
+    fun_facts: List[str] = []
+    for ff in fun_facts_raw:
+        try:
+            s = str(ff).strip()
+            if s and s not in fun_facts:
+                fun_facts.append(s)
+        except Exception:
+            continue
+    if not fun_facts:
+        # minimal defaults if model omitted
+        fun_facts = [
+            f"Interesting fact about {topic}.",
+            f"Another insight on {topic}.",
+        ]
+    fun_facts = fun_facts[:10]
+
+    # Corrected title normalization
+    corrected_title = data_obj.get("corrected_title") or topic or "Tutor"
+    try:
+        corrected_title = str(corrected_title).strip()[:100]
+    except Exception:
+        corrected_title = (topic or "Tutor")[:100]
+
+    return {"questions": normalized, "fun_facts": fun_facts, "corrected_title": corrected_title}
 
 
 @router.post("/generate")
@@ -112,11 +167,17 @@ async def tutor_generate_quiz(request: Request):
     topic = data.get("topic", "General Knowledge")
     num_questions = int(data.get("num_questions", 10))
     try:
-        questions = generate_topic_quiz(topic, num_questions)
+        result = generate_topic_quiz(topic, num_questions)
+        # Backward-compatible shape
+        questions = result.get("questions", []) if isinstance(result, dict) else (result or [])
+        fun_facts = result.get("fun_facts", []) if isinstance(result, dict) else []
+        corrected_title = result.get("corrected_title", topic) if isinstance(result, dict) else topic
     except Exception as e:
         print(f"[tutor.generate] Fallback to mock due to error: {e}")
         questions = mock_test()[:num_questions]
-    return {"topic": topic, "questions": questions}
+        fun_facts = [f"Interesting fact about {topic}."]
+        corrected_title = topic[:100]
+    return {"topic": topic, "questions": questions, "fun_facts": fun_facts, "corrected_title": corrected_title}
 
 
 def administer(answers, questions=None):
@@ -244,6 +305,11 @@ def _tutor_generate_video_from_request(request: TutorVideoRequest, status_path: 
     # Lazy import to avoid circular dependency; sanitize_filename lives in main.py
     from .main import sanitize_filename
     safe_topic = sanitize_filename(request.topic or 'tutor')
+    # Use a normalized corrected title everywhere for consistency
+    try:
+        display_title = str(request.topic or 'Tutor').strip()[:100]
+    except Exception:
+        display_title = (request.topic or 'Tutor')[:100]
     timestamp = int(time.time())
     # Determine base generated dir (prod: /tmp/generated, dev: repo-root/generated)
     env = os.getenv("ENVIRONMENT", "development").lower()
@@ -264,7 +330,7 @@ def _tutor_generate_video_from_request(request: TutorVideoRequest, status_path: 
     if not thumb_path.exists():
         try:
             import urllib.parse
-            prompt = f"clean minimal educational thumbnail for: {request.topic} (tutor), without any text, letters, words, captions, logos, watermarks, signatures, signage, title"
+            prompt = f"clean minimal educational thumbnail for: {display_title} (tutor), without any text, letters, words, captions, logos, watermarks, signatures, signage, title"
             encoded = urllib.parse.quote(str(prompt)[:200])
             url = f"https://image.pollinations.ai/prompt/{encoded}"
             print(f"[tutor] Generating thumbnail via Pollinations (early): {url}")
@@ -279,7 +345,7 @@ def _tutor_generate_video_from_request(request: TutorVideoRequest, status_path: 
             try:
                 img = Image.new('RGB', (1280, 720), color=(20, 32, 48))
                 draw = ImageDraw.Draw(img)
-                title_txt = (request.topic or "Tutor").strip()[:60]
+                title_txt = (display_title or "Tutor").strip()[:60]
                 font = ImageFont.load_default()
                 try:
                     bbox = draw.textbbox((0, 0), title_txt, font=font)
@@ -374,7 +440,7 @@ def _tutor_generate_video_from_request(request: TutorVideoRequest, status_path: 
                 overlay = Image.new('RGBA', bg.size, (0, 0, 0, 120))  # ~47% opacity
                 bg = Image.alpha_composite(bg, overlay)
                 draw = ImageDraw.Draw(bg)
-                title_txt = (request.topic or "Tutor").strip()
+                title_txt = (display_title or "Tutor").strip()
                 # Try a larger TrueType font; fallback to default
                 font = None
                 try:
@@ -394,21 +460,67 @@ def _tutor_generate_video_from_request(request: TutorVideoRequest, status_path: 
                         font = ImageFont.load_default()
                     except Exception:
                         font = None
-                # Measure and center
-                try:
-                    bbox = draw.textbbox((0, 0), title_txt, font=font)
-                    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-                except Exception:
+                # Wrap and center with horizontal padding
+                pad_x = 160  # left/right padding
+                max_w = max(100, 1920 - 2 * pad_x)
+                words = title_txt.split()
+                lines = []
+                current = ""
+                def _text_size(s: str):
                     try:
-                        tw = draw.textlength(title_txt, font=font)  # type: ignore[attr-defined]
-                        th = 96
+                        bb = draw.textbbox((0, 0), s, font=font)
+                        return bb[2] - bb[0], bb[3] - bb[1]
                     except Exception:
-                        tw, th = 800, 96
-                x = max(0, (1920 - int(tw)) // 2)
-                y = max(0, (1080 - int(th)) // 2)
-                # Add a soft shadow for contrast
-                draw.text((x + 3, y + 3), title_txt, fill=(0, 0, 0), font=font)
-                draw.text((x, y), title_txt, fill=(250, 250, 250), font=font)
+                        try:
+                            return int(draw.textlength(s, font=font)), 96  # type: ignore[attr-defined]
+                        except Exception:
+                            return len(s) * 14, 96
+                for w in words:
+                    test = (w if not current else current + " " + w)
+                    tw, th = _text_size(test)
+                    if tw <= max_w:
+                        current = test
+                    else:
+                        if current:
+                            lines.append(current)
+                            current = w
+                        else:
+                            # extremely long single word: hard-cut
+                            cut = w
+                            while cut:
+                                low, high = 1, len(cut)
+                                idx = 1
+                                while low <= high:
+                                    mid = (low + high) // 2
+                                    tw2, _ = _text_size(cut[:mid])
+                                    if tw2 <= max_w:
+                                        idx = mid
+                                        low = mid + 1
+                                    else:
+                                        high = mid - 1
+                                lines.append(cut[:idx])
+                                cut = cut[idx:]
+                            current = ""
+                if current:
+                    lines.append(current)
+                # Compute total height for vertical centering
+                line_heights = []
+                max_line_w = 0
+                for ln in lines:
+                    tw, th = _text_size(ln)
+                    max_line_w = max(max_line_w, tw)
+                    line_heights.append(th)
+                line_spacing = 14  # px between lines
+                total_h = sum(line_heights) + max(0, (len(lines) - 1) * line_spacing)
+                y = max(0, (1080 - int(total_h)) // 2)
+                # Draw each line centered within padded area
+                for i, ln in enumerate(lines):
+                    tw, th = _text_size(ln)
+                    x = pad_x + max(0, (max_w - int(tw)) // 2)
+                    # soft shadow
+                    draw.text((x + 3, y + 3), ln, fill=(0, 0, 0), font=font)
+                    draw.text((x, y), ln, fill=(250, 250, 250), font=font)
+                    y += th + line_spacing
                 title_png = images_dir / "slide_000.png"
                 bg.convert('RGB').save(title_png, format='PNG')
                 print(f"[tutor] Title slide created: {title_png}")
@@ -711,7 +823,7 @@ def _tutor_generate_video_from_request(request: TutorVideoRequest, status_path: 
     if not thumb_path.exists():
         try:
             import urllib.parse
-            prompt = f"clean minimal educational thumbnail for: {request.topic} (tutor), without any text, letters, words, captions, logos, watermarks, signatures, signage, title"
+            prompt = f"clean minimal educational thumbnail for: {display_title} (tutor), without any text, letters, words, captions, logos, watermarks, signatures, signage, title"
             encoded = urllib.parse.quote(str(prompt)[:200])
             url = f"https://image.pollinations.ai/prompt/{encoded}"
             print(f"[tutor] Generating thumbnail via Pollinations: {url}")
@@ -726,7 +838,7 @@ def _tutor_generate_video_from_request(request: TutorVideoRequest, status_path: 
             try:
                 img = Image.new('RGB', (1280, 720), color=(20, 32, 48))
                 draw = ImageDraw.Draw(img)
-                title = (request.topic or "Tutor").strip()[:60]
+                title = (display_title or "Tutor").strip()[:60]
                 font = ImageFont.load_default()
                 try:
                     bbox = draw.textbbox((0, 0), title, font=font)
@@ -817,7 +929,7 @@ def _tutor_generate_video_from_request(request: TutorVideoRequest, status_path: 
                 post = UserPost(
                     user_id=user.user_id,
                     post_path=db_post_path,
-                    post_topic=request.topic,
+                    post_topic=display_title,
                     created_on=datetime.utcnow(),
                     type='tutortemp',
                     public=True

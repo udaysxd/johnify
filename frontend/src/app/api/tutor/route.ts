@@ -13,7 +13,7 @@ export async function POST(request: Request) {
           ? 'https://johnify-backend-873155673176.us-central1.run.app'
           : 'http://localhost:8000');
 
-    const response = await fetch(`${backendUrl}/api/quiz/generate`, {
+    const response = await fetch(`${backendUrl}/api/tutor/generate`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
