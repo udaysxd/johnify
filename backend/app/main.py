@@ -567,16 +567,17 @@ app.include_router(quiz.router)
 app.include_router(tutor.router)
 
 class LearnVideoTask:
-    def __init__(self, topic: str, complexity_level: int = 3, user_email: str = None):
+    def __init__(self, topic: str, complexity_level: int = 3, user_email: str = None, user_id: Optional[int] = None):
         self.topic = topic
         self.complexity_level = max(1, min(5, complexity_level))  # Clamp between 1-5
         self.safe_topic = sanitize_filename(topic)
         self.timestamp = int(time.time())
         self.output_dir = None
         self.user_email = user_email
+        self.user_id = user_id
 
-    async def process(self):
-        """Process the video generation for the learn endpoint"""
+    def process(self):
+        """Process the video generation for the learn endpoint (synchronous)."""
         try:
             # Create output directory
             self.output_dir = f"generated/learn_{self.safe_topic}_{self.timestamp}"
@@ -682,6 +683,140 @@ class LearnVideoTask:
             image_dir = os.path.join(self.output_dir, "images")
             os.makedirs(image_dir, exist_ok=True)
             
+            # Create a Tutor-style title slide first (slide_000.png) using a thumbnail background
+            try:
+                title_png_path = os.path.join(image_dir, "slide_000.png")
+                thumb_path = os.path.join(self.output_dir, "thumbnail.jpg")
+                # Generate thumbnail early if missing (Pollinations first, then PIL fallback)
+                if not os.path.exists(thumb_path):
+                    try:
+                        prompt = (
+                            f"clean minimal educational thumbnail for: {self.topic} (learn), without any text, "
+                            "letters, words, captions, logos, watermarks, signatures, signage, title"
+                        )
+                        encoded = urllib.parse.quote(prompt[:200])
+                        url = f"https://image.pollinations.ai/prompt/{encoded}"
+                        print(f"🖼️ (Learn) Generating early thumbnail via Pollinations: {url}")
+                        resp = requests.get(url, timeout=20)
+                        resp.raise_for_status()
+                        with open(thumb_path, 'wb') as f:
+                            f.write(resp.content)
+                        if os.path.getsize(thumb_path) < 1024:
+                            raise RuntimeError("Thumbnail too small; treating as failure")
+                    except Exception as e:
+                        print(f"⚠️ (Learn) Early thumbnail failed: {e}. Using simple PIL fallback.")
+                        try:
+                            img = Image.new('RGB', (1280, 720), color=(20, 32, 48))
+                            draw = ImageDraw.Draw(img)
+                            title_txt = self.topic.strip()[:60]
+                            font = ImageFont.load_default()
+                            try:
+                                bbox = draw.textbbox((0, 0), title_txt, font=font)
+                                tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                            except Exception:
+                                try:
+                                    tw = draw.textlength(title_txt, font=font)  # type: ignore[attr-defined]
+                                    th = 56
+                                except Exception:
+                                    tw, th = 400, 56
+                            x = max(0, (1280 - int(tw)) // 2)
+                            y = max(0, (720 - int(th)) // 2)
+                            draw.text((x, y), title_txt, fill=(235, 245, 255), font=font)
+                            img.save(thumb_path, format='JPEG', quality=85)
+                            print(f"(Learn) Early fallback thumbnail saved: {thumb_path}")
+                        except Exception as e2:
+                            print(f"(Learn) ⚠️ Failed to save early fallback thumbnail: {e2}")
+                # Build title slide from thumbnail
+                if os.path.exists(thumb_path):
+                    try:
+                        bg = Image.open(thumb_path).convert('RGB')
+                        bg = bg.resize((1920, 1080))
+                        bg = bg.convert('RGBA')
+                        overlay = Image.new('RGBA', bg.size, (0, 0, 0, 120))
+                        bg = Image.alpha_composite(bg, overlay)
+                        draw = ImageDraw.Draw(bg)
+                        title_txt = self.topic.strip()
+                        # Try common bold fonts large size; fallback to default
+                        font = None
+                        try:
+                            for fp in [
+                                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                                "C:/Windows/Fonts/arialbd.ttf",
+                                "C:/Windows/Fonts/segoeuib.ttf",
+                            ]:
+                                if os.path.exists(fp):
+                                    font = ImageFont.truetype(fp, 96)
+                                    break
+                        except Exception:
+                            font = None
+                        if font is None:
+                            try:
+                                font = ImageFont.load_default()
+                            except Exception:
+                                font = None
+                        # Wrap and center within padded box
+                        pad_x = 160
+                        max_w = max(100, 1920 - 2 * pad_x)
+                        words = title_txt.split()
+                        lines: list[str] = []
+                        current = ""
+                        def _text_size(s: str):
+                            try:
+                                bb = draw.textbbox((0, 0), s, font=font)
+                                return bb[2] - bb[0], bb[3] - bb[1]
+                            except Exception:
+                                try:
+                                    return int(draw.textlength(s, font=font)), 96  # type: ignore[attr-defined]
+                                except Exception:
+                                    return len(s) * 14, 96
+                        for w in words:
+                            test = (w if not current else current + " " + w)
+                            tw, th = _text_size(test)
+                            if tw <= max_w:
+                                current = test
+                            else:
+                                if current:
+                                    lines.append(current)
+                                    current = w
+                                else:
+                                    cut = w
+                                    while cut:
+                                        low, high = 1, len(cut)
+                                        idx = 1
+                                        while low <= high:
+                                            mid = (low + high) // 2
+                                            tw2, _ = _text_size(cut[:mid])
+                                            if tw2 <= max_w:
+                                                idx = mid
+                                                low = mid + 1
+                                            else:
+                                                high = mid - 1
+                                        lines.append(cut[:idx])
+                                        cut = cut[idx:]
+                                    current = ""
+                        if current:
+                            lines.append(current)
+                        # Center vertically
+                        line_heights = []
+                        for ln in lines:
+                            _, th = _text_size(ln)
+                            line_heights.append(th)
+                        line_spacing = 14
+                        total_h = sum(line_heights) + max(0, (len(lines) - 1) * line_spacing)
+                        y = max(0, (1080 - int(total_h)) // 2)
+                        for ln in lines:
+                            tw, th = _text_size(ln)
+                            x = pad_x + max(0, (max_w - int(tw)) // 2)
+                            draw.text((x + 3, y + 3), ln, fill=(0, 0, 0), font=font)
+                            draw.text((x, y), ln, fill=(250, 250, 250), font=font)
+                            y += th + line_spacing
+                        bg.convert('RGB').save(title_png_path, format='PNG')
+                        print(f"(Learn) Title slide created: {title_png_path}")
+                    except Exception as te:
+                        print(f"⚠️ (Learn) Failed to create title slide: {te}")
+            except Exception as e:
+                print(f"⚠️ (Learn) Unexpected error while creating title slide: {e}")
+
             try:
                 # Read the markdown file content
                 with open(md_file, 'r', encoding='utf-8') as f:
@@ -746,7 +881,7 @@ class LearnVideoTask:
                     
                     # Create the slide image with the extracted title
                     try:
-                        create_simple_slide(slide_content, output_path, title=title)
+                        create_simple_slide(slide_content, output_path, title=title, theme="johnify")
                     except Exception as e:
                         raise RuntimeError(f"Failed to generate slide {i}")
                 
@@ -779,6 +914,30 @@ class LearnVideoTask:
                     raise FileNotFoundError("No audio files were generated")
                     
                 print(f"✅ Generated {len(audio_files)} audio files in {audio_dir}")
+                # Ensure title slide is silent: if slide_000.png exists, prepend a silent s000.mp3
+                try:
+                    title_png = Path(image_dir) / "slide_000.png"
+                    silent_mp3 = Path(audio_dir_path) / "s000.mp3"
+                    if title_png.exists():
+                        # Create a short silent mp3 (3s) only if it doesn't already exist
+                        if not silent_mp3.exists() or os.path.getsize(silent_mp3) == 0:
+                            print("🔇 Creating silent audio for title slide (s000.mp3, 1.5s)...")
+                            subprocess.run([
+                                "ffmpeg", "-y",
+                                "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                                "-t", "1.5",
+                                "-c:a", "libmp3lame",
+                                str(silent_mp3)
+                            ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        else:
+                            print("ℹ️ Silent title audio already present: s000.mp3")
+                        # Refresh audio file list to include s000.mp3
+                        audio_files = sorted([str(f) for f in Path(audio_dir_path).glob("*.mp3")])
+                        print(f"🎚️ Total audio files after adding title silence: {len(audio_files)}")
+                    else:
+                        print("ℹ️ No title slide (slide_000.png) detected; skipping silent audio prepend.")
+                except Exception as se:
+                    print(f"⚠️ Failed to create silent audio for title slide: {se}")
                 
                 # Get the list of image files that were generated
                 image_files = sorted([str(f) for f in Path(image_dir).glob("*.png")])
@@ -787,7 +946,7 @@ class LearnVideoTask:
                 min_length = min(len(image_files), len(audio_files))
                 if min_length == 0:
                     raise ValueError("No valid slides or audio files found")
-                    
+                
                 image_files = image_files[:min_length]
                 audio_files = audio_files[:min_length]
                 
@@ -925,43 +1084,108 @@ class LearnVideoTask:
             db = SessionLocal()
             print("✅ Successfully connected to database")
             
-            # Debug: Print all users in the database
-            all_users = db.query(User).all()
-            print(f"🔍 Found {len(all_users)} users in the database")
-            for u in all_users:
-                print(f"   - User ID: {u.user_id}, Email: {u.user_email}")
-            
-            # Find the user by email
-            user = None
-            if self.user_email:
+            # Resolve user_id preference order: explicit user_id > email lookup
+            resolved_user_id = None
+            if self.user_id is not None:
+                resolved_user_id = int(self.user_id)
+                print(f"👤 Using provided user_id: {resolved_user_id}")
+            elif self.user_email:
                 print(f"🔍 Looking for user with email: {self.user_email}")
-                user = db.query(User).filter(User.user_email == self.user_email).first()
-                if user:
-                    print(f"✅ Found user by email: ID={user.user_id}, Email={user.user_email}")
+                u = db.query(User).filter(User.user_email == self.user_email).first()
+                if u:
+                    resolved_user_id = u.user_id
+                    print(f"✅ Found user by email: ID={resolved_user_id}, Email={u.user_email}")
                 else:
                     print(f"⚠️ No user found with email: {self.user_email}")
+
+            if resolved_user_id is None:
+                print("❌ Could not resolve user_id; skipping DB record creation to avoid wrong ownership.")
             
-            # If no user found with email, get the first user as fallback (for testing)
-            if not user and all_users:
-                print("⚠️ No matching user found, using first available user")
-                user = all_users[0]
-                print(f"   - Selected user: ID={user.user_id}, Email={user.user_email}")
-            
-            if user:
-                print(f"📝 Creating new post entry for user ID: {user.user_id}")
+            if resolved_user_id is not None:
+                print(f"📝 Creating new post entry for user ID: {resolved_user_id}")
                 print(f"   - Topic: {self.topic}")
                 print(f"   - Video Path: {video_path}")
                 
                 # Create a new post entry
-                # Prefer a directly playable URL when available
-                post_playable_path = (gcs_video_https or gcs_video_gs or video_url or video_path)
+                # Storage semantics:
+                # - If we have a public GCS URL, store that (videos API serves it directly)
+                # - Else, store a filesystem-style generated-relative path (NOT a /videos URL)
+                #   so that `backend/app/videos.py` can resolve it to a served URL
+                if gcs_used and gcs_video_https:
+                    post_path_value = gcs_video_https
+                elif gcs_video_gs:
+                    post_path_value = gcs_video_gs
+                else:
+                    # Ensure generated-relative path (e.g., generated/learn_<topic>_<ts>/file.mp4)
+                    rel_generated_dir = f"generated/learn_{self.safe_topic}_{self.timestamp}"
+                    rel_video_path = f"{rel_generated_dir}/{video_filename}"
+                    post_path_value = rel_video_path
+
+                # Generate up to 7 tags using DeepSeek (replicated from tutor logic)
+                tags_value = []
+                try:
+                    from .slidegen import get_deepseek_client
+                    client = get_deepseek_client()
+                    if client:
+                        sys_msg = (
+                            "You are an expert taxonomy generator. "
+                            "Return only valid JSON: an array of exactly 7 lowercase tags (strings). "
+                            "Each tag must be a single word or short phrase (<= 3 words), no punctuation, no emojis."
+                        )
+                        user_msg = (
+                            f"Topic: {self.topic}\n\n"
+                            "Produce exactly 7 concise, descriptive tags capturing genre, industry, segment, and category.\n"
+                            "Output strictly as JSON array, no commentary. Example: [\"education\", \"biology\", \"k12\", \"science\", \"fundamentals\", \"tutorial\", \"intro\"]"
+                        )
+                        resp = client.chat.completions.create(
+                            model="deepseek-chat",
+                            temperature=0.2,
+                            max_tokens=200,
+                            messages=[
+                                {"role": "system", "content": sys_msg},
+                                {"role": "user", "content": user_msg},
+                            ],
+                        )
+                        content = (resp.choices[0].message.content or "").strip()
+                        import json as _json
+                        try:
+                            data = _json.loads(content)
+                            if isinstance(data, list):
+                                tags_value = [str(x) for x in data]
+                            else:
+                                tags_value = []
+                        except Exception:
+                            # Fallback: parse comma/newline separated
+                            raw = content.replace("[", "").replace("]", "")
+                            parts = [p.strip().strip('-').strip('\"\'') for p in raw.replace("\n", ",").split(",")]
+                            tags_value = [p for p in parts if p]
+                        # sanitize: lowercase, trim, dedupe, <=3 words, <=64 chars, first 7
+                        cleaned = []
+                        seen = set()
+                        for t in tags_value:
+                            s = str(t).strip().lower()
+                            if not s:
+                                continue
+                            words = s.split()
+                            s = " ".join(words[:3])[:64]
+                            if s and s not in seen:
+                                seen.add(s)
+                                cleaned.append(s)
+                            if len(cleaned) >= 7:
+                                break
+                        tags_value = cleaned[:7]
+                except Exception as _tags_err:
+                    # DeepSeek not available or failed
+                    tags_value = []
+
                 post = UserPost(
-                    user_id=user.user_id,
-                    post_path=post_playable_path,
+                    user_id=resolved_user_id,
+                    post_path=post_path_value,
                     post_topic=self.topic,
                     created_on=datetime.utcnow(),
                     type='learn',
-                    public=True
+                    public=True,
+                    tags=tags_value
                 )
                 
                 db.add(post)
@@ -978,7 +1202,7 @@ class LearnVideoTask:
                     print(f"❌ Error saving to database: {str(e)}")
                     raise
             else:
-                print("❌ No users found in the database to associate with the video")
+                print("❌ No user resolved to associate with the video.")
                 
         except SQLAlchemyError as sae:
             print(f"❌ Database error: {str(sae)}")
@@ -1021,8 +1245,10 @@ class LearnVideoTask:
 
 
 # Learn endpoint
+from .auth import security  # ensure security is imported for dependencies
+
 @app.post("/learn")
-async def learn_topic(learn_request: LearnRequest):
+async def learn_topic(learn_request: LearnRequest, current_user: models.User = Depends(security.get_current_active_user)):
     """
     Generate an educational video for a given topic.
     
@@ -1049,13 +1275,16 @@ async def learn_topic(learn_request: LearnRequest):
             print(f"❌ {error_response['message']}")
             return error_response
         
+        # Always use the authenticated user's email to avoid mismatches and wrong ownership
         task = LearnVideoTask(
             topic=learn_request.topic.strip(),
             complexity_level=learn_request.complexity_level,
-            user_email=learn_request.user_email
+            user_email=getattr(current_user, "user_email", None),
+            user_id=getattr(current_user, "user_id", None)
         )
         
-        result = await task.process()
+        # Offload CPU/IO-bound processing to a thread so the event loop stays responsive
+        result = await asyncio.to_thread(task.process)
         
         if not result or not isinstance(result, dict):
             error_response["message"] = "Invalid response from video generation task"
@@ -1074,12 +1303,17 @@ async def learn_topic(learn_request: LearnRequest):
         if result.get("video_url"):
             print(f"📹 Video URL: {result['video_url']}")
             
+        print(f"✅ Returning success response: {result}")
         return result
-        
     except Exception as e:
-        error_response["message"] = f"Error in learn_topic endpoint: {str(e)}"
-        print(f"❌ {error_response['message']}")
+        print(f"❌ Error in learn endpoint: {str(e)}")
+        error_response["message"] = str(e)
         return error_response
+
+# Alias endpoint to support Next.js proxy path `/api/*` so cookies are forwarded consistently
+@app.post("/api/learn")
+async def learn_topic_api_alias(learn_request: LearnRequest, current_user: models.User = Depends(security.get_current_active_user)):
+    return await learn_topic(learn_request, current_user)  # delegate to primary handler
 
 
 class QuizAnswerRequest(BaseModel):
@@ -1796,9 +2030,9 @@ def _generate_video_from_request(request: "VideoRequest") -> Dict[str, Any]:
                     user = None
                     if request.user_email:
                         user = db.query(User).filter(User.user_email == request.user_email).first()
+                    # Do not fallback to first user; require exact email match
                     if not user:
-                        # Fallback to first user (keeps parity with learn path)
-                        user = db.query(User).first()
+                        print("[QUIZ VIDEO] ❌ No matching user found by email; skipping DB record creation to avoid wrong ownership.")
                     if user:
                         # In production, upload to GCS and store gs://; otherwise store relative generated path
                         rel_post_path = f"generated/quiz_{sanitized_topic}_{ts}/{sanitized_topic}_explanation.mp4"

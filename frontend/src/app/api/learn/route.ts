@@ -42,16 +42,24 @@ export async function POST(request: Request) {
       let response: Response | null = null;
       for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
+          // Forward auth context (cookies and authorization header) to backend
+          const authHeader = request.headers.get('authorization') || request.headers.get('Authorization') || '';
+          const cookieHeader = request.headers.get('cookie') || request.headers.get('Cookie') || '';
+
           response = await fetch(`${backendUrl}/learn`, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
+              ...(authHeader ? { 'Authorization': authHeader } : {}),
+              ...(cookieHeader ? { 'Cookie': cookieHeader } : {}),
             },
             body: JSON.stringify({
               topic,
               complexity_level: Math.min(5, Math.max(1, complexity_level || 3)) // Ensure between 1-5
             }),
-            signal: controller.signal
+            signal: controller.signal,
+            // Not strictly required in Node env, but documented for intent
+            credentials: 'include' as RequestCredentials,
           });
           break; // success
         } catch (e) {
@@ -72,8 +80,9 @@ export async function POST(request: Request) {
           const errorData = await response.json().catch(() => ({}));
           return NextResponse.json(
             {
-              error: 'Failed to generate learning video',
-              details: errorData.message || response.statusText
+              // Frontend checks detail || message || error
+              message: 'Failed to generate learning video',
+              detail: errorData.message || errorData.detail || response.statusText
             },
             { status: response.status }
           );
@@ -81,9 +90,9 @@ export async function POST(request: Request) {
           const textBody = await response.text().catch(() => '');
           return NextResponse.json(
             {
-              error: 'Backend returned non-JSON error',
+              message: 'Backend returned non-JSON error',
               status: response.status,
-              details: response.statusText,
+              detail: response.statusText,
               body: textBody?.slice(0, 500) || ''
             },
             { status: response.status }

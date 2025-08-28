@@ -32,10 +32,16 @@ def create_slide_video(img: Path, mp3: Path, out_mp4: Path):
             "-preset", "ultrafast",
             "-tune", "stillimage",
             "-crf", "28",
+            # Ensure consistent framerate
+            "-r", "30",
             "-threads", "1",
             "-pix_fmt", "yuv420p",
             # Audio encoding
             "-c:a", "aac",
+            # Enforce consistent audio params across all segments
+            "-ar", "44100",
+            "-ac", "2",
+            "-b:a", "128k",
             # Finish when the shortest stream ends
             "-shortest",
             str(out_mp4)
@@ -103,10 +109,16 @@ def stitch_images_and_audio_to_video(img_dir: Path, aud_dir: Path, out_mp4: Path
             "-c:v", "libx264",
             "-preset", "ultrafast",
             "-crf", "28",
+            # Ensure consistent framerate
+            "-r", "30",
             "-threads", "1",
             "-pix_fmt", "yuv420p",
             # Audio encoding
             "-c:a", "aac",
+            # Enforce consistent audio params across full output
+            "-ar", "44100",
+            "-ac", "2",
+            "-b:a", "128k",
             # Optimize for web playback
             "-movflags", "+faststart",
             str(out_mp4)

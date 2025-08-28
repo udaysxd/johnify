@@ -341,278 +341,297 @@ def remove_marp_headers_and_styles(md: str) -> str:
 
 
 
-def generate_learn_slides(topic: str, complexity_level: int = 3) -> List[str]:
+def generate_creative_slides(topic: str, complexity_desc: str, client: OpenAI, temperature: float = 0.8) -> List[str]:
+    """Let DeepSeek design the outline, slide count, and content. Return list of slide markdown strings.
+    We enforce minimal formatting constraints to keep it parseable but avoid rigid structure."""
+    try:
+        prompt = (
+            f"Design the best possible educational slide deck about: '{topic}'.\n"
+            f"Audience level: {complexity_desc}.\n\n"
+            "Instructions:\n"
+            "- Infer the best format for this topic (e.g., recipe steps, tutorial, timeline, Q&A, checklist).\n"
+            "- You decide the number of slides (6–12) based on what teaches the topic best.\n"
+            "- Prefer Markdown slides: each slide begins with '## Title', then bullet points; separate slides with a line containing only --- .\n"
+            "- Alternative acceptable format: 'Slide 1: Title' with lines of content; I will convert it.\n"
+            "- Use clear bullet points; bold key terms where helpful.\n"
+            "- Output only the slides (no extra commentary).\n\n"
+            "Example (Markdown):\n"
+            "## Title\n- Bullet 1\n- Bullet 2\n\n---\n\n## Next Title\n- Bullet 1\n- Bullet 2\n"
+        )
+        resp = client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": "You are an expert educational content creator and slide deck designer."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=temperature,
+            max_tokens=1600
+        )
+        raw = resp.choices[0].message.content or ""
+        # Strip code fences if the model wrapped output
+        raw = re.sub(r'^```(?:markdown|md)?\n|\n```$', '', raw.strip(), flags=re.MULTILINE)
+        # First try to parse a numbered slide plan
+        numbered = _parse_numbered_slide_plan(raw)
+        if len(numbered) >= 4:
+            return numbered[:12]
+        slides = _split_markdown_slides(raw)
+        # Ensure reasonable slide count
+        if len(slides) < 4:
+            raise ValueError("Too few slides from creative generator")
+        # Light cleanup: ensure each slide starts with a title
+        cleaned = []
+        for s in slides:
+            if not re.match(r'^##\s+', s):
+                # Add a generic title if missing
+                first_line = s.split('\n', 1)[0][:60].strip() or topic.title()
+                s = f"## {first_line}\n" + (s if '\n' in s else '')
+            cleaned.append(s.strip())
+        return cleaned[:12]
+    except Exception as e:
+        print(f"Creative slide generation failed: {e}")
+        return []
+
+def _parse_numbered_slide_plan(text: str) -> List[str]:
+    """Parse outputs like 'Slide 1: Title' followed by lines until next 'Slide N:'.
+    Build markdown slides with '## Title' and bullets inferred from lines starting with '-', '*', '•', or numbered lists.
+    Also extract lines like 'Text Overlay:' content into bullets.
+    """
+    if not text:
+        return []
+    t = text.replace('\r\n', '\n')
+    # Remove obvious non-slide headers
+    t = re.sub(r'^\s*Video Title:.*$', '', t, flags=re.MULTILINE)
+    # Split by Slide N:
+    chunks = re.split(r'(?m)^\s*Slide\s+\d+\s*:\s*', t)
+    titles = re.findall(r'(?m)^\s*Slide\s+\d+\s*:\s*(.+)$', t)
+    slides: List[str] = []
+    if len(chunks) <= 1:
+        return []
+    # First chunk before Slide 1 header is preamble; ignore
+    for i, body in enumerate(chunks[1:]):
+        title = titles[i].strip() if i < len(titles) else f"Slide {i+1}"
+        section = body.strip()
+        # Stop at next 'Slide' header within body if parser failed to split strictly
+        section = re.split(r'(?m)^\s*Slide\s+\d+\s*:', section)[0].strip()
+        bullets: List[str] = []
+        # Collect bullets
+        for line in section.split('\n'):
+            l = line.strip()
+            if not l:
+                continue
+            # Map common prefixes to bullets
+            if re.match(r'^(-|\*|•|\d+\.|\d+\))\s+', l):
+                bullets.append('- ' + re.sub(r'^(-|\*|•|\d+\.|\d+\))\s+', '', l))
+            elif l.lower().startswith('text overlay:'):
+                content = l.split(':', 1)[1].strip()
+                if content:
+                    bullets.append(f'- {content}')
+            elif l.lower().startswith('visual:'):
+                # Keep visual as a short bullet for guidance
+                content = l.split(':', 1)[1].strip()
+                if content:
+                    bullets.append(f'- Visual: {content}')
+        # If no bullets found, derive some from sentences
+        if not bullets:
+            sentences = re.split(r'(?<=[.!?])\s+', section)
+            for s in sentences:
+                s = s.strip()
+                if s:
+                    bullets.append('- ' + s)
+        slide_md = '## ' + title + '\n' + '\n'.join(bullets[:8])
+        slides.append(slide_md)
+    return slides
+
+def _split_markdown_slides(md: str) -> List[str]:
+    """Split a Marp-style markdown string into individual slide blocks.
+    Accepts either '---' separators or multiple '## ' headings.
+    Returns cleaned slide strings (without frontmatter)."""
+    if not md:
+        return []
+    # Normalize newlines
+    text = md.replace('\r\n', '\n').strip()
+    # Remove any YAML frontmatter if present
+    text = re.sub(r'(?m)^---\s*\n(?:.*?\n)*?^---\s*', '', text)
+    # Prefer explicit slide separators
+    parts = re.split(r'\n\s*---\s*\n', text)
+    if len(parts) <= 1:
+        # Fallback: split on level-2 headings starting a line
+        parts = re.split(r'(?m)^##\s+', text)
+        # Re-add the heading markers
+        parts = [f"## {p.strip()}" for p in parts if p.strip()]
+    slides = []
+    for part in parts:
+        s = part.strip()
+        if s:
+            slides.append(s)
+    return slides
+
+def generate_learn_slides(topic: str, complexity_level: int = 3, style: str = "creative") -> List[str]:
     client = get_deepseek_client()
     """
-    Generate educational slides for a given topic.
-    
-    Args:
-        topic: The topic to generate slides about
-        complexity_level: Integer from 1 (basic) to 5 (advanced)
-        
-    Returns:
-        List of slide markdown strings
+    Generate educational slides for a given topic using a fully model-led structure.
+    DeepSeek decides both the format and the implicit mode; no in-code templates.
     """
     try:
-        # Define complexity-based parameters
-        complexity_map = {
-            1: "basic, easy-to-understand",
-            2: "introductory, clear",
-            3: "intermediate, detailed",
-            4: "advanced, comprehensive",
-            5: "expert-level, in-depth"
-        }
+        complexity_map = {1: "basic, easy-to-understand", 2: "introductory, clear", 3: "intermediate, detailed", 4: "advanced, comprehensive", 5: "expert-level, in-depth"}
         complexity_desc = complexity_map.get(complexity_level, "detailed")
-        
-        # Generate slide content using DeepSeek
-        def generate_slide_content(prompt: str, min_bullets: int = 2) -> str:
-            """Helper function to generate content for a single slide."""
-            try:
-                # Add explicit formatting instructions
-                prompt = f"""{prompt}
-                
-                FORMATTING RULES:
-                - Each main point must start with a '- ' (dash and space)
-                - Include 2-4 bullet points per slide
-                - Each bullet point should be 1-2 short sentences
-                - Use **bold** for emphasis on key terms
-                - Keep language clear and concise
-                - Never use placeholders like 'key concept 1'
-                - Ensure all bullet points are properly formatted with '- ' at the start
-                
-                Example of good formatting:
-                - First main point with a brief explanation
-                - Second point that expands on the topic
-                - Final point that summarizes or provides context
-                
-                Now generate content following these rules:
-                """
-                
-                response = client.chat.completions.create(
-                    model="deepseek-chat",
-                    messages=[
-                        {"role": "system", "content": f"You are an expert educational content creator. Generate clear, engaging content for educational slides about {topic} at a {complexity_desc} level."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    temperature=0.7,
-                    max_tokens=500
-                )
-                
-                content = response.choices[0].message.content.strip()
-                
-                # Ensure we have proper bullet points
-                lines = [line.strip() for line in content.split('\n') if line.strip()]
-                bullet_points = [line for line in lines if line.startswith('-')]
-                
-                # If we don't have enough bullet points, generate more
-                if len(bullet_points) < min_bullets:
-                    additional_prompt = f"""
-                    The previous response didn't have enough bullet points. 
-                    Please provide {min_bullets} more bullet points about: {topic}
-                    
-                    Format each point with '- ' at the start.
-                    """
-                    additional_response = client.chat.completions.create(
-                        model="deepseek-chat",
-                        messages=[
-                            {"role": "system", "content": f"You are an expert educational content creator."},
-                            {"role": "user", "content": additional_prompt}
-                        ],
-                        temperature=0.7,
-                        max_tokens=300
-                    )
-                    additional_content = additional_response.choices[0].message.content.strip()
-                    additional_bullets = [line for line in additional_content.split('\n') 
-                                        if line.strip().startswith('-')]
-                    bullet_points.extend(additional_bullets[:min_bullets - len(bullet_points)])
-                
-                return '\n'.join(bullet_points[:4])  # Return max 4 bullet points
-                
-            except Exception as e:
-                print(f"⚠️ Error generating slide content: {str(e)}")
-                # Return default bullet points if generation fails
-                return """- Important point about the topic
-- Key concept to remember
-- Additional relevant information"""
-        
-        # Generate each slide with specific content
-        slides = []
-        
-        # Slide 1: Introduction
-        slide_title = f"Introduction to {topic}"
-        intro_prompt = f"""
-        Create an introduction slide about: {topic}
-        
-        Include 3 specific bullet points that:
-        1. Clearly explain what {topic} is
-        2. State why it's important or relevant
-        3. Provide an interesting fact or statistic
-        
-        Format as markdown bullet points with '- ' at the start of each line.
-        """
-        intro_content = generate_slide_content(intro_prompt, min_bullets=3)
-        # Ensure we have at least 3 bullet points
-        bullet_points = [line for line in intro_content.split('\n') if line.strip().startswith('-')]
-        if len(bullet_points) < 3:
-            bullet_points.extend([
-                f"- Important aspect of {topic}",
-                f"- Why {topic} matters in daily life",
-                f"- Key consideration about {topic}"
-            ][:3 - len(bullet_points)])
-        slides.append(f"## {slide_title}\n" + '\n'.join(bullet_points[:3]))
-        
-        # Slide 2: Key Concepts
-        slide_title = f"Key Concepts About {topic}"
-        concepts_prompt = f"""
-        List 3 key concepts about: {topic}
-        
-        For each concept, provide one clear, specific bullet point that:
-        1. Names the concept
-        2. Explains it simply
-        3. Says why it matters
-        
-        Format as markdown bullet points with '- ' at the start of each line.
-        """
-        concepts_content = generate_slide_content(concepts_prompt, min_bullets=3)
-        bullet_points = [line for line in concepts_content.split('\n') if line.strip().startswith('-')]
-        if len(bullet_points) < 3:
-            bullet_points.extend([
-                f"- Key concept 1 about {topic} and its significance",
-                f"- Important aspect of {topic} and its impact",
-                f"- Critical consideration regarding {topic}"
-            ][:3 - len(bullet_points)])
-        
-        # Ensure we have exactly 3 bullet points
-        slides.append(f"## {slide_title}\n" + '\n'.join(bullet_points[:3]))
-        
-        # Slide 3: How It Works
-        process_prompt = f"""
-        Explain how {topic} works in 3 simple, specific steps.
-        
-        For each step, provide one clear bullet point that:
-        1. Names the step
-        2. Explains what happens
-        3. Why it's important
-        
-        Format as markdown bullet points with '- ' at the start of each line.
-        """
-        process_content = generate_slide_content(process_prompt, min_bullets=3)
-        bullet_points = [line for line in process_content.split('\n') if line.strip().startswith('-')]
-        if len(bullet_points) < 3:
-            bullet_points.extend([
-                f"- Step 1: Initial process of {topic}",
-                f"- Step 2: Key mechanisms in {topic}",
-                f"- Step 3: Final outcomes of {topic}"
-            ][:3 - len(bullet_points)])
-        slides.append(f"## How {topic} Works\n" + '\n'.join(bullet_points[:3]))
-        
-        # Slide 4: Examples
-        examples_prompt = f"""
-        Provide 3 specific, real-world examples of {topic}.
-        
-        For each example, include one bullet point that:
-        1. Names the example
-        2. Briefly describes it
-        3. Explains its relevance
-        
-        Format as markdown bullet points with '- ' at the start of each line.
-        """
-        examples_content = generate_slide_content(examples_prompt, min_bullets=3)
-        bullet_points = [line for line in examples_content.split('\n') if line.strip().startswith('-')]
-        if len(bullet_points) < 3:
-            bullet_points.extend([
-                f"- Example 1: Real-world case of {topic}",
-                f"- Example 2: Common situation involving {topic}",
-                f"- Example 3: Well-known instance of {topic}"
-            ][:3 - len(bullet_points)])
-        slides.append(f"## Examples of {topic}\n" + '\n'.join(bullet_points[:3]))
-        
-        # Slide 5: Summary
-        summary_prompt = f"""
-        Create a summary about {topic} with 3 key takeaways.
-        
-        For each takeaway, provide one bullet point that:
-        1. States an important fact
-        2. Explains its significance
-        3. Suggests why it matters
-        
-        Format as markdown bullet points with '- ' at the start of each line.
-        """
-        summary_content = generate_slide_content(summary_prompt, min_bullets=3)
-        bullet_points = [line for line in summary_content.split('\n') if line.strip().startswith('-')]
-        if len(bullet_points) < 3:
-            bullet_points.extend([
-                f"- Key takeaway 1 about {topic}",
-                f"- Important consideration about {topic}",
-                f"- Final thought on {topic}"
-            ][:3 - len(bullet_points)])
-        slides.append(f"## Summary: {topic}\n" + '\n'.join(bullet_points[:3]))
-        
-        # Clean up any remaining placeholders
-        cleaned_slides = []
-        for slide in slides:
-            # Remove any lines containing placeholders
-            lines = [line for line in slide.split('\n') 
-                    if not any(ph in line.lower() for ph in ['key concept', 'reason ', 'example ', 'step ', 'point '])]
-            cleaned_slide = '\n'.join(lines)
-            cleaned_slides.append(cleaned_slide)
-        
-        return cleaned_slides
-        
-        
+        # Always use creative generation; retry at a lower temperature, then minimal fallback
+        slides = generate_creative_slides(topic, complexity_desc, client, temperature=0.8)
+        if slides:
+            return slides
+        slides = generate_creative_slides(topic, complexity_desc, client, temperature=0.6)
+        if slides:
+            return slides
+        # Minimal fallback refined by model to avoid placeholders
+        minimal = [
+            f"## {topic.title()}\n- Overview\n- Why it matters\n- Where it's used",
+            f"## Core Ideas\n- Key idea 1\n- Key idea 2\n- Key idea 3",
+            f"## How To Learn\n- Step 1\n- Step 2\n- Step 3",
+            f"## Examples\n- Example 1\n- Example 2\n- Example 3",
+            f"## Summary\n- Takeaway 1\n- Takeaway 2\n- Next steps",
+        ]
+        refined = [_refine_slide_with_model(topic, s, client, complexity_desc) for s in minimal]
+        return refined
     except Exception as e:
         print(f"Error generating slides: {str(e)}")
-        # Return default slides in case of error
-        return [
-            f"# {topic}\n## Introduction",
-            f"## What is {topic}?\n- Key concept 1\n- Key concept 2",
-            f"## Why is {topic} important?\n- Reason 1\n- Reason 2"
-        ]
+        # Best-effort refined minimal set on error
+        try:
+            complexity_desc = {1: "basic, easy-to-understand", 2: "introductory, clear", 3: "intermediate, detailed", 4: "advanced, comprehensive", 5: "expert-level, in-depth"}.get(complexity_level, "detailed")
+            client = get_deepseek_client()
+            minimal = [
+                f"## {topic.title()}\n- Overview\n- Why it matters\n- Where it's used",
+                f"## Core Ideas\n- Key idea 1\n- Key idea 2\n- Key idea 3",
+                f"## Summary\n- Takeaway 1\n- Takeaway 2\n- Next steps",
+            ]
+            return [_refine_slide_with_model(topic, s, client, complexity_desc) for s in minimal]
+        except Exception:
+            return [
+                f"## {topic.title()}\n- Overview\n- Why it matters\n- Where it's used",
+                f"## Core Ideas\n- Key idea 1\n- Key idea 2\n- Key idea 3",
+                f"## Summary\n- Takeaway 1\n- Takeaway 2\n- Next steps",
+            ]
+
+def _refine_slide_with_model(topic: str, slide_md: str, client: OpenAI, complexity_desc: str) -> str:
+    """Rewrite a placeholder slide into concrete, topic-specific content while keeping the title."""
+    try:
+        title_match = re.match(r"^##\s*(.+)$", slide_md.strip().split('\n')[0].strip())
+        title = title_match.group(1) if title_match else topic.title()
+        prompt = (
+            f"Topic: {topic}\n"
+            f"Audience: {complexity_desc}.\n\n"
+            f"Rewrite this slide by KEEPING the title and replacing placeholder bullets with concrete, specific content.\n"
+            f"Title: {title}\n"
+            "Bullets rules:\n"
+            "- 3–6 bullets\n"
+            "- No generic placeholders like 'Overview', 'Key idea 1', 'Step 1'\n"
+            "- Make each bullet informative and topic-specific (rules, examples with numbers, procedures, tips).\n"
+            "Output only the rewritten slide in Markdown starting with '## {Title}'."
+        )
+        resp = client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": "You precisely rewrite slides to be specific and useful."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.6,
+            max_tokens=400
+        )
+        out = resp.choices[0].message.content or ""
+        out = re.sub(r'^```(?:markdown|md)?\n|\n```$', '', out.strip(), flags=re.MULTILINE)
+        if out.strip().startswith('##'):
+            return out.strip()
+        # Fallback: reconstruct using extracted lines
+        body_lines = [l.strip('- ').strip() for l in out.split('\n') if l.strip()]
+        body = '\n'.join([f"- {l}" for l in body_lines[:6]])
+        return f"## {title}\n{body}".strip()
+    except Exception:
+        return slide_md
 
 def generate_narration(slides: list[str]) -> list[str]:
-    """Generate narration for each slide using DeepSeek."""
+    """Generate narration for each slide using DeepSeek.
+    More robust parsing: prefer delimiter-separated output, with JSON as a compatibility path.
+    """
     try:
         client = get_deepseek_client()  # Get client at runtime
         MODEL = "deepseek-chat"  # Model to use for narration
-        
+
+        # Use a strong, simple format contract with a unique delimiter.
+        DELIM = "<<<END_OF_NARRATION>>>"
         narration_prompt = (
             f"There are {len(slides)} slides below. Each starts with a heading.\n\n"
             + "\n\n".join(f"--- SLIDE {i+1} ---\n{slide}" for i, slide in enumerate(slides))
             + "\n\nWrite exactly one engaging GCSE‑level narration per slide, 60–90 words each. "
-            "Return ONLY a valid JSON array of narration strings — no code blocks, no extra text, no explanations, no markdown. Just the array. "
-            "If a slide is not suitable for narration, return an empty string for that slide."
+            f"Output format: write each narration as plain text, in order, separated ONLY by the line {DELIM}. "
+            f"Do not return JSON, code fences, markdown, or any extra commentary. Just the narrations separated by {DELIM}. "
+            "If a slide is not suitable for narration, output an empty line for that slot (still keep separators)."
         )
-        
+
         response = client.chat.completions.create(
             model=MODEL,
             messages=[
-                {"role": "system", "content": "You are a helpful narrator for educational slides."},
+                {"role": "system", "content": "You are a precise narrator for educational slides. Follow output format exactly."},
                 {"role": "user", "content": narration_prompt}
             ],
             temperature=0.7
         )
-        narration_raw = response.choices[0].message.content
-        import re
-        narrations = None
+
+        narration_raw = (response.choices[0].message.content or "").strip()
+
+        # 1) Try strict JSON first (backward compatibility with previous prompt variants)
+        narrations: list[str] | None = None
         try:
-            narrations = json.loads(narration_raw)
+            parsed = json.loads(narration_raw)
+            if isinstance(parsed, list):
+                narrations = [str(x) if x is not None else "" for x in parsed]
         except Exception:
-            # Try to extract first JSON array from anywhere in the output
-            match = re.search(r'\[.*?\]', narration_raw, re.DOTALL)
+            # Try to extract the first JSON array from anywhere in the text
+            match = re.search(r"\[\s*[\s\S]*?\s*\]", narration_raw)
             if match:
                 try:
-                    narrations = json.loads(match.group(0))
-                except Exception as e2:
-                    print(f"Secondary JSON extraction failed: {str(e2)}")
+                    parsed = json.loads(match.group(0))
+                    if isinstance(parsed, list):
+                        narrations = [str(x) if x is not None else "" for x in parsed]
+                except Exception:
                     narrations = None
+
+        # 2) If not JSON, parse using the delimiter contract
+        if narrations is None:
+            # Strip common code fences if present
+            cleaned = re.sub(r'^```[a-zA-Z]*\n|\n```$', '', narration_raw, flags=re.MULTILINE).strip()
+            if DELIM in cleaned:
+                parts = [p.strip() for p in cleaned.split(DELIM)]
+                narrations = parts
+            else:
+                # 3) Fallbacks: try to parse numbered list or line-separated items
+                # Try lines starting with a number or dash
+                lines = [l.strip() for l in cleaned.splitlines() if l.strip()]
+                # Group lines into chunks separated by blank lines or slide markers
+                chunks: list[str] = []
+                buf: list[str] = []
+                for ln in lines:
+                    if re.match(r"^(?:\d+\.|\-)\s+", ln) or ln.lower().startswith("slide "):
+                        if buf:
+                            chunks.append(" ".join(buf).strip())
+                            buf = []
+                    buf.append(ln)
+                if buf:
+                    chunks.append(" ".join(buf).strip())
+                narrations = chunks if chunks else []
+
+        # Normalize and size to slides length
         if not isinstance(narrations, list):
-            print(f"Narration extraction failed. Raw output:\n{narration_raw}")
             narrations = []
-        # Fill or trim narrations to match slides
+        # Trim whitespace and quotes
+        narrations = [re.sub(r'^[\"\']|[\"\']$', '', (n or '')).strip() for n in narrations]
+
         if len(narrations) < len(slides):
             narrations += ["Please review this slide carefully."] * (len(slides) - len(narrations))
         elif len(narrations) > len(slides):
             narrations = narrations[:len(slides)]
+
+        # Ensure non-empty strings
+        narrations = [n if n else "Please review this slide carefully." for n in narrations]
+
         if not narrations:
             raise RuntimeError("Could not extract any narrations from model output.")
         return narrations
@@ -621,4 +640,3 @@ def generate_narration(slides: list[str]) -> list[str]:
         print(f"Error generating narration: {str(e)}")
         # Fallback: return a default narration for each slide
         return ["Please review this slide carefully."] * len(slides)
-        raise

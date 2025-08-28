@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from pydantic import BaseModel
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session, joinedload
@@ -167,11 +167,19 @@ def get_video_files(user_id: int, db: Session) -> List[Dict[str, Any]]:
                 })
                 continue
 
+            # Back-compat: if post_path was stored as a served URL under /videos,
+            # convert to a generated-relative path for local resolution
+            if pp.startswith("/videos/"):
+                # '/videos/dir/file.mp4' -> 'dir/file.mp4' under generated root
+                pp = pp[len("/videos/"):]
+                # Keep pp without leading slashes
+                pp = pp.lstrip('/')
+
             # The post_path contains both directory and filename, e.g.:
             # 'generated/learn_why_are_women_not_safe_in_india_and_mexico_1753718382\learn_why_are_women_not_safe_in_india_and_mexico_1753718382.mp4'
             
             # Normalize the path and force it to be relative under generated/
-            normalized_path = (post.post_path or '').replace('\\', '/').strip()
+            normalized_path = (pp or '').replace('\\', '/').strip()
             if 'generated/' in normalized_path:
                 # Trim everything before the first occurrence of generated/
                 idx = normalized_path.find('generated/')
@@ -312,6 +320,18 @@ async def delete_video_post(
         if getattr(post, "user_id", None) != getattr(current_user, "user_id", None):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to delete this post")
 
+        # Delete dependent likes first to satisfy FK constraints (public.user_posts_likes.post_id -> user_posts.post_id)
+        try:
+            db.execute(sql_text(
+                """
+                DELETE FROM public.user_posts_likes
+                WHERE post_id = :post_id
+                """
+            ), {"post_id": post_id})
+        except Exception:
+            # Do not fail the entire operation on likes cleanup issues; rollback handled below if needed
+            pass
+
         # Attempt to delete storage assets
         pp = (post.post_path or "").strip()
         deleted_storage = True
@@ -335,7 +355,7 @@ async def delete_video_post(
         except Exception:
             deleted_storage = False
 
-        # Delete DB row
+        # Delete DB row (post) after removing likes
         db.delete(post)
         db.commit()
         return {"id": str(post_id), "deleted": True, "storage_deleted": bool(deleted_storage)}
@@ -457,62 +477,181 @@ async def like_post(
 def _collect_videos_for_post(post: models.UserPost) -> Dict[str, Any]:
     import os
     from datetime import datetime
-    # Normalize and locate video file within generated/<dir>
-    normalized_path = (post.post_path or "").replace('\\', '/').strip()
-    if 'generated/' in normalized_path:
-        # Keep only path from generated/
-        idx = normalized_path.find('generated/')
-        normalized_path = normalized_path[idx+len('generated/'):]
-    elif normalized_path.startswith('generated/'):
-        normalized_path = normalized_path[10:]
-    path_parts = normalized_path.split('/') if normalized_path else []
-    last_part = path_parts[-1] if path_parts else ''
-    if last_part.lower().endswith('.mp4'):
-        directory_name = '/'.join(path_parts[:-1])
-    else:
-        directory_name = '/'.join(path_parts)
-    video_dir_path = os.path.normpath(os.path.join(str(GENERATED_ROOT), directory_name))
+    
+    try:
+        # Get and validate post path
+        pp = (post.post_path or "").strip()
+        if not pp:
+            print(f"No post_path for post {post.post_id}")
+            return {}
+            
+        # Normalize path (handle both Windows and Unix paths)
+        normalized_path = pp.replace('\\', '/').strip()
+        
+        # Handle different path formats
+        if normalized_path.startswith("generated/"):
+            # Remove 'generated/' prefix if present
+            normalized_path = normalized_path[10:]
+        elif '/generated/' in normalized_path:
+            # Extract path after 'generated/'
+            idx = normalized_path.find('/generated/') + 11
+            normalized_path = normalized_path[idx:]
+            
+        # Extract directory and filename
+        path_parts = [p for p in normalized_path.split('/') if p]
+        if not path_parts:
+            print(f"Invalid path format: {pp}")
+            return {}
+            
+        # Check if last part is an MP4 file
+        if path_parts[-1].lower().endswith('.mp4'):
+            directory_name = '/'.join(path_parts[:-1])
+            video_filename = path_parts[-1]
+        else:
+            directory_name = '/'.join(path_parts)
+            video_filename = None
+            
+        # Build full directory path
+        video_dir_path = os.path.normpath(os.path.join(str(GENERATED_ROOT), directory_name))
+        
+        # Find video file if not already determined
+        if not video_filename and os.path.exists(video_dir_path):
+            for file in os.listdir(video_dir_path):
+                if file.lower().endswith('.mp4'):
+                    video_filename = file
+                    break
+                    
+        if not video_filename:
+            print(f"No MP4 file found in {video_dir_path}")
+            return {}
+            
+        video_path = os.path.join(video_dir_path, video_filename)
+        if not os.path.exists(video_path):
+            print(f"Video file not found: {video_path}")
+            return {}
+            
+        # Build URLs
+        base_url = os.getenv("BACKEND_URL", "http://localhost:8000").rstrip('/')
+        rel_path = f"{directory_name}/{video_filename}" if directory_name else video_filename
+        rel_path = rel_path.replace('\\', '/').lstrip('/')
+        video_url = f"{base_url}/videos/{rel_path}"
 
-    video_filename = None
-    video_path = None
-    if os.path.exists(video_dir_path):
-        for file in os.listdir(video_dir_path):
-            if file.endswith('.mp4'):
-                video_filename = file
-                video_path = os.path.normpath(os.path.join(video_dir_path, video_filename))
-                break
-
-    if not (video_path and os.path.exists(video_path)):
+        # Handle thumbnail
+        thumbnail_url = ""
+        thumb_path = os.path.join(video_dir_path, "thumbnail.jpg")
+        if not os.path.exists(thumb_path):
+            # Try to find any jpg/png thumbnail
+            for ext in ['.jpg', '.jpeg', '.png']:
+                for file in os.listdir(video_dir_path):
+                    if file.lower().endswith(ext):
+                        thumb_path = os.path.join(video_dir_path, file)
+                        break
+                        
+        if os.path.exists(thumb_path):
+            thumb_rel = os.path.relpath(thumb_path, GENERATED_ROOT).replace('\\', '/')
+            thumbnail_url = f"{base_url}/videos/{thumb_rel}"
+            
+        return {
+            "id": str(post.post_id),
+            "title": post.post_topic or "Untitled Video",
+            "created_at": post.created_on.isoformat() if post.created_on else datetime.utcnow().isoformat(),
+            "video_url": video_url,
+            "thumbnail_url": thumbnail_url,
+            "topic": post.post_topic or "",
+            "status": "completed",
+            "user_id": post.user_id,
+            "user_name": getattr(post.user, "user_name", None) if getattr(post, "user", None) is not None else None,
+            "tags": getattr(post, "tags", None) or [],
+        }
+    except Exception as e:
+        print(f"Error processing post {getattr(post, 'post_id', 'unknown')}: {str(e)}")
         return {}
 
-    # Build URLs
-    base_url = os.getenv("BACKEND_URL", "http://localhost:8000")
-    safe_dir = (directory_name or "").replace('\\', '/').strip('/')
-    safe_file = (video_filename or "").replace('\\', '/').strip('/')
-    rel_path = f"{safe_dir}/{safe_file}" if safe_dir else safe_file
-    rel_path = rel_path.lstrip('/')
-    video_url = f"{base_url}/videos/{rel_path}"
+# --- Tag helpers for Learn feed ---
+def _sanitize_tags(tags: List[str]) -> List[str]:
+    out: List[str] = []
+    seen = set()
+    for t in tags:
+        if not isinstance(t, str):
+            continue
+        s = " ".join(t.strip().lower().split())[:64]
+        # cap to 3 words
+        parts = s.split()
+        s = " ".join(parts[:3])
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out[:7]
 
-    # Thumbnail
-    thumbnail_url = ""
-    thumb_path = os.path.join(video_dir_path, "thumbnail.jpg")
-    if os.path.exists(thumb_path):
-        thumb_rel = f"{safe_dir}/thumbnail.jpg" if safe_dir else "thumbnail.jpg"
-        thumb_rel_clean = thumb_rel.replace('\\', '/').lstrip('/')
-        thumbnail_url = f"{base_url}/videos/{thumb_rel_clean}"
-
-    return {
-        "id": str(post.post_id),
-        "title": post.post_topic or "Untitled Video",
-        "created_at": post.created_on.isoformat() if post.created_on else datetime.utcnow().isoformat(),
-        "video_url": video_url,
-        "thumbnail_url": thumbnail_url,
-        "topic": post.post_topic or "",
-        "status": "completed",
-        "user_id": post.user_id,
-        "user_name": getattr(post.user, "user_name", None) if getattr(post, "user", None) is not None else None,
-        "tags": getattr(post, "tags", None) or [],
-    }
+def _generate_tags_for_topic(topic: str) -> List[str]:
+    """Best-effort tag generation using DeepSeek if available; fallback to simple keywords.
+    Retries DeepSeek a few times before falling back.
+    """
+    topic = (topic or "").strip()
+    if not topic:
+        return []
+    # Try DeepSeek via slidegen client with light retries
+    try:
+        from . import slidegen  # type: ignore
+        client = slidegen.get_deepseek_client()
+        if client:
+            import time
+            import json, re
+            prompt = (
+                "Generate exactly 7 concise, user-facing tags (max 3 words each) for the topic: '" + topic +
+                "'. Return ONLY a JSON array of strings."
+            )
+            attempts = 0
+            while attempts < 3:
+                attempts += 1
+                try:
+                    print(f"[learn-feed] deepseek_attempt={attempts} topic='{topic}'")
+                    resp = client.chat.completions.create(
+                        model="deepseek-chat",
+                        messages=[
+                            {"role": "system", "content": "You generate only JSON arrays of tags."},
+                            {"role": "user", "content": prompt},
+                        ],
+                        temperature=0.2,
+                        max_tokens=256,
+                    )
+                    text = ""
+                    try:
+                        text = (resp.choices[0].message.content or "").strip()
+                    except Exception:
+                        text = str(resp)
+                    arr = None
+                    try:
+                        arr = json.loads(text)
+                    except Exception:
+                        m = re.search(r"\[[\s\S]*\]", text)
+                        if m:
+                            try:
+                                arr = json.loads(m.group(0))
+                            except Exception:
+                                arr = None
+                    if isinstance(arr, list) and len(arr) > 0:
+                        tags = _sanitize_tags([str(x) for x in arr])
+                        if tags:
+                            print(f"[learn-feed] deepseek_success attempts={attempts} tags={tags}")
+                            return tags
+                except Exception as e:
+                    print(f"[learn-feed] deepseek_error attempt={attempts} err={e}")
+                # brief backoff
+                time.sleep(1.0)
+    except Exception as e:
+        print(f"[learn-feed] deepseek_client_unavailable err={e}")
+    # Fallback: simple keywords from topic
+    import re
+    words = re.findall(r"[A-Za-z][A-Za-z\-]{1,}\b", topic.lower())
+    # Prioritize unique meaningful words
+    uniq: List[str] = []
+    for w in words:
+        if w not in uniq:
+            uniq.append(w)
+    tags = _sanitize_tags(uniq)
+    print(f"[learn-feed] deepseek_fallback tags={tags}")
+    return tags
 
 @router.get("/feed", response_model=List[Dict[str, Any]])
 async def get_feed_videos(
@@ -585,3 +724,117 @@ async def get_feed_videos(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error fetching feed videos: {str(e)}"
         )
+
+@router.get("/learn-feed")
+async def get_learn_feed(
+    topic: str = Query("", description="Topic to derive tags for related videos (DeepSeek-generated)"),
+    tags: Optional[str] = Query(None, description="Optional precomputed DeepSeek tags (CSV or JSON array)"),
+    limit_similar: int = Query(12, ge=0, le=100),
+    limit_others: int = Query(12, ge=0, le=100),
+    db: Session = Depends(get_db),
+    current_user: Optional[models.User] = Depends(security.get_current_user_optional),
+):
+    """Return two sections of public videos: similar (by tag overlap with topic) and others.
+    Excludes the current user's posts when authenticated. Results sorted by recency.
+    """
+    try:
+        # If precomputed tags were provided (from generate-tags endpoint), use them
+        qtags: List[str] = []
+        tag_source = ""
+        if tags:
+            raw: List[str] = []
+            try:
+                import json as _json
+                parsed = _json.loads(tags)
+                if isinstance(parsed, list):
+                    raw = [str(x) for x in parsed]
+            except Exception:
+                raw = [p.strip() for p in tags.split(',') if p.strip()]
+            qtags = _sanitize_tags([s.lower() for s in raw])
+            tag_source = "deepseek(precomputed)"
+            print(f"[learn-feed] using_precomputed_tags: {qtags}")
+        else:
+            # Always generate tags from topic via DeepSeek (with fallback)
+            qtags = _sanitize_tags(_generate_tags_for_topic(topic.lower())) if topic else []
+            tag_source = "deepseek" if qtags and not set(qtags).issubset(set(topic.lower().split())) else "fallback"
+            print(f"[learn-feed] generated_tags topic='{topic}' source={tag_source}: {qtags}")
+        qset = set(qtags)
+
+        # Get base query for public posts
+        query = (
+            db.query(models.UserPost)
+            .options(joinedload(models.UserPost.user))
+            .filter(models.UserPost.post_path != None)
+            .filter(models.UserPost.public == True)
+        )
+
+        # Exclude current user's own posts if authenticated
+        if current_user is not None:
+            query = query.filter(models.UserPost.user_id != current_user.user_id)
+
+        # Get all matching posts
+        all_posts = query.order_by(models.UserPost.created_on.desc()).limit(300).all()
+        print(f"Found {len(all_posts)} public posts")
+
+        similar_items = []
+        other_items = []
+
+        for post in all_posts:
+            # Get video details
+            item = _collect_videos_for_post(post)
+            if not item or not item.get("video_url"):
+                continue
+
+            # Get post tags
+            post_tags_raw = getattr(post, "tags", None) or []
+            post_tags = _sanitize_tags([str(t).lower() for t in post_tags_raw])
+            
+            # Check for tag matches via set intersection
+            has_match = bool(qset.intersection(set(post_tags))) if qset else False
+            
+            if has_match and len(similar_items) < limit_similar:
+                try:
+                    print(f"[learn-feed] match post_id={post.post_id} post_tags={post_tags} qtags={qtags}")
+                except Exception:
+                    pass
+                similar_items.append(item)
+            elif len(other_items) < limit_others:
+                other_items.append(item)
+
+            # Early exit if we have enough items
+            if len(similar_items) >= limit_similar and len(other_items) >= limit_others:
+                break
+
+        print(f"[learn-feed] returning similar={len(similar_items)} other={len(other_items)}")
+        return {
+            "similar": similar_items, 
+            "others": other_items, 
+            "query_tags": qtags,
+            "tag_source": tag_source,
+        }
+    except Exception as e:
+        import traceback
+        print(f"Error in get_learn_feed: {str(e)}\n{traceback.format_exc()}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error fetching learn feed: {str(e)}",
+        )
+
+@router.get("/generate-tags")
+async def generate_tags(
+    topic: str = Query("", description="Topic to generate tags via DeepSeek"),
+):
+    try:
+        if not topic.strip():
+            raise HTTPException(status_code=400, detail="Missing topic")
+        tags = _sanitize_tags(_generate_tags_for_topic(topic.strip().lower()))
+        # Heuristic: if tags are subset of topic words, mark fallback
+        source = "deepseek" if tags and not set(tags).issubset(set(topic.lower().split())) else "fallback"
+        print(f"[generate-tags] topic='{topic}' source={source} tags={tags}")
+        return {"tags": tags, "source": source}
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        print(f"[generate-tags] error: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate tags: {str(e)}")

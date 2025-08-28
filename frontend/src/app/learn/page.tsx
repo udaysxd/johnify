@@ -2,6 +2,7 @@
 
 import { useState, useEffect, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
+import Image from 'next/image';
 import { useAuth } from '@/contexts/AuthContext';
 
 // Response shape from /api/learn
@@ -14,6 +15,18 @@ interface LearnResponse {
   detail?: string;
 }
 
+type FeedVideo = {
+  id: string;
+  title: string;
+  thumbnailUrl: string;
+  videoUrl: string;
+  createdAt: string;
+  status: 'processing' | 'completed' | 'failed';
+  userId?: string;
+  userName?: string;
+  tags?: string[];
+};
+
 function LearnPageContent() {
   const { user, loading: isAuthLoading } = useAuth();
   const isAuthenticated = !!user;
@@ -22,6 +35,13 @@ function LearnPageContent() {
   const [isLoading, setIsLoading] = useState(false);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [feedSimilar, setFeedSimilar] = useState<FeedVideo[]>([]);
+  const [feedOthers, setFeedOthers] = useState<FeedVideo[]>([]);
+  const [feedQueryTags, setFeedQueryTags] = useState<string[]>([]);
+  const [feedLoading, setFeedLoading] = useState(false);
+  const [showFeed, setShowFeed] = useState(false);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [selectedVideo, setSelectedVideo] = useState<FeedVideo | null>(null);
   const router = useRouter();
   const searchParams = useSearchParams();
 
@@ -111,12 +131,100 @@ function LearnPageContent() {
     }
   };
 
+  // Get DeepSeek-generated tags first (retry a few times), then use those to fetch the feed
+  const fetchPrecomputedTags = async (t: string): Promise<string[]> => {
+    const topicNorm = (t || '').trim();
+    if (!topicNorm) return [];
+    const maxAttempts = 3;
+    let attempt = 0;
+    while (attempt < maxAttempts) {
+      attempt += 1;
+      try {
+        const resp = await fetch('/api/videos/generate-tags?' + new URLSearchParams({ topic: topicNorm }).toString(), {
+          method: 'GET',
+          headers: { 'Content-Type': 'application/json' },
+          cache: 'no-store',
+        });
+        if (!resp.ok) {
+          const txt = await resp.text().catch(() => '');
+          console.warn('generate-tags error:', txt);
+        } else {
+          const data = await resp.json();
+          const tags: string[] = Array.isArray(data?.tags) ? data.tags.map(String) : [];
+          const source: string = typeof data?.source === 'string' ? data.source : 'unknown';
+          console.log(`generate-tags attempt=${attempt} source=${source} tags=`, tags);
+          if (tags.length > 0 && source === 'deepseek') return tags;
+        }
+      } catch (e) {
+        console.warn('generate-tags exception:', e);
+      }
+      // brief backoff
+      await new Promise((r) => setTimeout(r, 800));
+    }
+    return [];
+  };
+
+  // Fetch learn feed based on topic
+  const fetchLearnFeed = async (t: string) => {
+    const q = (t || '').trim();
+    if (!q) return;
+    try {
+      setFeedLoading(true);
+      console.log('Fetching learn feed for topic:', q);
+      // 1) Precompute DeepSeek tags
+      const tags = await fetchPrecomputedTags(q);
+      // 2) Call Next.js API route; pass precomputed tags when present
+      const params = new URLSearchParams({
+        topic: q,
+        limit_similar: '9',
+        limit_others: '9',
+      });
+      if (tags.length > 0) params.set('tags', JSON.stringify(tags));
+      const resp = await fetch(`/api/videos/learn-feed?` + params.toString(), {
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
+      });
+      
+      console.log('Learn feed response status:', resp.status);
+      if (!resp.ok) {
+        const errorText = await resp.text();
+        let errorData;
+        try {
+          errorData = JSON.parse(errorText);
+        } catch {
+          errorData = { error: errorText };
+        }
+        console.error('Failed to fetch learn feed:', errorData);
+        return;
+      }
+      
+      const data = await resp.json();
+      console.log('Learn feed data:', data);
+      // API route returns keys: similar, others, queryTags
+      setFeedSimilar(Array.isArray(data?.similar) ? data.similar : []);
+      setFeedOthers(Array.isArray(data?.others) ? data.others : []);
+      setFeedQueryTags(Array.isArray(data?.queryTags) ? data.queryTags : []);
+    } catch (error) {
+      console.error('Error in fetchLearnFeed:', error);
+    } finally {
+      setFeedLoading(false);
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     // Prevent early clicks before auth is ready or if already processing
     if (isAuthLoading || !isAuthenticated || isLoading) return;
     if (!topic.trim()) return;
-    await generateVideo(topic);
+    
+    // Show feed section only after user initiates generation
+    setShowFeed(true);
+    // Show feed immediately with loading state
+    fetchLearnFeed(topic).catch(console.error);
+    
+    // Start video generation in the background
+    generateVideo(topic).catch(console.error);
   };
 
   // Autostart if ?autostart=1 and topic present
@@ -186,13 +294,152 @@ function LearnPageContent() {
                 {error}
               </div>
             )}
+            
+            {/* Feed section - visible only after Generate is pressed */}
+            {showFeed && (
+            <div className="mt-8">
+              <h3 className="text-lg font-semibold text-gray-900 mb-2">
+                {isLoading ? 'Discover while we generate your video' : 'Related Videos'}
+              </h3>
+              {feedQueryTags.length > 0 && feedSimilar.length > 0 && (
+                <p className="text-sm text-gray-500 mb-4">
+                  {isLoading ? 'Similar videos based on: ' : 'Based on: '}
+                  {feedQueryTags.join(', ')}
+                </p>
+              )}
+
+              {/* Similar Videos */}
+              {(feedLoading || feedSimilar.length > 0) && (
+              <section className="mb-10">
+                <div className="flex items-center justify-between mb-3">
+                  <h4 className="text-base font-semibold text-gray-900">Similar Videos</h4>
+                  {feedLoading && <span className="text-xs text-gray-500">Loading…</span>}
+                </div>
+                <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
+                  {(feedSimilar || []).map((video) => (
+                    <div
+                      key={video.id}
+                      className="relative bg-white shadow rounded-lg hover:shadow-lg transition-shadow duration-200 cursor-pointer overflow-visible z-10"
+                      onClick={() => { setSelectedVideo(video); setIsModalOpen(true); }}
+                    >
+                      <div className="relative pb-[56.25%] bg-black rounded-t-lg overflow-hidden">
+                        {video.thumbnailUrl ? (
+                          <div className="absolute inset-0">
+                            <Image
+                              src={video.thumbnailUrl}
+                              alt={video.title}
+                              fill
+                              className="object-cover"
+                              sizes="(max-width: 768px) 100vw, (max-width: 1200px) 50vw, 33vw"
+                              unoptimized
+                            />
+                          </div>
+                        ) : (
+                          <div className="w-full h-full bg-gradient-to-br from-blue-600 to-purple-600 flex items-center justify-center text-white p-4 text-center">
+                            <div className="relative w-16 h-16 mb-4">
+                              <div className="absolute inset-0 bg-white/20 rounded-full animate-ping"></div>
+                              <div className="absolute inset-0 flex items-center justify-center">
+                                <svg className="w-10 h-10" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+                                  <path d="M6.3 2.841A1.5 1.5 0 004 4.11v11.78a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z" />
+                                </svg>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                        <div className="absolute inset-0 flex items-center justify-center opacity-0 hover:opacity-100 transition-opacity">
+                          <div className="bg-black bg-opacity-50 rounded-full p-3">
+                            <svg className="w-10 h-10 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path>
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                            </svg>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="mx-4 border-t border-gray-300" />
+                      <div className="px-4 pb-3 pt-3 relative">
+                        <div className="flex items-start justify-between gap-2">
+                          <h3 className="text-base font-medium text-gray-900 truncate">
+                            {video.title}
+                          </h3>
+                        </div>
+                        <p className="mt-1 text-sm text-gray-500">{new Date(video.createdAt).toLocaleString()}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </section>
+              )}
+
+              {/* Other Videos */}
+              <section>
+                <div className="flex items-center justify-between mb-3">
+                  <h4 className="text-base font-semibold text-gray-900">Other Videos from Our Learners</h4>
+                </div>
+                <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
+                  {(feedOthers || []).map((video) => (
+                    <div
+                      key={video.id}
+                      className="relative bg-white shadow rounded-lg hover:shadow-lg transition-shadow duration-200 cursor-pointer overflow-visible z-10"
+                      onClick={() => { setSelectedVideo(video); setIsModalOpen(true); }}
+                    >
+                      <div className="relative pb-[56.25%] bg-black rounded-t-lg overflow-hidden">
+                        {video.thumbnailUrl ? (
+                          <div className="absolute inset-0">
+                            <Image
+                              src={video.thumbnailUrl}
+                              alt={video.title}
+                              fill
+                              className="object-cover"
+                              sizes="(max-width: 768px) 100vw, (max-width: 1200px) 50vw, 33vw"
+                              unoptimized
+                            />
+                          </div>
+                        ) : (
+                          <div className="w-full h-full bg-gradient-to-br from-blue-600 to-purple-600 flex items-center justify-center text-white p-4 text-center">
+                            <div className="relative w-16 h-16 mb-4">
+                              <div className="absolute inset-0 bg-white/20 rounded-full animate-ping"></div>
+                              <div className="absolute inset-0 flex items-center justify-center">
+                                <svg className="w-10 h-10" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+                                  <path d="M6.3 2.841A1.5 1.5 0 004 4.11v11.78a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z" />
+                                </svg>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                        <div className="absolute inset-0 flex items-center justify-center opacity-0 hover:opacity-100 transition-opacity">
+                          <div className="bg-black bg-opacity-50 rounded-full p-3">
+                            <svg className="w-10 h-10 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path>
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                            </svg>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="mx-4 border-t border-gray-300" />
+                      <div className="px-4 pb-3 pt-3 relative">
+                        <div className="flex items-start justify-between gap-2">
+                          <h3 className="text-base font-medium text-gray-900 truncate">
+                            {video.title}
+                          </h3>
+                        </div>
+                        <p className="mt-1 text-sm text-gray-500">{new Date(video.createdAt).toLocaleString()}</p>
+                      </div>
+                    </div>
+                  ))}
+                  {(!feedLoading && feedOthers.length === 0) && (
+                    <div className="text-sm text-gray-500">No other videos available.</div>
+                  )}
+                </div>
+              </section>
+            </div>
+            )}
           </div>
         ) : (
           <div className="bg-white shadow rounded-lg p-6 text-center">
             <h2 className="text-xl font-semibold mb-4">Your Learning Video is Ready!</h2>
             <div className="aspect-w-16 aspect-h-9 bg-black rounded-lg overflow-hidden mb-6">
               <video 
-                src={videoUrl} 
+                src={videoUrl || undefined} 
                 controls 
                 className="w-full h-full"
                 autoPlay
@@ -216,13 +463,61 @@ function LearnPageContent() {
             </div>
           </div>
         )}
-        
-        <div className="mt-8 text-center text-sm text-gray-500">
-          <p>Note: Video generation may take a few moments. Please be patient.</p>
+          {/* end panel or form/video container */}
         </div>
+        {/* end max-w container */}
       </div>
-      </div>
+      {/* end padding container */}
+
+      {/* Video Modal */}
+      {isModalOpen && selectedVideo && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center"
+          role="dialog"
+          aria-modal="true"
+        >
+          {/* Backdrop */}
+          <div
+            className="absolute inset-0 bg-black/60"
+            onClick={() => { setIsModalOpen(false); setSelectedVideo(null); }}
+          />
+          {/* Modal content */}
+          <div className="relative z-10 w-full max-w-3xl mx-4 bg-white rounded-lg shadow-lg overflow-hidden">
+            <div className="flex items-center justify-between px-4 py-3 border-b">
+              <h3 className="text-lg font-semibold truncate pr-4">{selectedVideo.title}</h3>
+              <button
+                onClick={() => { setIsModalOpen(false); setSelectedVideo(null); }}
+                className="p-2 text-gray-500 hover:text-gray-700"
+                aria-label="Close"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
+                  <path fillRule="evenodd" d="M5.47 5.47a.75.75 0 011.06 0L12 10.94l5.47-5.47a.75.75 0 111.06 1.06L13.06 12l5.47 5.47a.75.75 0 11-1.06 1.06L12 13.06l-5.47 5.47a.75.75 0 01-1.06-1.06L10.94 12 5.47 6.53a.75.75 0 010-1.06z" clipRule="evenodd" />
+                </svg>
+              </button>
+            </div>
+            <div className="relative bg-black">
+              <div className="relative pb-[56.25%]">
+                <video
+                  src={selectedVideo.videoUrl}
+                  controls
+                  className="absolute inset-0 w-full h-full"
+                  autoPlay
+                >
+                  Your browser does not support the video tag.
+                </video>
+              </div>
+            </div>
+            <div className="px-4 py-3 border-t text-sm text-gray-600 flex items-center justify-between">
+              <div className="truncate">
+                {selectedVideo.userName ? `by ${selectedVideo.userName}` : 'Public video'}
+              </div>
+              <div className="text-gray-500">{new Date(selectedVideo.createdAt).toLocaleString()}</div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
+    /* end outer min-h container */
   );
 }
 

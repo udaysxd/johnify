@@ -27,6 +27,8 @@ def narrations_to_mp3(narrations: list[str], out_dir: str = "audio"):
         audio_encoding=texttospeech.AudioEncoding.MP3,
         speaking_rate=1.0,
         pitch=0.0,
+        # Ensure consistent sample rate to match ffmpeg pipeline
+        sample_rate_hertz=44100,
     )
     
     # Process each narration
