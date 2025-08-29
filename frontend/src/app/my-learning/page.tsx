@@ -299,10 +299,10 @@ export default function HomePage() {
             </h1>
             {videos.length > 0 && (
               <Link
-                href="/tutor"
+                href="/learn"
                 className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
               >
-                Create My Tutor
+                Learn New
               </Link>
             )}
           </div>
@@ -344,7 +344,7 @@ export default function HomePage() {
               <p className="mt-1 text-sm text-gray-500">Get started by creating your first AI tutor.</p>
               <div className="mt-6">
                 <Link
-                  href="/tutor"
+                  href="/learn"
                   className="inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
                 >
                   <svg
@@ -360,7 +360,7 @@ export default function HomePage() {
                       clipRule="evenodd"
                     />
                   </svg>
-                  Create My Tutor
+                  Learn New
                 </Link>
               </div>
             </div>

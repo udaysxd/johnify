@@ -6,31 +6,32 @@ export default function Home() {
   return (
     <div className="min-h-screen bg-white dark:bg-gray-900">
       {/* Hero Section */}
-      <section className="py-20 px-4 sm:px-6 lg:px-8 max-w-7xl mx-auto">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-8 items-stretch">
+      <section className="pt-10 pb-20 px-4 sm:px-6 lg:px-8 max-w-7xl mx-auto">
+        <div className="grid grid-cols-1 gap-8 items-stretch">
           {/* Left Hero - JohnifyCREATE */}
-          <div className="text-center md:text-left bg-gray-50 dark:bg-gray-800/60 rounded-2xl p-8 border border-gray-100 dark:border-gray-700 shadow-sm h-full">
+          <div className="text-center bg-blue-100 dark:bg-blue-900 rounded-2xl p-8 border border-gray-300 dark:border-gray-700 shadow-sm h-full">
             <p className="text-sm font-semibold tracking-wide text-blue-600 mb-3">
-              johnifyCREATE
+              johnifyLEARN
               <span className="ml-2 inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-blue-700 dark:border-blue-900/40 dark:bg-blue-900/20 dark:text-blue-300">Beta</span>
             </p>
             <h1 className="text-4xl md:text-5xl font-bold text-gray-900 dark:text-white mb-6">
               Ready to Learn Something New? 
             </h1>
-            <p className="text-lg md:text-xl text-gray-600 dark:text-gray-300 mb-8 md:mb-10 max-w-2xl mx-auto md:mx-0">
+            <p className="text-lg md:text-xl text-gray-600 dark:text-gray-300 mb-8 md:mb-10 max-w-2xl mx-auto">
               Join thousands of students who are using Johnify to learn anything free of cost.
             </p>
-            <div className="flex justify-center md:justify-start">
+            <div className="flex justify-center">
               <a
                 href="/learn"
                 className="bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 px-8 rounded-lg text-lg transition-colors inline-block"
               >
-                Create Video
+                Learn Now
               </a>
             </div>
           </div>
 
-          {/* Right Hero - JohnifyTutor */}
+          {/* Right Hero - JohnifyTutor (temporarily hidden) */}
+          {/**
           <div className="text-center md:text-left bg-gray-50 dark:bg-gray-800/60 rounded-2xl p-8 border border-gray-100 dark:border-gray-700 shadow-sm h-full">
             <p className="text-sm font-semibold tracking-wide text-purple-600 mb-3">
               johnifyTUTOR
@@ -51,6 +52,7 @@ export default function Home() {
               </a>
             </div>
           </div>
+          **/}
         </div>
 
         {/* Hero Video */}
@@ -68,7 +70,7 @@ export default function Home() {
             {/* Copy */}
             <div>
               <h3 className="text-sm font-semibold tracking-wide text-blue-600 mb-3">
-                johnifyCREATE
+                johnifyLEARN
                 <span className="ml-2 inline-flex items-center rounded-full border border-blue-200 bg-blue-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-blue-700 dark:border-blue-900/40 dark:bg-blue-900/30 dark:text-blue-300">Beta</span>
               </h3>
               <h2 className="text-4xl md:text-5xl font-bold text-gray-900 dark:text-white mb-4">From question to video answer in seconds.</h2>

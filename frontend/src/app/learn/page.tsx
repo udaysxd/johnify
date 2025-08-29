@@ -268,7 +268,7 @@ function LearnPageContent() {
                     value={topic}
                     onChange={(e) => setTopic(e.target.value)}
                     className="w-full px-4 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
-                    placeholder="e.g., Quantum Computing, Ancient Rome, Machine Learning"
+                    placeholder="e.g., Ancient Rome, Machine Learning, Pasta recipe"
                     disabled={isLoading}
                     required
                   />

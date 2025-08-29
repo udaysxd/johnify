@@ -484,7 +484,40 @@ def _collect_videos_for_post(post: models.UserPost) -> Dict[str, Any]:
         if not pp:
             print(f"No post_path for post {post.post_id}")
             return {}
-            
+        
+        # If post_path is already a cloud URL, return directly without filesystem checks
+        if pp.startswith("gs://"):
+            video_url = _gcs_https_from_gs(pp)
+            thumbnail_url = _derive_thumb_url_from_video(video_url)
+            if video_url:
+                return {
+                    "id": str(post.post_id),
+                    "title": post.post_topic or "Untitled Video",
+                    "created_at": post.created_on.isoformat() if post.created_on else datetime.utcnow().isoformat(),
+                    "video_url": video_url,
+                    "thumbnail_url": thumbnail_url,
+                    "topic": post.post_topic or "",
+                    "status": "completed",
+                    "user_id": post.user_id,
+                    "user_name": getattr(post, "user", None) and getattr(post.user, "user_name", None),
+                    "tags": getattr(post, "tags", None) or [],
+                }
+        if pp.startswith("https://storage.googleapis.com/"):
+            video_url = pp
+            thumbnail_url = _derive_thumb_url_from_video(video_url)
+            return {
+                "id": str(post.post_id),
+                "title": post.post_topic or "Untitled Video",
+                "created_at": post.created_on.isoformat() if post.created_on else datetime.utcnow().isoformat(),
+                "video_url": video_url,
+                "thumbnail_url": thumbnail_url,
+                "topic": post.post_topic or "",
+                "status": "completed",
+                "user_id": post.user_id,
+                "user_name": getattr(post, "user", None) and getattr(post.user, "user_name", None),
+                "tags": getattr(post, "tags", None) or [],
+            }
+        
         # Normalize path (handle both Windows and Unix paths)
         normalized_path = pp.replace('\\', '/').strip()
         
@@ -806,10 +839,12 @@ async def get_learn_feed(
                 break
 
         print(f"[learn-feed] returning similar={len(similar_items)} other={len(other_items)}")
+        # Return both snake_case and camelCase for compatibility with existing frontend
         return {
-            "similar": similar_items, 
-            "others": other_items, 
+            "similar": similar_items,
+            "others": other_items,
             "query_tags": qtags,
+            "queryTags": qtags,
             "tag_source": tag_source,
         }
     except Exception as e:

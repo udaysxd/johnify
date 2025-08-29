@@ -21,8 +21,7 @@ export default function Footer() {
           <nav className="w-full md:w-auto text-sm">
             <div className="flex flex-wrap items-center justify-center md:justify-start gap-x-6 gap-y-2">
               <Link href="/" className="text-gray-600 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white transition-colors">Home</Link>
-              <Link href="/learn" className="text-gray-600 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white transition-colors">Create Video</Link>
-              <Link href="/quiz" className="text-gray-600 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white transition-colors">Create Tutor</Link>
+              <Link href="/learn" className="text-gray-600 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white transition-colors">Learn Now</Link>
             </div>
             <div className="mt-2 flex flex-wrap items-center justify-center md:justify-start gap-x-6 gap-y-2">
               <Link href="/about" className="text-gray-600 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white transition-colors">About Us</Link>

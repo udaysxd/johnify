@@ -87,19 +87,19 @@ export default function Header() {
               >
                 My learning
               </Link>
-              {/* My Tutor link (authenticated) */}
-              <Link 
-                href="/tutor" 
-                className="px-3 py-2 text-sm font-bold text-gray-100 hover:text-indigo-300"
-              >
-                My Tutor
-              </Link>
               {/* My Feed link (authenticated) */}
               <Link 
                 href="/feed" 
                 className="px-3 py-2 text-sm font-bold text-gray-100 hover:text-indigo-300"
               >
                 My Feed
+              </Link>
+              {/* My Tutor link (authenticated) */}
+              <Link 
+                href="/learn" 
+                className="px-4 py-2 text-sm font-bold text-white bg-indigo-600 rounded-md hover:bg-indigo-700"
+              >
+                Learn
               </Link>
               {/* User initial avatar */}
               <button
@@ -153,19 +153,19 @@ export default function Header() {
               >
                 My learning
               </Link>
-              {/* My Tutor link (unauthenticated) */}
-              <Link 
-                href="/tutor" 
-                className="px-3 py-2 text-sm font-bold text-gray-100 hover:text-indigo-300"
-              >
-                My Tutor
-              </Link>
               {/* My Feed link (unauthenticated) */}
               <Link 
                 href="/feed" 
                 className="px-3 py-2 text-sm font-bold text-gray-100 hover:text-indigo-300"
               >
                 My Feed
+              </Link>
+              {/* My Tutor link (unauthenticated) */}
+              <Link 
+                href="/learn" 
+                className="px-4 py-2 text-sm font-bold text-white bg-indigo-600 rounded-md hover:bg-indigo-700"
+              >
+                Learn
               </Link>
               {!pathname.startsWith('/auth/signin') && (
                 <Link 
