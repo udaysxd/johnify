@@ -2,6 +2,7 @@ import subprocess
 from pathlib import Path
 import os
 import json
+import re
 
 def get_audio_duration(mp3: Path) -> float:
     """Get duration of MP3 file in seconds using ffprobe."""
@@ -18,15 +19,28 @@ def get_audio_duration(mp3: Path) -> float:
         print(f"Error getting audio duration: {str(e)}")
         return 0.0
 
+def _parse_slide_number(img: Path) -> int:
+    """Extract numeric part from slide filename like slide_002.png -> 2. Returns -1 if not found."""
+    try:
+        m = re.search(r"slide_(\d+)\.png$", str(img))
+        if m:
+            return int(m.group(1))
+    except Exception:
+        pass
+    return -1
+
 def create_slide_video(img: Path, mp3: Path, out_mp4: Path):
     """Create video segment from image and audio."""
     try:
+        duration = max(0.1, float(get_audio_duration(mp3)))
+        slide_no = _parse_slide_number(img)
+        # Always produce a static image+audio segment (no animation)
         subprocess.run([
             "ffmpeg", "-y",
             "-loop", "1",
             "-i", str(img),
             "-i", str(mp3),
-            "-t", str(get_audio_duration(mp3)),
+            "-t", str(duration),
             # Video encoding: prioritize low memory/CPU
             "-c:v", "libx264",
             "-preset", "ultrafast",
@@ -61,6 +75,8 @@ def stitch_images_and_audio_to_video(img_dir: Path, aud_dir: Path, out_mp4: Path
     try:
         img_dir, aud_dir = Path(img_dir), Path(aud_dir)
         imgs = sorted(img_dir.glob("slide_*.png"))
+        # Keep only primary slide images like slide_000.png, slide_001.png ...
+        imgs = [p for p in imgs if re.match(r"^slide_\d{3}\.png$", p.name)]
         mp3s = sorted(aud_dir.glob("*.mp3"))  # Match any .mp3 files
         
         if not imgs:

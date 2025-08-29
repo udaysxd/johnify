@@ -70,6 +70,8 @@ function LearnPageContent() {
 
     try {
       const userEmail = user?.user_email;
+      // Precompute tags (single source of truth) and send along with generation request
+      const precomputedTags = await fetchPrecomputedTags(trimmed);
       const response = await fetch('/api/learn', {
         method: 'POST',
         headers: {
@@ -80,6 +82,7 @@ function LearnPageContent() {
           topic: trimmed,
           complexity_level: complexity,
           user_email: userEmail || 'anonymous@example.com',
+          tags: precomputedTags,
         }),
       });
 
@@ -177,7 +180,7 @@ function LearnPageContent() {
       const params = new URLSearchParams({
         topic: q,
         limit_similar: '9',
-        limit_others: '9',
+        limit_others: '18',
       });
       if (tags.length > 0) params.set('tags', JSON.stringify(tags));
       const resp = await fetch(`/api/videos/learn-feed?` + params.toString(), {
@@ -287,6 +290,11 @@ function LearnPageContent() {
                     {isLoading ? 'Generating Video...' : 'Generate Learning Video'}
                   </button>
                 </div>
+                {isLoading && (
+                  <p className="mt-3 text-center text-sm text-gray-700" aria-live="polite">
+                    Please be patient. Video will be ready in few minutes...
+                  </p>
+                )}
               </form>
             
             {error && (
@@ -295,143 +303,131 @@ function LearnPageContent() {
               </div>
             )}
             
-            {/* Feed section - visible only after Generate is pressed */}
-            {showFeed && (
-            <div className="mt-8">
-              <h3 className="text-lg font-semibold text-gray-900 mb-2">
-                {isLoading ? 'Discover while we generate your video' : 'Related Videos'}
-              </h3>
-              {feedQueryTags.length > 0 && feedSimilar.length > 0 && (
-                <p className="text-sm text-gray-500 mb-4">
-                  {isLoading ? 'Similar videos based on: ' : 'Based on: '}
-                  {feedQueryTags.join(', ')}
-                </p>
-              )}
-
-              {/* Similar Videos */}
-              {(feedLoading || feedSimilar.length > 0) && (
-              <section className="mb-10">
-                <div className="flex items-center justify-between mb-3">
-                  <h4 className="text-base font-semibold text-gray-900">Similar Videos</h4>
-                  {feedLoading && <span className="text-xs text-gray-500">Loading…</span>}
-                </div>
-                <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
-                  {(feedSimilar || []).map((video) => (
-                    <div
-                      key={video.id}
-                      className="relative bg-white shadow rounded-lg hover:shadow-lg transition-shadow duration-200 cursor-pointer overflow-visible z-10"
-                      onClick={() => { setSelectedVideo(video); setIsModalOpen(true); }}
-                    >
-                      <div className="relative pb-[56.25%] bg-black rounded-t-lg overflow-hidden">
-                        {video.thumbnailUrl ? (
-                          <div className="absolute inset-0">
-                            <Image
-                              src={video.thumbnailUrl}
-                              alt={video.title}
-                              fill
-                              className="object-cover"
-                              sizes="(max-width: 768px) 100vw, (max-width: 1200px) 50vw, 33vw"
-                              unoptimized
-                            />
-                          </div>
-                        ) : (
-                          <div className="w-full h-full bg-gradient-to-br from-blue-600 to-purple-600 flex items-center justify-center text-white p-4 text-center">
-                            <div className="relative w-16 h-16 mb-4">
-                              <div className="absolute inset-0 bg-white/20 rounded-full animate-ping"></div>
-                              <div className="absolute inset-0 flex items-center justify-center">
-                                <svg className="w-10 h-10" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
-                                  <path d="M6.3 2.841A1.5 1.5 0 004 4.11v11.78a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z" />
+            {/* Feed section - only render after data is fetched and there are items */}
+            {showFeed && !feedLoading && (feedSimilar.length > 0 || feedOthers.length > 0) && (
+              <div className="mt-8">
+                {/* Similar Videos */}
+                {feedSimilar.length > 0 && (
+                  <section className="mb-10">
+                    <div className="flex items-center justify-between mb-3">
+                      <h4 className="text-base font-semibold text-gray-900">Similar Videos</h4>
+                    </div>
+                    <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
+                      {(feedSimilar || []).map((video) => (
+                        <div
+                          key={video.id}
+                          className="relative bg-white shadow rounded-lg hover:shadow-lg transition-shadow duration-200 cursor-pointer overflow-visible z-10"
+                          onClick={() => { setSelectedVideo(video); setIsModalOpen(true); }}
+                        >
+                          <div className="relative pb-[56.25%] bg-black rounded-t-lg overflow-hidden">
+                            {video.thumbnailUrl ? (
+                              <div className="absolute inset-0">
+                                <Image
+                                  src={video.thumbnailUrl}
+                                  alt={video.title}
+                                  fill
+                                  className="object-cover"
+                                  sizes="(max-width: 768px) 100vw, (max-width: 1200px) 50vw, 33vw"
+                                  unoptimized
+                                />
+                              </div>
+                            ) : (
+                              <div className="w-full h-full bg-gradient-to-br from-blue-600 to-purple-600 flex items-center justify-center text-white p-4 text-center">
+                                <div className="relative w-16 h-16 mb-4">
+                                  <div className="absolute inset-0 bg-white/20 rounded-full animate-ping"></div>
+                                  <div className="absolute inset-0 flex items-center justify-center">
+                                    <svg className="w-10 h-10" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+                                      <path d="M6.3 2.841A1.5 1.5 0 004 4.11v11.78a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z" />
+                                    </svg>
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+                            <div className="absolute inset-0 flex items-center justify-center opacity-0 hover:opacity-100 transition-opacity">
+                              <div className="bg-black bg-opacity-50 rounded-full p-3">
+                                <svg className="w-10 h-10 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path>
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
                                 </svg>
                               </div>
                             </div>
                           </div>
-                        )}
-                        <div className="absolute inset-0 flex items-center justify-center opacity-0 hover:opacity-100 transition-opacity">
-                          <div className="bg-black bg-opacity-50 rounded-full p-3">
-                            <svg className="w-10 h-10 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path>
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-                            </svg>
+                          <div className="mx-4 border-t border-gray-300" />
+                          <div className="px-4 pb-3 pt-3 relative">
+                            <div className="flex items-start justify-between gap-2">
+                              <h3 className="text-base font-medium text-gray-900 truncate">
+                                {video.title}
+                              </h3>
+                            </div>
+                            <p className="mt-1 text-sm text-gray-500">{new Date(video.createdAt).toLocaleString()}</p>
                           </div>
                         </div>
-                      </div>
-                      <div className="mx-4 border-t border-gray-300" />
-                      <div className="px-4 pb-3 pt-3 relative">
-                        <div className="flex items-start justify-between gap-2">
-                          <h3 className="text-base font-medium text-gray-900 truncate">
-                            {video.title}
-                          </h3>
-                        </div>
-                        <p className="mt-1 text-sm text-gray-500">{new Date(video.createdAt).toLocaleString()}</p>
-                      </div>
+                      ))}
                     </div>
-                  ))}
-                </div>
-              </section>
-              )}
+                  </section>
+                )}
 
-              {/* Other Videos */}
-              <section>
-                <div className="flex items-center justify-between mb-3">
-                  <h4 className="text-base font-semibold text-gray-900">Other Videos from Our Learners</h4>
-                </div>
-                <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
-                  {(feedOthers || []).map((video) => (
-                    <div
-                      key={video.id}
-                      className="relative bg-white shadow rounded-lg hover:shadow-lg transition-shadow duration-200 cursor-pointer overflow-visible z-10"
-                      onClick={() => { setSelectedVideo(video); setIsModalOpen(true); }}
-                    >
-                      <div className="relative pb-[56.25%] bg-black rounded-t-lg overflow-hidden">
-                        {video.thumbnailUrl ? (
-                          <div className="absolute inset-0">
-                            <Image
-                              src={video.thumbnailUrl}
-                              alt={video.title}
-                              fill
-                              className="object-cover"
-                              sizes="(max-width: 768px) 100vw, (max-width: 1200px) 50vw, 33vw"
-                              unoptimized
-                            />
-                          </div>
-                        ) : (
-                          <div className="w-full h-full bg-gradient-to-br from-blue-600 to-purple-600 flex items-center justify-center text-white p-4 text-center">
-                            <div className="relative w-16 h-16 mb-4">
-                              <div className="absolute inset-0 bg-white/20 rounded-full animate-ping"></div>
-                              <div className="absolute inset-0 flex items-center justify-center">
-                                <svg className="w-10 h-10" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
-                                  <path d="M6.3 2.841A1.5 1.5 0 004 4.11v11.78a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z" />
+                {/* Other Videos */}
+                {feedOthers.length > 0 && (
+                  <section>
+                    <div className="flex items-center justify-between mb-3">
+                      <h4 className="text-base font-semibold text-gray-900">Explore Other Videos from Our Learners</h4>
+                    </div>
+                    <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
+                      {(feedOthers || []).map((video) => (
+                        <div
+                          key={video.id}
+                          className="relative bg-white shadow rounded-lg hover:shadow-lg transition-shadow duration-200 cursor-pointer overflow-visible z-10"
+                          onClick={() => { setSelectedVideo(video); setIsModalOpen(true); }}
+                        >
+                          <div className="relative pb-[56.25%] bg-black rounded-t-lg overflow-hidden">
+                            {video.thumbnailUrl ? (
+                              <div className="absolute inset-0">
+                                <Image
+                                  src={video.thumbnailUrl}
+                                  alt={video.title}
+                                  fill
+                                  className="object-cover"
+                                  sizes="(max-width: 768px) 100vw, (max-width: 1200px) 50vw, 33vw"
+                                  unoptimized
+                                />
+                              </div>
+                            ) : (
+                              <div className="w-full h-full bg-gradient-to-br from-blue-600 to-purple-600 flex items-center justify-center text-white p-4 text-center">
+                                <div className="relative w-16 h-16 mb-4">
+                                  <div className="absolute inset-0 bg-white/20 rounded-full animate-ping"></div>
+                                  <div className="absolute inset-0 flex items-center justify-center">
+                                    <svg className="w-10 h-10" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+                                      <path d="M6.3 2.841A1.5 1.5 0 004 4.11v11.78a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z" />
+                                    </svg>
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+                            <div className="absolute inset-0 flex items-center justify-center opacity-0 hover:opacity-100 transition-opacity">
+                              <div className="bg-black bg-opacity-50 rounded-full p-3">
+                                <svg className="w-10 h-10 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path>
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
                                 </svg>
                               </div>
                             </div>
                           </div>
-                        )}
-                        <div className="absolute inset-0 flex items-center justify-center opacity-0 hover:opacity-100 transition-opacity">
-                          <div className="bg-black bg-opacity-50 rounded-full p-3">
-                            <svg className="w-10 h-10 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path>
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-                            </svg>
+                          <div className="mx-4 border-t border-gray-300" />
+                          <div className="px-4 pb-3 pt-3 relative">
+                            <div className="flex items-start justify-between gap-2">
+                              <h3 className="text-base font-medium text-gray-900 truncate">
+                                {video.title}
+                              </h3>
+                            </div>
+                            <p className="mt-1 text-sm text-gray-500">{new Date(video.createdAt).toLocaleString()}</p>
                           </div>
                         </div>
-                      </div>
-                      <div className="mx-4 border-t border-gray-300" />
-                      <div className="px-4 pb-3 pt-3 relative">
-                        <div className="flex items-start justify-between gap-2">
-                          <h3 className="text-base font-medium text-gray-900 truncate">
-                            {video.title}
-                          </h3>
-                        </div>
-                        <p className="mt-1 text-sm text-gray-500">{new Date(video.createdAt).toLocaleString()}</p>
-                      </div>
+                      ))}
                     </div>
-                  ))}
-                  {(!feedLoading && feedOthers.length === 0) && (
-                    <div className="text-sm text-gray-500">No other videos available.</div>
-                  )}
-                </div>
-              </section>
-            </div>
+                  </section>
+                )}
+              </div>
             )}
           </div>
         ) : (

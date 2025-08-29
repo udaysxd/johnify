@@ -4,6 +4,7 @@ import time
 import re
 import unicodedata
 from PIL import Image, ImageDraw, ImageFont
+import base64
 import textwrap
 import math
 import urllib.parse
@@ -77,6 +78,7 @@ class LearnRequest(BaseModel):
     topic: str = Field(..., description="The topic for the educational video")
     complexity_level: int = Field(3, ge=1, le=5, description="Complexity level from 1 (basic) to 5 (advanced)")
     user_email: str = Field(None, description="Email of the user generating the video")
+    tags: Optional[List[str]] = Field(None, description="Optional precomputed tags to persist with the post")
 
 class QuizRequest(BaseModel):
     topic: str = Field(..., description="The topic for the quiz")
@@ -128,7 +130,8 @@ def _find_ttf_font(preferred: list) -> Optional[str]:
 
 def create_simple_slide(text, output_path, width=1920, height=1080, bg_color=(255, 255, 255), 
                       text_color=(0, 0, 0), padding=50, title_size=60, body_size=40, title=None,
-                      theme: str | None = None):
+                      theme: str | None = None, background_path: str | None = None,
+                      image_mode: str = "full", image_alpha: float = 1.0):
     """
     Create a simple slide image with the given text.
     
@@ -148,18 +151,150 @@ def create_simple_slide(text, output_path, width=1920, height=1080, bg_color=(25
         # Clean and format the markdown
         text = clean_markdown_text(text)
         
-        # Create a new image with white background
+        # Create base image and optionally place background/photo
         img = Image.new('RGB', (width, height), color=bg_color)
+        right_panel_x0 = None
+        if background_path and os.path.exists(background_path):
+            try:
+                if image_mode == "full":
+                    # Full background with adjustable image alpha and dark overlay for readability
+                    base = Image.new('RGBA', (width, height), (*bg_color, 255))
+                    bg = Image.open(background_path).convert('RGBA').resize((width, height))
+                    if image_alpha < 1.0:
+                        # Apply alpha to the background image
+                        r, g, b, _ = bg.split()
+                        a = Image.new('L', (width, height), int(max(0.0, min(1.0, image_alpha)) * 255))
+                        bg = Image.merge('RGBA', (r, g, b, a))
+                    composed = Image.alpha_composite(base, bg)
+                    overlay = Image.new('RGBA', (width, height), (0, 0, 0, 96))
+                    composed = Image.alpha_composite(composed, overlay).convert('RGB')
+                    img = composed
+                elif image_mode == "right_panel":
+                    # Place image on the right with a square container and rounded corners
+                    # Compute panel bounds
+                    panel_margin = max(20, int(width * 0.01))
+                    text_col_right_edge = int(width * 0.60)
+                    right_panel_x0 = text_col_right_edge + panel_margin
+                    right_panel_y0 = panel_margin
+                    panel_w = width - right_panel_x0 - panel_margin
+                    panel_h_max = height - 2 * panel_margin
+                    # Load and fit image preserving aspect ratio into the available panel area
+                    bg = Image.open(background_path).convert('RGBA')
+                    iw, ih = bg.size
+                    target_h = panel_h_max
+                    target_w = panel_w
+                    scale = min(max(1e-6, target_w) / max(1, iw), max(1e-6, target_h) / max(1, ih))
+                    resized = bg.resize((max(1, int(iw * scale)), max(1, int(ih * scale))), Image.LANCZOS)
+                    # Apply alpha to image if specified
+                    if image_alpha < 1.0:
+                        r, g, b, a = resized.split()
+                        a = Image.new('L', resized.size, int(max(0.0, min(1.0, image_alpha)) * 255))
+                        resized = Image.merge('RGBA', (r, g, b, a))
+                    # Create a square container whose size equals the resized image height
+                    box_size = min(panel_w, panel_h_max, resized.size[1])
+                    panel_img = Image.new('RGBA', (box_size, box_size), (*bg_color, 0))
+                    # Center the resized image within the square container
+                    px = max(0, (box_size - resized.size[0]) // 2)
+                    py = max(0, (box_size - resized.size[1]) // 2)
+                    panel_img.paste(resized, (px, py), resized)
+                    # Rounded mask for the square container
+                    mask = Image.new('L', (box_size, box_size), 0)
+                    draw_m = ImageDraw.Draw(mask)
+                    radius = max(20, int(box_size * 0.08))
+                    draw_m.rounded_rectangle([0, 0, box_size, box_size], radius=radius, fill=255)
+                    # Optional subtle shadow for the square image
+                    base_rgba = img.convert('RGBA')
+                    shadow = Image.new('RGBA', (box_size, box_size), (0, 0, 0, 0))
+                    shadow_draw = ImageDraw.Draw(shadow)
+                    shadow_draw.rounded_rectangle([0, 0, box_size, box_size], radius=radius, fill=(0,0,0,60))
+                    shadow_bg = Image.new('RGBA', base_rgba.size, (0,0,0,0))
+                    # Center the square within the right panel area
+                    place_x = right_panel_x0 + max(0, (panel_w - box_size) // 2)
+                    place_y = right_panel_y0 + max(0, (panel_h_max - box_size) // 2)
+                    shadow_bg.paste(shadow, (place_x + 4, place_y + 4), mask)
+                    base_rgba = Image.alpha_composite(base_rgba, shadow_bg)
+                    # Paste the square panel with mask
+                    base_rgba.paste(panel_img, (place_x, place_y), mask)
+                    img = base_rgba.convert('RGB')
+                else:
+                    # Unknown mode; fallback to plain background
+                    pass
+            except Exception as _bg_err:
+                # Fallback to plain background
+                img = Image.new('RGB', (width, height), color=bg_color)
         draw = ImageDraw.Draw(img)
+        # Text column: for right_panel, use all available left area up to the panel; for full, use nearly full width
+        default_text_right = int(width * 0.60) if image_mode != "full" else (width - padding)
+        if image_mode == "right_panel":
+            if right_panel_x0 is not None:
+                # Place text exactly up to the left edge of the image panel
+                safe_margin = 0
+                text_right = max(padding + 200, right_panel_x0 - safe_margin)
+            else:
+                # No image panel available; allow text to span nearly full width
+                text_right = width - padding
+        else:
+            text_right = default_text_right
+        total_px = max(200, width - 2 * padding)
+        # Allow content to extend right up to the image edge (no extra right padding)
+        content_px = max(200, text_right - padding)
+        # Approximate characters-per-line by scaling a base width to our pixel ratio
+        # Allow full-width wrapping when image_mode == 'full'
+        ratio_cap = 1.0 if image_mode in ("right_panel", "full") else 0.60
+        ratio = max(0.3, min(ratio_cap, content_px / total_px))
+
+        # Special endcard: center the brand text and bypass normal title/content
+        if theme == "johnify_endcard":
+            try:
+                end_text = "Johnify"
+                # Choose a large bold font if available
+                repo_root = Path(__file__).resolve().parent.parent.parent
+                bold_font_paths = [
+                    str(repo_root / "backend" / "app" / "assets" / "fonts" / "DejaVuSans-Bold.ttf"),
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                    r"C:\\Windows\\Fonts\\arialbd.ttf",
+                    r"C:\\Windows\\Fonts\\segoeuib.ttf",
+                ]
+                end_font = None
+                for fp in bold_font_paths:
+                    try:
+                        if os.path.exists(fp):
+                            end_font = ImageFont.truetype(fp, 120)
+                            break
+                    except Exception:
+                        continue
+                if end_font is None:
+                    end_font = ImageFont.load_default()
+                # Measure text
+                try:
+                    bbox = draw.textbbox((0, 0), end_text, font=end_font)
+                    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                except Exception:
+                    try:
+                        tw = int(draw.textlength(end_text, font=end_font))  # type: ignore[attr-defined]
+                        th = 120
+                    except Exception:
+                        tw, th = 600, 120
+                x = max(0, (width - int(tw)) // 2)
+                y = max(0, (height - int(th)) // 2)
+                # Optional subtle shadow
+                draw.text((x + 3, y + 3), end_text, font=end_font, fill=(0, 0, 0))
+                draw.text((x, y), end_text, font=end_font, fill=text_color)
+                img.save(output_path)
+                return True
+            except Exception:
+                # If special rendering fails, fall back to normal flow
+                pass
 
         # Theming: optional branded background for tutor pipeline
         if theme == "johnify":
             try:
-                # Right-side solid band (reduced width by ~80% from previous 28% => ~5.6%)
-                band_w = max(1, int(width * 0.056))
-                band_x0 = width - band_w
                 solid = (247, 184, 1)  # #f7b801
-                draw.rectangle([(band_x0, 0), (width, height)], fill=solid)
+                # Skip drawing the right-side band when using right panel to preserve rounded corners visibility
+                if image_mode != "right_panel":
+                    band_w = max(1, int(width * 0.056))
+                    band_x0 = width - band_w
+                    draw.rectangle([(band_x0, 0), (width, height)], fill=solid)
 
                 # Circle slice in the top-left corner using the same solid color
                 circle_radius = max(40, int(min(width, height) * 0.06))
@@ -249,21 +384,31 @@ def create_simple_slide(text, output_path, width=1920, height=1080, bg_color=(25
         else:
             content = text
         
-        # Draw title
+        # Draw title centered within the available text column
         if title:
-            title_lines = textwrap.wrap(title, width=40)  # Wrap long titles
+            base_title_chars = 55 if image_mode == "full" else 40
+            title_wrap_width = max(20, int(base_title_chars * ratio))
+            title_lines = textwrap.wrap(title, width=title_wrap_width)
             y = padding
+            # Column bounds for centering
+            col_left = padding
+            col_right = (width - padding) if image_mode == "full" else text_right
+            last_w = 0
+            last_h = 0
+            last_x = col_left
             for line in title_lines:
-                # Get text size for centering
+                # Measure and draw centered within the current text column
                 _, _, w, h = draw.textbbox((0, 0), line, font=title_font)
-                x = (width - w) // 2
+                avail = max(10, col_right - col_left)
+                x = col_left + max(0, (avail - int(w)) // 2)
                 draw.text((x, y), line, font=title_font, fill=text_color)
+                last_w, last_h, last_x = int(w), int(h), int(x)
                 y += h + 10
-            
-            # Add a line under the title
-            line_y = y + 10  # Add space after title
-            draw.line([(width//4, line_y), (3*width//4, line_y)], fill=(200, 200, 200), width=2)
-            y = line_y + 30  # Add more space after the line
+
+            # Underline just beneath the last title line, matching its width
+            line_y = y + 10
+            draw.line([(last_x, line_y), (last_x + last_w, line_y)], fill=(200, 200, 200), width=2)
+            y = line_y + 30
         else:
             y = padding
         
@@ -272,6 +417,9 @@ def create_simple_slide(text, output_path, width=1920, height=1080, bg_color=(25
             # Split content into lines and process each line
             lines = [line.strip() for line in content.split('\n') if line.strip()]
             bullet_indent = 30  # Indent for bullet points
+            # Wrap to fill the available text column
+            base_chars = 90 if image_mode == "full" else (85 if image_mode == "right_panel" else 60)
+            wrap_width = max(35, int(base_chars * ratio))
             
             for line in lines:
                 # Handle bullet points
@@ -279,7 +427,7 @@ def create_simple_slide(text, output_path, width=1920, height=1080, bg_color=(25
                 line = line[2:] if is_bullet else line
                 
                 # Split long lines into multiple lines if needed
-                wrapped_lines = textwrap.wrap(line, width=60)
+                wrapped_lines = textwrap.wrap(line, width=wrap_width)
                 
                 for i, wrapped_line in enumerate(wrapped_lines):
                     x = padding + (bullet_indent if (is_bullet and i == 0) else 0)
@@ -299,8 +447,8 @@ def create_simple_slide(text, output_path, width=1920, height=1080, bg_color=(25
                 # Add extra space after each logical line (not wrapped lines)
                 y += 10
         
-        # Watermark (applied for johnify theme)
-        if theme == "johnify":
+        # Watermark (applied for johnify theme) — skip for endcard/thank-you slide and title slide (full bg)
+        if theme == "johnify" and image_mode != "full" and (str(title or "").strip().lower() != "johnify"):
             try:
                 wm_text = "johnify"
                 # Use a subtle gray color; if transparency is desired, use an overlay
@@ -321,6 +469,300 @@ def create_simple_slide(text, output_path, width=1920, height=1080, bg_color=(25
         
     except Exception as e:
         print(f"❌ Error generating simple slide: {str(e)}")
+        return False
+
+def _generate_pollinations_image(prompt: str, out_path: str, width: int = 1280, height: int = 720, timeout_s: int = 25) -> bool:
+    """Try Pollinations image API. Returns True on success."""
+    try:
+        import urllib.parse
+        encoded = urllib.parse.quote(prompt[:200])
+        url = f"https://image.pollinations.ai/prompt/{encoded}"
+        print(f"[thumb] Pollinations: {url}")
+        resp = requests.get(url, timeout=timeout_s)
+        resp.raise_for_status()
+        with open(out_path, 'wb') as f:
+            f.write(resp.content)
+        # Ensure non-trivial file
+        if os.path.getsize(out_path) < 2048:
+            raise RuntimeError("pollinations tiny file")
+        # Resize to target
+        try:
+            with Image.open(out_path) as im:
+                im = im.convert('RGB').resize((width, height), Image.LANCZOS)
+                im.save(out_path, format='JPEG', quality=86)
+        except Exception:
+            pass
+        return True
+    except Exception as e:
+        print(f"[thumb] Pollinations failed: {e}")
+        return False
+
+def _generate_hf_image(prompt: str, out_path: str, width: int = 1280, height: int = 720) -> bool:
+    """Try Hugging Face Inference API with several models. Requires HUGGINGFACE_TOKEN."""
+    try:
+        hf_token = os.getenv("HUGGINGFACE_TOKEN")
+        if not hf_token:
+            print("[thumb] HF token missing; skipping HF step")
+            return False
+        headers = {"Authorization": f"Bearer {hf_token}"}
+        negative = os.getenv("TUTOR_BG_NEGATIVE", "nsfw, text, watermark, logo, low quality, blurry")
+        payload = {
+            "inputs": prompt,
+            "parameters": {
+                "negative_prompt": negative,
+                "guidance_scale": 6.0,
+                "num_inference_steps": 20,
+                "width": width,
+                "height": height,
+            },
+        }
+        candidates = [
+            os.getenv("TUTOR_BG_MODEL", "stabilityai/stable-diffusion-3.5-medium"),
+            "stabilityai/sdxl-turbo",
+            "stabilityai/stable-diffusion-xl-base-1.0",
+            "runwayml/stable-diffusion-v1-5",
+        ]
+        for model in candidates:
+            url = f"https://api-inference.huggingface.co/models/{model}"
+            print(f"[thumb] HF model: {model}")
+            for attempt in range(1, 5):
+                resp = requests.post(url, headers=headers, json=payload, timeout=120)
+                ctype = resp.headers.get("content-type", "")
+                if resp.status_code == 200 and ctype.startswith("image"):
+                    with open(out_path, "wb") as f:
+                        f.write(resp.content)
+                    # Ensure size
+                    try:
+                        with Image.open(out_path) as im:
+                            if im.size != (width, height):
+                                im = im.convert('RGB').resize((width, height), Image.LANCZOS)
+                                im.save(out_path, format='JPEG', quality=86)
+                    except Exception:
+                        pass
+                    return True
+                if resp.status_code == 202:
+                    sleep_s = min(8, 1 + attempt * 2)
+                    print(f"[thumb] HF loading (202) attempt={attempt}; sleep {sleep_s}s")
+                    time.sleep(sleep_s)
+                    continue
+                if resp.status_code in (403, 404):
+                    print(f"[thumb] HF unavailable {resp.status_code}; next model")
+                    break
+                try:
+                    print(f"[thumb] HF error {resp.status_code}: {resp.text[:150]}")
+                except Exception:
+                    pass
+                break
+        return False
+    except Exception as e:
+        print(f"[thumb] HF exception: {e}")
+        return False
+
+def _pil_text_thumbnail(text: str, out_path: str, width: int = 1280, height: int = 720, scale: float = 5.0) -> bool:
+    """PIL fallback thumbnail with large title text. Scale increases font size ~5x."""
+    try:
+        img = Image.new('RGB', (width, height), color=(20, 32, 48))
+        draw = ImageDraw.Draw(img)
+        title_txt = (text or "").strip()[:120] or "Learning Video"
+        # Try truetype fonts with big size, else compute based on default metric
+        font = None
+        base_size = 24
+        try:
+            for fp in [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                "C:/Windows/Fonts/arialbd.ttf",
+                "C:/Windows/Fonts/segoeuib.ttf",
+            ]:
+                if os.path.exists(fp):
+                    font = ImageFont.truetype(fp, int(base_size * scale * 2.5))
+                    break
+        except Exception:
+            font = None
+        if font is None:
+            try:
+                dflt = ImageFont.load_default()
+                # Estimate default bbox height then scale
+                bb = draw.textbbox((0,0), "Ag", font=dflt)
+                dh = max(12, bb[3]-bb[1])
+                target_px = int(dh * scale)
+                # Try to find a truetype at approx target height
+                for sz in [target_px*3, target_px*2, target_px*2, target_px, max(32, target_px)]:
+                    for fp in [
+                        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                        "C:/Windows/Fonts/arialbd.ttf",
+                        "C:/Windows/Fonts/segoeuib.ttf",
+                    ]:
+                        if os.path.exists(fp):
+                            font = ImageFont.truetype(fp, sz)
+                            break
+                    if font is not None:
+                        break
+                if font is None:
+                    font = dflt
+            except Exception:
+                font = ImageFont.load_default()
+        # Wrap within padded width
+        pad_x = int(width * 0.08)
+        max_w = max(100, width - 2 * pad_x)
+        def _text_size(s: str):
+            try:
+                bb = draw.textbbox((0,0), s, font=font)
+                return bb[2]-bb[0], bb[3]-bb[1]
+            except Exception:
+                try:
+                    return int(draw.textlength(s, font=font)), 32
+                except Exception:
+                    return len(s)*14, 32
+        words = title_txt.split()
+        lines: list[str] = []
+        current = ""
+        for w in words:
+            test = w if not current else current + " " + w
+            tw, _ = _text_size(test)
+            if tw <= max_w:
+                current = test
+            else:
+                if current:
+                    lines.append(current)
+                    current = w
+                else:
+                    lines.append(w)
+                    current = ""
+        if current:
+            lines.append(current)
+        # Center vertically
+        heights = [ _text_size(ln)[1] for ln in lines ]
+        spacing = max(10, int(sum(heights)/max(1,len(heights))/6))
+        total_h = sum(heights) + max(0, (len(lines)-1)*spacing)
+        y = max(0, (height - int(total_h)) // 2)
+        for ln in lines:
+            tw, th = _text_size(ln)
+            x = pad_x + max(0, (max_w - int(tw)) // 2)
+            draw.text((x+3, y+3), ln, fill=(0,0,0), font=font)
+            draw.text((x, y), ln, fill=(235,245,255), font=font)
+            y += th + spacing
+        img.save(out_path, format='JPEG', quality=86)
+        print(f"[thumb] PIL fallback saved: {out_path}")
+        return True
+    except Exception as e:
+        print(f"[thumb] PIL fallback failed: {e}")
+        return False
+
+def generate_thumbnail_with_fallbacks(topic: str, out_path: str, label: str = "learn") -> bool:
+    """Try Pollinations → Hugging Face → Cloudflare → PIL in order."""
+    prompt = (
+        f"clean minimal educational thumbnail for: {topic} ({label}), without any text, "
+        "letters, words, captions, logos, watermarks, signatures, signage, title"
+    )
+    # 1) Pollinations
+    if _generate_pollinations_image(prompt, out_path):
+        return True
+    # 2) Hugging Face
+    if _generate_hf_image(prompt, out_path):
+        return True
+    # 3) Cloudflare (temporarily set size via env override)
+    old_w = os.getenv("CLOUDFLARE_IMG_W")
+    old_h = os.getenv("CLOUDFLARE_IMG_H")
+    os.environ["CLOUDFLARE_IMG_W"] = "1280"
+    os.environ["CLOUDFLARE_IMG_H"] = "720"
+    try:
+        if generate_cloudflare_image(prompt, out_path):
+            return True
+    finally:
+        if old_w is not None:
+            os.environ["CLOUDFLARE_IMG_W"] = old_w
+        else:
+            os.environ.pop("CLOUDFLARE_IMG_W", None)
+        if old_h is not None:
+            os.environ["CLOUDFLARE_IMG_H"] = old_h
+        else:
+            os.environ.pop("CLOUDFLARE_IMG_H", None)
+    # 4) PIL fallback (5x larger font)
+    return _pil_text_thumbnail(topic, out_path, scale=5.0)
+
+def generate_cloudflare_image(prompt: str, out_path: str, seed: Optional[int] = None) -> bool:
+    """Generate an image via Cloudflare AI and save to out_path.
+
+    Relies on environment variables:
+      - CLOUDFLARE_ACCOUNT_ID
+      - CLOUDFLARE_API_TOKEN
+      - CLOUDFLARE_MODEL (optional, default '@cf/black-forest-labs/flux-1-schnell')
+    """
+    try:
+        account_id = os.getenv("CLOUDFLARE_ACCOUNT_ID")
+        api_token = os.getenv("CLOUDFLARE_API_TOKEN")
+        model = os.getenv("CLOUDFLARE_MODEL", "@cf/black-forest-labs/flux-1-schnell")
+        if not account_id or not api_token:
+            print("[CF IMG] Missing CLOUDFLARE_ACCOUNT_ID or CLOUDFLARE_API_TOKEN; skipping.")
+            return False
+        url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model}"
+        # Strengthen prompt to avoid any embedded text on the image
+        negative = os.getenv(
+            "CLOUDFLARE_NEGATIVE",
+            "without any text, letters, words, captions, logos, watermarks, signatures, signage, title, subtitles, numbers"
+        )
+        full_prompt = f"{prompt}. {negative}" if prompt else negative
+        # Enforce square 512x512 outputs (overridable via env)
+        w = int(os.getenv("CLOUDFLARE_IMG_W", "512"))
+        h = int(os.getenv("CLOUDFLARE_IMG_H", "512"))
+        payload = {"prompt": full_prompt, "width": w, "height": h}
+        if seed is not None:
+            payload["seed"] = seed
+        headers = {
+            "Authorization": f"Bearer {api_token}",
+            "Content-Type": "application/json",
+        }
+        resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=60)
+        resp.raise_for_status()
+        ctype = resp.headers.get("Content-Type", "")
+        # Helper: force final image dimensions to exactly (w,h)
+        def _ensure_size(pth: str, w: int, h: int):
+            try:
+                from PIL import Image
+                with Image.open(pth) as im:
+                    if im.size != (w, h):
+                        im = im.convert('RGB').resize((w, h), Image.LANCZOS)
+                        im.save(pth)
+            except Exception:
+                pass
+
+        # Case 1: binary image
+        if "image/" in ctype:
+            with open(out_path, "wb") as f:
+                f.write(resp.content)
+            ok = os.path.exists(out_path) and os.path.getsize(out_path) > 1024
+            if ok:
+                _ensure_size(out_path, w, h)
+            return ok
+        # Case 2: JSON with base64
+        try:
+            data = resp.json()
+            # Try common keys
+            b64 = (
+                data.get("result", {}).get("image")
+                or data.get("image")
+                or data.get("result", {}).get("image_base64")
+                or data.get("image_base64")
+            )
+            if b64:
+                img_bytes = base64.b64decode(b64)
+                with open(out_path, "wb") as f:
+                    f.write(img_bytes)
+                ok = os.path.exists(out_path) and os.path.getsize(out_path) > 1024
+                if ok:
+                    _ensure_size(out_path, w, h)
+                return ok
+        except Exception:
+            pass
+        # Fallback: write bytes anyway
+        with open(out_path, "wb") as f:
+            f.write(resp.content)
+        ok = os.path.exists(out_path) and os.path.getsize(out_path) > 1024
+        if ok:
+            _ensure_size(out_path, w, h)
+        return ok
+    except Exception as e:
+        print(f"[CF IMG] Error generating image: {e}")
         return False
 
 # Initialize database tables
@@ -567,7 +1009,7 @@ app.include_router(quiz.router)
 app.include_router(tutor.router)
 
 class LearnVideoTask:
-    def __init__(self, topic: str, complexity_level: int = 3, user_email: str = None, user_id: Optional[int] = None):
+    def __init__(self, topic: str, complexity_level: int = 3, user_email: str = None, user_id: Optional[int] = None, tags: Optional[List[str]] = None):
         self.topic = topic
         self.complexity_level = max(1, min(5, complexity_level))  # Clamp between 1-5
         self.safe_topic = sanitize_filename(topic)
@@ -575,6 +1017,8 @@ class LearnVideoTask:
         self.output_dir = None
         self.user_email = user_email
         self.user_id = user_id
+        # Optional precomputed tags from request
+        self.tags: Optional[List[str]] = tags
 
     def process(self):
         """Process the video generation for the learn endpoint (synchronous)."""
@@ -626,6 +1070,14 @@ class LearnVideoTask:
                 print(f"❌ Error generating narrations: {str(e)}")
                 print("⚠️ Using default narrations")
                 narrations = [f"Please review the content on this slide about {self.topic}."] * len(slides)
+            
+            # Append a closing endcard slide and narration
+            try:
+                slides.append("## Johnify\n")
+                narrations.append("thanks for learning")
+                print("✅ Appended endcard slide and narration")
+            except Exception as _:
+                pass
             
             # Save slides to markdown with narration metadata
             print("\n3️⃣ Saving slides to markdown...")
@@ -687,45 +1139,14 @@ class LearnVideoTask:
             try:
                 title_png_path = os.path.join(image_dir, "slide_000.png")
                 thumb_path = os.path.join(self.output_dir, "thumbnail.jpg")
-                # Generate thumbnail early if missing (Pollinations first, then PIL fallback)
+                # Generate thumbnail early if missing using unified fallbacks
                 if not os.path.exists(thumb_path):
                     try:
-                        prompt = (
-                            f"clean minimal educational thumbnail for: {self.topic} (learn), without any text, "
-                            "letters, words, captions, logos, watermarks, signatures, signage, title"
-                        )
-                        encoded = urllib.parse.quote(prompt[:200])
-                        url = f"https://image.pollinations.ai/prompt/{encoded}"
-                        print(f"🖼️ (Learn) Generating early thumbnail via Pollinations: {url}")
-                        resp = requests.get(url, timeout=20)
-                        resp.raise_for_status()
-                        with open(thumb_path, 'wb') as f:
-                            f.write(resp.content)
-                        if os.path.getsize(thumb_path) < 1024:
-                            raise RuntimeError("Thumbnail too small; treating as failure")
+                        ok = generate_thumbnail_with_fallbacks(self.topic, thumb_path, label="learn")
+                        if not ok:
+                            raise RuntimeError("All thumbnail fallbacks failed (early)")
                     except Exception as e:
-                        print(f"⚠️ (Learn) Early thumbnail failed: {e}. Using simple PIL fallback.")
-                        try:
-                            img = Image.new('RGB', (1280, 720), color=(20, 32, 48))
-                            draw = ImageDraw.Draw(img)
-                            title_txt = self.topic.strip()[:60]
-                            font = ImageFont.load_default()
-                            try:
-                                bbox = draw.textbbox((0, 0), title_txt, font=font)
-                                tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-                            except Exception:
-                                try:
-                                    tw = draw.textlength(title_txt, font=font)  # type: ignore[attr-defined]
-                                    th = 56
-                                except Exception:
-                                    tw, th = 400, 56
-                            x = max(0, (1280 - int(tw)) // 2)
-                            y = max(0, (720 - int(th)) // 2)
-                            draw.text((x, y), title_txt, fill=(235, 245, 255), font=font)
-                            img.save(thumb_path, format='JPEG', quality=85)
-                            print(f"(Learn) Early fallback thumbnail saved: {thumb_path}")
-                        except Exception as e2:
-                            print(f"(Learn) ⚠️ Failed to save early fallback thumbnail: {e2}")
+                        print(f"⚠️ (Learn) Early thumbnail failed after fallbacks: {e}")
                 # Build title slide from thumbnail
                 if os.path.exists(thumb_path):
                     try:
@@ -829,6 +1250,7 @@ class LearnVideoTask:
                 slide_contents = [s.strip() for s in markdown_content.split('---') if s.strip()]
                 
                 # Generate an image for each slide
+                global_bg_path = None  # Reuse one Cloudflare image across slides (fetched at slide 2)
                 for i, slide_content in enumerate(slide_contents, 1):
                     # Clean up the slide content
                     slide_content = slide_content.strip()
@@ -868,6 +1290,15 @@ class LearnVideoTask:
                     
                     # Join the content lines back together
                     slide_content = '\n'.join(content_lines)
+
+                    # Enforce character limits to ensure content fits the frame
+                    try:
+                        max_chars = 1200 if i == 1 else 800
+                        if len(slide_content) > max_chars:
+                            slide_content = slide_content[:max_chars].rstrip()
+                    except Exception:
+                        # If any issue occurs during truncation, proceed with unmodified content
+                        pass
                     
                     # Debug: Print the final title and content
                     print(f"\n📝 Final for slide {i}:")
@@ -879,9 +1310,54 @@ class LearnVideoTask:
                     # Generate output path
                     output_path = os.path.join(image_dir, f"slide_{i:03d}.png")
                     
-                    # Create the slide image with the extracted title
+                    # Fetch a single background image from Cloudflare ONLY on slide 1; we display it only on slide 1
+                    background_path = None
+                    if global_bg_path:
+                        background_path = global_bg_path
+                    elif i == 1:
+                        try:
+                            bg_path = os.path.join(image_dir, f"bg_{i:03d}.jpg")
+                            success = generate_cloudflare_image(prompt=title, out_path=bg_path)
+                            if success:
+                                global_bg_path = bg_path
+                                background_path = global_bg_path
+                        except Exception:
+                            background_path = None
+
+                    # Create the slide image with the extracted title and optional background
                     try:
-                        create_simple_slide(slide_content, output_path, title=title, theme="johnify")
+                        # Slide 1: full background at 10% opacity with dark overlay; white text for readability
+                        # Slides 2+: show the same image on the right 30% with rounded corners
+                        # Last slide (endcard): centered 'Johnify' text, no background
+                        is_last = (i == len(slide_contents))
+                        if i == 1 and not is_last:
+                            img_mode = "full"
+                            use_bg = background_path
+                            text_col = (255, 255, 255) if use_bg else (0, 0, 0)
+                            img_alpha = 0.1 if use_bg else 1.0
+                            theme_use = "johnify"
+                        elif is_last:
+                            img_mode = "full"
+                            use_bg = None
+                            text_col = (0, 0, 0)
+                            img_alpha = 1.0
+                            theme_use = "johnify_endcard"
+                        else:
+                            img_mode = "right_panel"
+                            use_bg = background_path  # this will be global_bg_path if it exists
+                            text_col = (0, 0, 0)
+                            img_alpha = 0.2
+                            theme_use = "johnify"
+                        create_simple_slide(
+                            slide_content,
+                            output_path,
+                            title=title,
+                            theme=theme_use,
+                            background_path=use_bg,
+                            image_mode=img_mode,
+                            text_color=text_col,
+                            image_alpha=img_alpha,
+                        )
                     except Exception as e:
                         raise RuntimeError(f"Failed to generate slide {i}")
                 
@@ -992,38 +1468,14 @@ class LearnVideoTask:
                 print(f"❌ Error generating video: {str(e)}")
                 raise
             
-            # Generate thumbnail.jpg (simplified, no nested try blocks)
+            # Generate thumbnail.jpg using unified fallbacks
             thumb_path = os.path.join(self.output_dir, "thumbnail.jpg")
             if not os.path.exists(thumb_path):
-                try:
-                    # Attempt Pollinations fetch first
-                    prompt = f"clean minimal educational thumbnail for: {self.topic}, without any text, letters, words, captions, logos, watermarks, signatures, signage, title"
-                    encoded = urllib.parse.quote(prompt[:200])
-                    url = f"https://image.pollinations.ai/prompt/{encoded}"
-                    print(f"🖼️ Generating thumbnail via Pollinations: {url}")
-                    resp = requests.get(url, timeout=20)
-                    resp.raise_for_status()
-                    with open(thumb_path, 'wb') as f:
-                        f.write(resp.content)
-                    if os.path.getsize(thumb_path) < 1024:
-                        raise RuntimeError("Thumbnail too small; treating as failure")
-                except Exception as e:
-                    print(f"⚠️ Pollinations thumbnail failed: {e}. Using simple PIL-generated image.")
-                    # Fallback: minimal PIL image with centered title using default font
-                    img = Image.new('RGB', (1280, 720), color=(20, 32, 48))
-                    draw = ImageDraw.Draw(img)
-                    title = self.topic[:60]
-                    font = ImageFont.load_default()
-                    try:
-                        bbox = draw.textbbox((0, 0), title, font=font)
-                        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-                    except Exception:
-                        tw, th = draw.textlength(title, font=font), 56
-                    x = (1280 - tw) // 2
-                    y = (720 - th) // 2
-                    draw.text((x, y), title, fill=(235, 245, 255), font=font)
-                    img.save(thumb_path, format='JPEG', quality=85)
-                    print(f"✅ Fallback thumbnail saved: {thumb_path}")
+                ok = generate_thumbnail_with_fallbacks(self.topic, thumb_path, label="learn")
+                if ok:
+                    print(f"✅ Thumbnail saved: {thumb_path}")
+                else:
+                    print(f"❌ Failed to generate thumbnail even after fallbacks: {thumb_path}")
             else:
                 print(f"✅ Thumbnail saved: {thumb_path}")
         except Exception as e:
@@ -1121,62 +1573,23 @@ class LearnVideoTask:
                     rel_video_path = f"{rel_generated_dir}/{video_filename}"
                     post_path_value = rel_video_path
 
-                # Generate up to 7 tags using DeepSeek (replicated from tutor logic)
-                tags_value = []
-                try:
-                    from .slidegen import get_deepseek_client
-                    client = get_deepseek_client()
-                    if client:
-                        sys_msg = (
-                            "You are an expert taxonomy generator. "
-                            "Return only valid JSON: an array of exactly 7 lowercase tags (strings). "
-                            "Each tag must be a single word or short phrase (<= 3 words), no punctuation, no emojis."
-                        )
-                        user_msg = (
-                            f"Topic: {self.topic}\n\n"
-                            "Produce exactly 7 concise, descriptive tags capturing genre, industry, segment, and category.\n"
-                            "Output strictly as JSON array, no commentary. Example: [\"education\", \"biology\", \"k12\", \"science\", \"fundamentals\", \"tutorial\", \"intro\"]"
-                        )
-                        resp = client.chat.completions.create(
-                            model="deepseek-chat",
-                            temperature=0.2,
-                            max_tokens=200,
-                            messages=[
-                                {"role": "system", "content": sys_msg},
-                                {"role": "user", "content": user_msg},
-                            ],
-                        )
-                        content = (resp.choices[0].message.content or "").strip()
-                        import json as _json
-                        try:
-                            data = _json.loads(content)
-                            if isinstance(data, list):
-                                tags_value = [str(x) for x in data]
-                            else:
-                                tags_value = []
-                        except Exception:
-                            # Fallback: parse comma/newline separated
-                            raw = content.replace("[", "").replace("]", "")
-                            parts = [p.strip().strip('-').strip('\"\'') for p in raw.replace("\n", ",").split(",")]
-                            tags_value = [p for p in parts if p]
-                        # sanitize: lowercase, trim, dedupe, <=3 words, <=64 chars, first 7
-                        cleaned = []
-                        seen = set()
-                        for t in tags_value:
-                            s = str(t).strip().lower()
-                            if not s:
-                                continue
-                            words = s.split()
-                            s = " ".join(words[:3])[:64]
-                            if s and s not in seen:
-                                seen.add(s)
-                                cleaned.append(s)
-                            if len(cleaned) >= 7:
-                                break
-                        tags_value = cleaned[:7]
-                except Exception as _tags_err:
-                    # DeepSeek not available or failed
-                    tags_value = []
+                # Use precomputed tags from request if provided; sanitize and cap to 7
+                def _sanitize_tags_in_request(tags_in: Optional[List[str]]) -> List[str]:
+                    out: List[str] = []
+                    seen = set()
+                    for t in (tags_in or []):
+                        if not isinstance(t, str):
+                            continue
+                        s = " ".join(t.strip().lower().split())[:64]
+                        # enforce single-word tag by taking only the first token
+                        parts = s.split()
+                        s = parts[0] if parts else ""
+                        if s and s not in seen:
+                            seen.add(s)
+                            out.append(s)
+                    return out[:7]
+
+                tags_value = _sanitize_tags_in_request(getattr(self, "tags", None))
 
                 post = UserPost(
                     user_id=resolved_user_id,
@@ -1280,7 +1693,8 @@ async def learn_topic(learn_request: LearnRequest, current_user: models.User = D
             topic=learn_request.topic.strip(),
             complexity_level=learn_request.complexity_level,
             user_email=getattr(current_user, "user_email", None),
-            user_id=getattr(current_user, "user_id", None)
+            user_id=getattr(current_user, "user_id", None),
+            tags=getattr(learn_request, "tags", None),
         )
         
         # Offload CPU/IO-bound processing to a thread so the event loop stays responsive

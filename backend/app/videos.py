@@ -7,6 +7,7 @@ from datetime import datetime
 import os
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+import re
 
 from .database import get_db
 from .auth import models, security
@@ -148,7 +149,7 @@ def get_video_files(user_id: int, db: Session) -> List[Dict[str, Any]]:
                         "topic": post.post_topic or "",
                         "status": "completed",
                         "public": bool(getattr(post, "public", True)),
-                        "tags": getattr(post, "tags", None) or [],
+                        "tags": _normalize_post_tags(getattr(post, "tags", None)),
                     })
                     continue
             if pp.startswith("https://storage.googleapis.com/"):
@@ -163,7 +164,7 @@ def get_video_files(user_id: int, db: Session) -> List[Dict[str, Any]]:
                     "topic": post.post_topic or "",
                     "status": "completed",
                     "public": bool(getattr(post, "public", True)),
-                    "tags": getattr(post, "tags", None) or [],
+                    "tags": _normalize_post_tags(getattr(post, "tags", None)),
                 })
                 continue
 
@@ -273,7 +274,7 @@ def get_video_files(user_id: int, db: Session) -> List[Dict[str, Any]]:
                     "topic": post.post_topic or "",
                     "status": "completed",
                     "public": bool(getattr(post, "public", True)),
-                    "tags": getattr(post, "tags", None) or [],
+                    "tags": _normalize_post_tags(getattr(post, "tags", None)),
                 })
             else:
                 print(f"❌ Video not found at: {video_path}")
@@ -500,7 +501,7 @@ def _collect_videos_for_post(post: models.UserPost) -> Dict[str, Any]:
                     "status": "completed",
                     "user_id": post.user_id,
                     "user_name": getattr(post, "user", None) and getattr(post.user, "user_name", None),
-                    "tags": getattr(post, "tags", None) or [],
+                    "tags": _normalize_post_tags(getattr(post, "tags", None)),
                 }
         if pp.startswith("https://storage.googleapis.com/"):
             video_url = pp
@@ -515,7 +516,7 @@ def _collect_videos_for_post(post: models.UserPost) -> Dict[str, Any]:
                 "status": "completed",
                 "user_id": post.user_id,
                 "user_name": getattr(post, "user", None) and getattr(post.user, "user_name", None),
-                "tags": getattr(post, "tags", None) or [],
+                "tags": _normalize_post_tags(getattr(post, "tags", None)),
             }
         
         # Normalize path (handle both Windows and Unix paths)
@@ -608,9 +609,9 @@ def _sanitize_tags(tags: List[str]) -> List[str]:
         if not isinstance(t, str):
             continue
         s = " ".join(t.strip().lower().split())[:64]
-        # cap to 3 words
+        # enforce single-word tag by taking only the first token
         parts = s.split()
-        s = " ".join(parts[:3])
+        s = parts[0] if parts else ""
         if s and s not in seen:
             seen.add(s)
             out.append(s)
@@ -631,8 +632,8 @@ def _generate_tags_for_topic(topic: str) -> List[str]:
             import time
             import json, re
             prompt = (
-                "Generate exactly 7 concise, user-facing tags (max 3 words each) for the topic: '" + topic +
-                "'. Return ONLY a JSON array of strings."
+                "Generate exactly 7 single-word, lowercase tags for the topic: '" + topic +
+                "'. Tags should be generic, recognizable keywords (e.g., genre, subject, entity). Return ONLY a JSON array of strings."
             )
             attempts = 0
             while attempts < 3:
@@ -685,6 +686,44 @@ def _generate_tags_for_topic(topic: str) -> List[str]:
     tags = _sanitize_tags(uniq)
     print(f"[learn-feed] deepseek_fallback tags={tags}")
     return tags
+
+def _normalize_post_tags(raw: Any) -> List[str]:
+    """Normalize tags from DB which may be stored as list, CSV string, or JSON string.
+    Returns a sanitized list of single-word lowercase tags (using _sanitize_tags).
+    """
+    try:
+        vals: List[str] = []
+        if raw is None:
+            return []
+        if isinstance(raw, list):
+            vals = [str(x) for x in raw]
+        elif isinstance(raw, str):
+            s = raw.strip()
+            # Try JSON array first
+            if (s.startswith('[') and s.endswith(']')) or (s.startswith('"') and s.endswith('"')):
+                try:
+                    import json as _json
+                    parsed = _json.loads(s)
+                    if isinstance(parsed, list):
+                        vals = [str(x) for x in parsed]
+                    elif isinstance(parsed, str):
+                        # Single string inside quotes
+                        vals = [p.strip() for p in parsed.split(',') if p.strip()]
+                    else:
+                        vals = [s]
+                except Exception:
+                    # Fallback to CSV split
+                    vals = [p.strip() for p in s.split(',') if p.strip()]
+            else:
+                # CSV
+                vals = [p.strip() for p in s.split(',') if p.strip()]
+        else:
+            # Unknown type -> string then CSV split on commas
+            s = str(raw)
+            vals = [p.strip() for p in s.replace('\n', ' ').replace('\t', ' ').split(',') if p.strip()]
+        return _sanitize_tags([v.lower() for v in vals])
+    except Exception:
+        return []
 
 @router.get("/feed", response_model=List[Dict[str, Any]])
 async def get_feed_videos(
@@ -818,9 +857,8 @@ async def get_learn_feed(
             if not item or not item.get("video_url"):
                 continue
 
-            # Get post tags
-            post_tags_raw = getattr(post, "tags", None) or []
-            post_tags = _sanitize_tags([str(t).lower() for t in post_tags_raw])
+            # Get post tags (normalize CSV/JSON/list to sanitized words)
+            post_tags = _normalize_post_tags(getattr(post, "tags", None))
             
             # Check for tag matches via set intersection
             has_match = bool(qset.intersection(set(post_tags))) if qset else False
@@ -832,17 +870,54 @@ async def get_learn_feed(
                     pass
                 similar_items.append(item)
             elif len(other_items) < limit_others:
+                try:
+                    if not has_match:
+                        print(f"[learn-feed] no_match post_id={post.post_id} post_tags={post_tags} qtags={qtags}")
+                except Exception:
+                    pass
                 other_items.append(item)
 
             # Early exit if we have enough items
             if len(similar_items) >= limit_similar and len(other_items) >= limit_others:
                 break
 
+        # Fallback: if no similar by tags, try loose title keyword match
+        if len(similar_items) == 0 and qset:
+            try:
+                print("[learn-feed] no tag matches; applying title-keyword fallback")
+                # Build a small synonym set for broader matching
+                synonyms = set()
+                if any(t in qset for t in ["car", "cars", "automotive", "supercar", "supercars"]):
+                    synonyms.update(["car", "cars", "automotive", "vehicle", "vehicles", "supercar", "supercars", "hypercar", "hypercars", "speed", "fast"])
+                # Tokenize qtags and synonyms
+                qwords = set()
+                for t in list(qset) + list(synonyms):
+                    for w in re.findall(r"[a-z]{3,}", str(t)):
+                        qwords.add(w)
+                # Scan posts again in order
+                for post in all_posts:
+                    if len(similar_items) >= limit_similar:
+                        break
+                    title = (post.post_topic or "").lower()
+                    if not title:
+                        continue
+                    # simple contains check for any keyword
+                    hit = any(w in title for w in qwords)
+                    if hit:
+                        item = _collect_videos_for_post(post)
+                        if item and item.get("video_url"):
+                            similar_items.append(item)
+                print(f"[learn-feed] fallback_title_matches added={len(similar_items)}")
+            except Exception as e:
+                print(f"[learn-feed] fallback_title_error err={e}")
+
         print(f"[learn-feed] returning similar={len(similar_items)} other={len(other_items)}")
         # Return both snake_case and camelCase for compatibility with existing frontend
         return {
             "similar": similar_items,
             "others": other_items,
+            "similarItems": similar_items,
+            "otherItems": other_items,
             "query_tags": qtags,
             "queryTags": qtags,
             "tag_source": tag_source,

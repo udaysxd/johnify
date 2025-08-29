@@ -2,11 +2,12 @@
 
 import { useEffect, useState, useRef } from 'react';
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import { useAuth } from '@/contexts/AuthContext';
 
 export default function Header() {
   const pathname = usePathname();
+  const router = useRouter();
   const { user, loading, handleSignOut } = useAuth();
   const [isClient, setIsClient] = useState(false);
   const [isSigningOut, setIsSigningOut] = useState(false);
@@ -67,6 +68,13 @@ export default function Header() {
   };
 
   const isAuthenticated = !!user;
+  const handleLearnClick = (e: React.MouseEvent<HTMLAnchorElement>) => {
+    if (pathname === '/learn') {
+      e.preventDefault();
+      // Force a full page reload to reset state and data
+      window.location.reload();
+    }
+  };
   
   return (
     <header className="w-full border-b border-gray-800 bg-gray-900">
@@ -97,6 +105,7 @@ export default function Header() {
               {/* My Tutor link (authenticated) */}
               <Link 
                 href="/learn" 
+                onClick={handleLearnClick}
                 className="px-4 py-2 text-sm font-bold text-white bg-indigo-600 rounded-md hover:bg-indigo-700"
               >
                 Learn
@@ -163,6 +172,7 @@ export default function Header() {
               {/* My Tutor link (unauthenticated) */}
               <Link 
                 href="/learn" 
+                onClick={handleLearnClick}
                 className="px-4 py-2 text-sm font-bold text-white bg-indigo-600 rounded-md hover:bg-indigo-700"
               >
                 Learn

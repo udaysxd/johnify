@@ -103,6 +103,48 @@ def generate_concept_slides(question: str, correct_answer: str, explanation: str
     """
     if not question or not correct_answer or not explanation:
         return []
+
+def _enrich_topn_bullets(topic: str, titles: List[str], client: OpenAI, complexity_desc: str) -> List[List[str]]:
+    """Ask the model to provide concrete bullets per item title.
+    Returns list of bullet lists aligned with titles length; falls back to generic bullets on error.
+    """
+    try:
+        prompt = (
+            "You are enriching a 'top N' list for an educational slide deck.\n"
+            f"Topic: {topic}. Audience: {complexity_desc}.\n"
+            "For EACH of the following titles, generate 4 concise, factual bullets (no markdown, no numbering).\n"
+            "Bullets should mention specific facts (e.g., year, record, speed, spec, impact), not generic phrases.\n"
+            "Return ONLY a JSON array of arrays, where each inner array corresponds to the same index title.\n"
+            "Titles:\n- " + "\n- ".join(titles)
+        )
+        resp = client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": "Output strict JSON only: an array of arrays of bullet strings."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.5,
+            max_tokens=900,
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        raw = re.sub(r'^```(?:json)?\n|\n```$', '', raw, flags=re.MULTILINE)
+        data = json.loads(raw)
+        if isinstance(data, list):
+            out: List[List[str]] = []
+            for i, entry in enumerate(data):
+                if isinstance(entry, list):
+                    bullets = [str(x).strip() for x in entry if str(x).strip()]
+                    out.append(bullets[:6])
+                else:
+                    out.append(["Key fact", "Spec", "Record/impact", "Notable detail"])
+            # Ensure length alignment
+            while len(out) < len(titles):
+                out.append(["Key fact", "Spec", "Record/impact", "Notable detail"])
+            return out[:len(titles)]
+    except Exception:
+        pass
+    # Fallback bullets for all titles
+    return [["Key fact", "Spec", "Record/impact", "Notable detail"] for _ in titles]
         
     slides = []
     
@@ -345,17 +387,41 @@ def generate_creative_slides(topic: str, complexity_desc: str, client: OpenAI, t
     """Let DeepSeek design the outline, slide count, and content. Return list of slide markdown strings.
     We enforce minimal formatting constraints to keep it parseable but avoid rigid structure."""
     try:
+        # Detect "top N" style topics and extract N; cap N at 10
+        tnorm = (topic or "").lower()
+        declared_n: Optional[int] = None
+        # Allow optional space, e.g., "top10" or "top 10"
+        m = re.search(r"\btop\s*(\d{1,3})\b", tnorm)
+        if m:
+            try:
+                declared_n = int(m.group(1))
+            except Exception:
+                declared_n = None
+        print(f"[creative] topic='{topic}' declared_n={declared_n}")
+
+        extra_instructions = ""
+        if declared_n and 1 <= declared_n <= 50:
+            topn = min(declared_n, 10)
+            # Strong constraints for list-style topics
+            extra_instructions = (
+                f"- This is a 'top {declared_n}' list. Produce exactly {topn} slides (cap at 10), one item per slide.\n"
+                f"- Number slides consecutively from 1 to {topn} with no gaps.\n"
+                f"- Put the number in the slide title, e.g., '## 1. Item Name', '## 2. Item Name', ... '## {topn}. Item Name'.\n"
+                f"- Do not skip any numbers. Do not merge or group ranges (e.g., do NOT write '6–10'). Each number must have its own slide.\n"
+            )
+
         prompt = (
             f"Design the best possible educational slide deck about: '{topic}'.\n"
             f"Audience level: {complexity_desc}.\n\n"
             "Instructions:\n"
             "- Infer the best format for this topic (e.g., recipe steps, tutorial, timeline, Q&A, checklist).\n"
-            "- You decide the number of slides (6–12) based on what teaches the topic best.\n"
+            "- You decide the number of slides (6–12) based on what teaches the topic best, unless it is a 'top N' request.\n"
             "- Prefer Markdown slides: each slide begins with '## Title', then bullet points; separate slides with a line containing only --- .\n"
             "- Alternative acceptable format: 'Slide 1: Title' with lines of content; I will convert it.\n"
             "- Use clear bullet points; bold key terms where helpful.\n"
-            "- Output only the slides (no extra commentary).\n\n"
-            "Example (Markdown):\n"
+            "- Output only the slides (no extra commentary).\n"
+            + ("\n" + extra_instructions if extra_instructions else "") +
+            "\nExample (Markdown):\n"
             "## Title\n- Bullet 1\n- Bullet 2\n\n---\n\n## Next Title\n- Bullet 1\n- Bullet 2\n"
         )
         resp = client.chat.completions.create(
@@ -372,10 +438,120 @@ def generate_creative_slides(topic: str, complexity_desc: str, client: OpenAI, t
         raw = re.sub(r'^```(?:markdown|md)?\n|\n```$', '', raw.strip(), flags=re.MULTILINE)
         # First try to parse a numbered slide plan
         numbered = _parse_numbered_slide_plan(raw)
+        slides = _split_markdown_slides(raw)
+
+        def _has_exact_topn_numbering(slides_list: List[str], n: int) -> bool:
+            if len(slides_list) < n:
+                return False
+            nums = []
+            for s in slides_list[:n]:
+                first = s.split('\n', 1)[0].strip()
+                mnum = re.match(r'^##\s*(\d{1,3})[\).:\-]?\s+', first)
+                if not mnum:
+                    return False
+                nums.append(int(mnum.group(1)))
+            return nums == list(range(1, n + 1))
+
+        if declared_n and 1 <= declared_n <= 50:
+            topn = min(declared_n, 10)
+            # Prefer numbered plan if it already yields N items
+            if len(numbered) >= topn:
+                return numbered[:topn]
+            # Otherwise validate the slide split result has exact numbering 1..N
+            if _has_exact_topn_numbering(slides, topn):
+                return slides[:topn]
+            # Strict retry for 'top N' with an explicit, rigid contract
+            print(f"[creative] strict retry for topN={topn} topic='{topic}'")
+            strict_prompt = (
+                f"Topic: '{topic}'. Audience: {complexity_desc}.\n\n"
+                f"Produce EXACTLY {topn} slides (no more, no less), one per numbered item.\n"
+                f"Formatting RULES (MUST follow):\n"
+                f"- Each slide starts with a level-2 heading like '## 1. Item Name', '## 2. Item Name', ... '## {topn}. Item Name'.\n"
+                f"- Separate slides using a line containing only --- .\n"
+                f"- 3–6 concise bullets per slide.\n"
+                f"- Do NOT group ranges (e.g., do NOT write '6–10').\n"
+                f"- Output ONLY the slides (no commentary, no code fences).\n"
+            )
+            retry = client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[
+                    {"role": "system", "content": "You are an expert listicle slide creator. Follow the required output format strictly."},
+                    {"role": "user", "content": strict_prompt}
+                ],
+                temperature=0.5,
+                max_tokens=1600
+            )
+            retry_raw = (retry.choices[0].message.content or "").strip()
+            retry_raw = re.sub(r'^```(?:markdown|md)?\n|\n```$', '', retry_raw, flags=re.MULTILINE)
+            numbered_retry = _parse_numbered_slide_plan(retry_raw)
+            if len(numbered_retry) >= topn:
+                print(f"[creative] retry succeeded with numbered plan count={len(numbered_retry)} (using {topn})")
+                return numbered_retry[:topn]
+            slides_retry = _split_markdown_slides(retry_raw)
+            if _has_exact_topn_numbering(slides_retry, topn):
+                print(f"[creative] retry succeeded with markdown split count={len(slides_retry)} (using {topn})")
+                return slides_retry[:topn]
+            # If still invalid, try a forgiving fallback that coerces numbered lines into slides
+            try:
+                # Prefer headings like '## 1. Title'
+                head_matches = re.findall(r"(?m)^##\s*(\d{1,3})[).:\-]?\s+(.+)$", retry_raw)
+                slides_fallback: List[str] = []
+                used_nums = set()
+                coerced_titles: List[Tuple[int, str]] = []
+                for num_s, title in head_matches:
+                    try:
+                        num = int(num_s)
+                    except Exception:
+                        continue
+                    if num in used_nums or num < 1 or num > topn:
+                        continue
+                    used_nums.add(num)
+                    coerced_titles.append((num, title.strip()))
+                    if len(slides_fallback) >= topn:
+                        break
+                if len(coerced_titles) == topn:
+                    # Enrich bullets via model
+                    titles_sorted = [t for _, t in sorted(coerced_titles, key=lambda x: x[0])]
+                    bullets = _enrich_topn_bullets(topic, titles_sorted, client, complexity_desc)
+                    slides_fallback = []
+                    for i, title in enumerate(titles_sorted, start=1):
+                        b = bullets[i-1] if i-1 < len(bullets) else ["Notable fact", "Key spec", "Why it ranks here"]
+                        slide = "## %d. %s\n" % (i, title) + "\n".join([f"- {x}" for x in b[:6]])
+                        slides_fallback.append(slide)
+                    print(f"[creative] fallback(coerce headings+enrich) succeeded count={len(slides_fallback)}")
+                    return slides_fallback[:topn]
+                # Next, build from numbered list items like '1. Title'
+                line_matches = re.findall(r"(?m)^\s*(\d{1,3})[).]\s+(.+)$", retry_raw)
+                used_nums = set()
+                coerced_titles = []
+                for num_s, title in line_matches:
+                    try:
+                        num = int(num_s)
+                    except Exception:
+                        continue
+                    if num in used_nums or num < 1 or num > topn:
+                        continue
+                    used_nums.add(num)
+                    coerced_titles.append((num, title.strip()))
+                    if len(slides_fallback) >= topn:
+                        break
+                if len(coerced_titles) == topn:
+                    titles_sorted = [t for _, t in sorted(coerced_titles, key=lambda x: x[0])]
+                    bullets = _enrich_topn_bullets(topic, titles_sorted, client, complexity_desc)
+                    slides_fallback = []
+                    for i, title in enumerate(titles_sorted, start=1):
+                        b = bullets[i-1] if i-1 < len(bullets) else ["Overview", "Notable spec", "Why it ranks here"]
+                        slide = "## %d. %s\n" % (i, title) + "\n".join([f"- {x}" for x in b[:6]])
+                        slides_fallback.append(slide)
+                    print(f"[creative] fallback(coerce list+enrich) succeeded count={len(slides_fallback)}")
+                    return slides_fallback[:topn]
+            except Exception:
+                pass
+            # If still invalid, fall through to generic handling below
+
+        # Generic path (non top-N): ensure reasonable slide count
         if len(numbered) >= 4:
             return numbered[:12]
-        slides = _split_markdown_slides(raw)
-        # Ensure reasonable slide count
         if len(slides) < 4:
             raise ValueError("Too few slides from creative generator")
         # Light cleanup: ensure each slide starts with a title
@@ -386,9 +562,12 @@ def generate_creative_slides(topic: str, complexity_desc: str, client: OpenAI, t
                 first_line = s.split('\n', 1)[0][:60].strip() or topic.title()
                 s = f"## {first_line}\n" + (s if '\n' in s else '')
             cleaned.append(s.strip())
+        print(f"[creative] generic cleaned slides count={len(cleaned)} topic='{topic}'")
         return cleaned[:12]
     except Exception as e:
-        print(f"Creative slide generation failed: {e}")
+        # Avoid noisy logs by default; enable with LEARN_LOG_LEVEL=debug
+        if os.environ.get("LEARN_LOG_LEVEL", "info").lower() == "debug":
+            print(f"Creative slide generation failed: {e}")
         return []
 
 def _parse_numbered_slide_plan(text: str) -> List[str]:
@@ -466,23 +645,33 @@ def _split_markdown_slides(md: str) -> List[str]:
             slides.append(s)
     return slides
 
-def generate_learn_slides(topic: str, complexity_level: int = 3, style: str = "creative") -> List[str]:
+def generate_learn_slides(topic: str, complexity_level: int = 3, style: str = "minimal") -> List[str]:
     client = get_deepseek_client()
     """
-    Generate educational slides for a given topic using a fully model-led structure.
-    DeepSeek decides both the format and the implicit mode; no in-code templates.
+    Generate educational slides using a minimal template refined by the model.
+    Creative generation is temporarily disabled.
     """
     try:
         complexity_map = {1: "basic, easy-to-understand", 2: "introductory, clear", 3: "intermediate, detailed", 4: "advanced, comprehensive", 5: "expert-level, in-depth"}
         complexity_desc = complexity_map.get(complexity_level, "detailed")
-        # Always use creative generation; retry at a lower temperature, then minimal fallback
-        slides = generate_creative_slides(topic, complexity_desc, client, temperature=0.8)
-        if slides:
-            return slides
-        slides = generate_creative_slides(topic, complexity_desc, client, temperature=0.6)
-        if slides:
-            return slides
-        # Minimal fallback refined by model to avoid placeholders
+        # If the topic looks like a list (e.g., "top 10 ..."), prefer creative generation (up to 12 slides)
+        tnorm = (topic or '').lower()
+        looks_like_list = (
+            (bool(re.search(r"\b(top|largest|smallest|highest|biggest|longest|best|richest)\b", tnorm)) and bool(re.search(r"\b\d{1,3}\b", tnorm)))
+            or bool(re.search(r"\btop\s*\d{1,3}\b", tnorm))
+        )
+        print(f"[learn] looks_like_list={looks_like_list} topic='{topic}'")
+
+        if looks_like_list:
+            print(f"[learn] using creative path for topic='{topic}'")
+            slides = generate_creative_slides(topic, complexity_desc, client, temperature=0.7)
+            # Cap to 12 slides for breadth topics
+            slides = slides[:12]
+            print(f"[learn] creative slides returned={len(slides)} topic='{topic}'")
+            if slides:
+                return slides
+
+        # Minimal template refined by model (default path)
         minimal = [
             f"## {topic.title()}\n- Overview\n- Why it matters\n- Where it's used",
             f"## Core Ideas\n- Key idea 1\n- Key idea 2\n- Key idea 3",
@@ -490,7 +679,11 @@ def generate_learn_slides(topic: str, complexity_level: int = 3, style: str = "c
             f"## Examples\n- Example 1\n- Example 2\n- Example 3",
             f"## Summary\n- Takeaway 1\n- Takeaway 2\n- Next steps",
         ]
-        refined = [_refine_slide_with_model(topic, s, client, complexity_desc) for s in minimal]
+        # Enforce per-slide character caps: slide 1 -> 1200 chars, slides 2+ -> 800 chars
+        refined = []
+        for idx, s in enumerate(minimal, start=1):
+            max_chars = 1200 if idx == 1 else 800
+            refined.append(_refine_slide_with_model(topic, s, client, complexity_desc, max_chars=max_chars))
         return refined
     except Exception as e:
         print(f"Error generating slides: {str(e)}")
@@ -503,7 +696,11 @@ def generate_learn_slides(topic: str, complexity_level: int = 3, style: str = "c
                 f"## Core Ideas\n- Key idea 1\n- Key idea 2\n- Key idea 3",
                 f"## Summary\n- Takeaway 1\n- Takeaway 2\n- Next steps",
             ]
-            return [_refine_slide_with_model(topic, s, client, complexity_desc) for s in minimal]
+            refined = []
+            for idx, s in enumerate(minimal, start=1):
+                max_chars = 1200 if idx == 1 else 800
+                refined.append(_refine_slide_with_model(topic, s, client, complexity_desc, max_chars=max_chars))
+            return refined
         except Exception:
             return [
                 f"## {topic.title()}\n- Overview\n- Why it matters\n- Where it's used",
@@ -511,11 +708,13 @@ def generate_learn_slides(topic: str, complexity_level: int = 3, style: str = "c
                 f"## Summary\n- Takeaway 1\n- Takeaway 2\n- Next steps",
             ]
 
-def _refine_slide_with_model(topic: str, slide_md: str, client: OpenAI, complexity_desc: str) -> str:
+def _refine_slide_with_model(topic: str, slide_md: str, client: OpenAI, complexity_desc: str, max_chars: Optional[int] = None) -> str:
     """Rewrite a placeholder slide into concrete, topic-specific content while keeping the title."""
     try:
         title_match = re.match(r"^##\s*(.+)$", slide_md.strip().split('\n')[0].strip())
         title = title_match.group(1) if title_match else topic.title()
+        # Include a soft length hint to the model when provided
+        length_hint = (f"Limit the total non-title content to ~{max_chars} characters.\n" if max_chars else "")
         prompt = (
             f"Topic: {topic}\n"
             f"Audience: {complexity_desc}.\n\n"
@@ -525,6 +724,7 @@ def _refine_slide_with_model(topic: str, slide_md: str, client: OpenAI, complexi
             "- 3–6 bullets\n"
             "- No generic placeholders like 'Overview', 'Key idea 1', 'Step 1'\n"
             "- Make each bullet informative and topic-specific (rules, examples with numbers, procedures, tips).\n"
+            + length_hint +
             "Output only the rewritten slide in Markdown starting with '## {Title}'."
         )
         resp = client.chat.completions.create(
@@ -538,12 +738,30 @@ def _refine_slide_with_model(topic: str, slide_md: str, client: OpenAI, complexi
         )
         out = resp.choices[0].message.content or ""
         out = re.sub(r'^```(?:markdown|md)?\n|\n```$', '', out.strip(), flags=re.MULTILINE)
+        # Post-process length cap while preserving the title line
+        if max_chars is not None:
+            lines = [l for l in out.strip().split('\n')]
+            if lines:
+                title_line = lines[0] if lines[0].strip().startswith('##') else f"## {title}"
+                body = '\n'.join(lines[1:]).strip()
+                if len(body) > max_chars:
+                    body = body[:max_chars].rstrip()
+                out = (title_line + ('\n' + body if body else '')).strip()
         if out.strip().startswith('##'):
             return out.strip()
         # Fallback: reconstruct using extracted lines
         body_lines = [l.strip('- ').strip() for l in out.split('\n') if l.strip()]
         body = '\n'.join([f"- {l}" for l in body_lines[:6]])
-        return f"## {title}\n{body}".strip()
+        slide_text = f"## {title}\n{body}".strip()
+        # Apply cap if provided
+        if max_chars is not None:
+            lines = slide_text.split('\n')
+            title_line = lines[0] if lines else f"## {title}"
+            body_text = '\n'.join(lines[1:])
+            if len(body_text) > max_chars:
+                body_text = body_text[:max_chars].rstrip()
+            slide_text = (title_line + ('\n' + body_text if body_text else '')).strip()
+        return slide_text
     except Exception:
         return slide_md
 

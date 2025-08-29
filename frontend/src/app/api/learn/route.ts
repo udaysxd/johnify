@@ -5,6 +5,7 @@ import { NextResponse } from 'next/server';
 interface LearnRequest {
   topic: string;
   complexity_level?: number;
+  tags?: string[];
 }
 
 // Helper function to get backend URL with safe production fallback
@@ -22,7 +23,7 @@ function getBackendUrl() {
 
 export async function POST(request: Request) {
   try {
-    const { topic, complexity_level = 3 } = await request.json() as LearnRequest;
+    const { topic, complexity_level = 3, tags } = await request.json() as LearnRequest;
     
     if (!topic) {
       return NextResponse.json(
@@ -55,7 +56,9 @@ export async function POST(request: Request) {
             },
             body: JSON.stringify({
               topic,
-              complexity_level: Math.min(5, Math.max(1, complexity_level || 3)) // Ensure between 1-5
+              complexity_level: Math.min(5, Math.max(1, complexity_level || 3)), // Ensure between 1-5
+              // pass-through precomputed tags if provided (backend sanitizes and caps)
+              ...(Array.isArray(tags) ? { tags } : {})
             }),
             signal: controller.signal,
             // Not strictly required in Node env, but documented for intent

@@ -396,40 +396,13 @@ def _tutor_generate_video_from_request(request: TutorVideoRequest, status_path: 
     thumb_path = output_dir / "thumbnail.jpg"
     if not thumb_path.exists():
         try:
-            import urllib.parse
-            prompt = f"clean minimal educational thumbnail for: {display_title} (tutor), without any text, letters, words, captions, logos, watermarks, signatures, signage, title"
-            encoded = urllib.parse.quote(str(prompt)[:200])
-            url = f"https://image.pollinations.ai/prompt/{encoded}"
-            print(f"[tutor] Generating thumbnail via Pollinations (early): {url}")
-            resp = requests.get(url, timeout=20)
-            resp.raise_for_status()
-            with open(thumb_path, 'wb') as f:
-                f.write(resp.content)
-            if thumb_path.stat().st_size < 1024:
-                raise RuntimeError("Thumbnail too small; treating as failure")
+            # Import locally to avoid circular import (main.py imports tutor module)
+            from .main import generate_thumbnail_with_fallbacks
+            ok = generate_thumbnail_with_fallbacks(display_title, str(thumb_path), label="tutor")
+            if not ok:
+                raise RuntimeError("All thumbnail fallbacks failed (tutor early)")
         except Exception as e:
-            print(f"[tutor] Early thumbnail fetch failed: {e}. Using simple PIL fallback.")
-            try:
-                img = Image.new('RGB', (1280, 720), color=(20, 32, 48))
-                draw = ImageDraw.Draw(img)
-                title_txt = (display_title or "Tutor").strip()[:60]
-                font = ImageFont.load_default()
-                try:
-                    bbox = draw.textbbox((0, 0), title_txt, font=font)
-                    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-                except Exception:
-                    try:
-                        tw = draw.textlength(title_txt, font=font)  # type: ignore[attr-defined]
-                        th = 56
-                    except Exception:
-                        tw, th = 400, 56
-                x = max(0, (1280 - int(tw)) // 2)
-                y = max(0, (720 - int(th)) // 2)
-                draw.text((x, y), title_txt, fill=(235, 245, 255), font=font)
-                img.save(thumb_path, format='JPEG', quality=85)
-                print(f"[tutor] Early fallback thumbnail saved: {thumb_path}")
-            except Exception as e2:
-                print(f"[tutor] ⚠️ Failed to save early fallback thumbnail: {e2}")
+            print(f"[tutor] Early thumbnail failed after fallbacks: {e}")
 
     # Prepare wrong questions from provided questions/answers
     wrong_questions: List[Dict[str, Any]] = []

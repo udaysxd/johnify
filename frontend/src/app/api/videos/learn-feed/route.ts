@@ -119,7 +119,13 @@ export async function GET(request: Request): Promise<NextResponse> {
     };
 
     const similar = toFrontend(data?.similar || []);
-    const others = toFrontend(data?.others || []);
+    // Exclude any items already in 'similar', sort by most recent, cap to 18
+    const similarIds = new Set(similar.map((v) => v.id));
+    let others = toFrontend(data?.others || [])
+      .filter((v) => !similarIds.has(v.id))
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    // Enforce 18 max by default; if caller requested a different limit, backend already applied it
+    others = others.slice(0, 18);
     const queryTags: string[] = Array.isArray(data?.query_tags) ? data.query_tags.map(String) : [];
 
     return NextResponse.json({ similar, others, queryTags });
