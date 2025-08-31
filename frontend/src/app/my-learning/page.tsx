@@ -1,10 +1,11 @@
 'use client';
 
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import Image from 'next/image';
 import { useAuth } from '@/contexts/AuthContext';
+import VideoModal from '@/components/VideoModal';
 
 
 type Video = {
@@ -53,8 +54,6 @@ export default function HomePage() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedVideo, setSelectedVideo] = useState<Video | null>(null);
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const modalRef = useRef<HTMLDivElement>(null);
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<{ open: boolean; video: Video | null }>({ open: false, video: null });
 
@@ -207,45 +206,7 @@ export default function HomePage() {
     }
   }, [isAuthenticated, isAuthLoading]);
 
-  // Close modal when clicking outside
-  useEffect(() => {
-    function handleClickOutside(event: MouseEvent) {
-      if (modalRef.current && !modalRef.current.contains(event.target as Node)) {
-        setSelectedVideo(null);
-      }
-    }
-
-    if (selectedVideo) {
-      document.addEventListener('mousedown', handleClickOutside);
-      document.body.style.overflow = 'hidden'; // Prevent scrolling when modal is open
-    } else {
-      document.body.style.overflow = 'auto';
-    }
-
-    return () => {
-      document.removeEventListener('mousedown', handleClickOutside);
-      document.body.style.overflow = 'auto';
-    };
-  }, [selectedVideo]);
-
-  // Try to programmatically play when a video is selected
-  useEffect(() => {
-    if (selectedVideo && videoRef.current) {
-      // Reload the element to ensure fresh source
-      try {
-        videoRef.current.load();
-      } catch {}
-      const tryPlay = async () => {
-        try {
-          await videoRef.current?.play();
-        } catch (err) {
-          console.log('Video play() was prevented:', err);
-        }
-      };
-      // Give the browser a tick to attach source
-      setTimeout(tryPlay, 0);
-    }
-  }, [selectedVideo]);
+  // Video modal behavior handled by shared VideoModal component
 
   // Show loading state while checking auth status or fetching videos
   if (isAuthLoading || (isAuthenticated && isLoading)) {
@@ -499,67 +460,15 @@ export default function HomePage() {
       )}
 
       {/* Video Modal */}
-      {selectedVideo && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80">
-          <div 
-            ref={modalRef}
-            className="relative w-full max-w-4xl bg-white rounded-lg overflow-hidden shadow-xl"
-          >
-            <div className="relative pt-[56.25%] bg-black">
-              {(() => {
-                const proxySrc = `/api/proxy-video?url=${encodeURIComponent(selectedVideo.videoUrl)}`;
-                return (
-              <video
-                key={selectedVideo.id}
-                ref={videoRef}
-                className="absolute top-0 left-0 w-full h-full"
-                controls
-                autoPlay
-                crossOrigin="anonymous"
-                playsInline
-                preload="auto"
-                src={proxySrc}
-                onEnded={() => videoRef.current?.pause()}
-                onLoadedMetadata={() => {
-                  // Attempt to auto-play once metadata is available
-                  videoRef.current?.play().catch((e) => {
-                    console.log('Auto-play blocked on metadata:', e);
-                  });
-                }}
-                onError={() => {
-                  const v = videoRef.current;
-                  const err = v?.error;
-                  console.error('Video error event', {
-                    src: proxySrc,
-                    networkState: v?.networkState,
-                    readyState: v?.readyState,
-                    errorCode: err?.code,
-                    errorMessage: err?.message,
-                  });
-                }}
-              >
-                <source src={proxySrc} type="video/mp4" />
-                Your browser does not support the video tag.
-              </video>
-                );
-              })()}
-              <button
-                onClick={() => setSelectedVideo(null)}
-                className="absolute top-4 right-4 p-2 rounded-full bg-black/50 text-white hover:bg-black/70 transition-colors"
-                aria-label="Close"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </div>
-            <div className="p-6">
-              <h2 className="text-2xl font-bold text-gray-900">{selectedVideo.title}</h2>
-              <p className="mt-2 text-gray-600">{timeAgo(selectedVideo.createdAt)}</p>
-            </div>
-          </div>
-        </div>
-      )}
+      <VideoModal
+        isOpen={!!selectedVideo}
+        onClose={() => setSelectedVideo(null)}
+        title={selectedVideo?.title}
+        videoUrl={selectedVideo?.videoUrl || ''}
+        createdAt={selectedVideo?.createdAt}
+        showMeta={true}
+        maxWidthClass="max-w-4xl"
+      />
     </div>
   );
 }

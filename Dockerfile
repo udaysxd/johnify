@@ -73,5 +73,8 @@ COPY backend .
 # Expose port
 EXPOSE 8000
 
-# Start with Gunicorn
-CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-b", ":8000", "app.main:app"]
+# Start with Gunicorn (increase timeouts for long-running learn jobs)
+# - timeout: hard worker timeout in seconds (set < Cloud Run 1800s)
+# - graceful-timeout: time to finish requests on restart
+# - keep-alive: keep-alive connections window
+CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-b", ":8000", "--timeout", "1200", "--graceful-timeout", "1200", "--keep-alive", "120", "app.main:app"]

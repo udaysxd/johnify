@@ -12,6 +12,7 @@ import json
 import asyncio
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+import uuid
 from .videos import router as videos_router
 
 # Load environment variables first
@@ -27,6 +28,7 @@ from google.cloud import texttospeech
 import openai
 import requests
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 
 # Import local modules
 from . import quiz, slidegen, pptx_gen, tts, video, utils, auth, tutor
@@ -471,6 +473,131 @@ def create_simple_slide(text, output_path, width=1920, height=1080, bg_color=(25
         print(f"❌ Error generating simple slide: {str(e)}")
         return False
 
+def _generate_google_image(prompt: str, out_path: str, width: int = 1280, height: int = 720, timeout_s: int = 60) -> bool:
+    """Generate an image via Google AI Studio (Gemini) directly.
+
+    Requires GOOGLE_API_KEY in environment. Uses model:
+      models/gemini-2.5-flash-image-preview
+
+    Note: Response shapes can vary. We'll try to extract either inline base64 image bytes
+    or a URL and save to out_path. Falls back to False if not found.
+    """
+    try:
+        api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            print("[google] GOOGLE_API_KEY missing; skipping.")
+            return False
+
+        # Endpoint per Google Generative Language API
+        model = "models/gemini-2.5-flash-image-preview"
+        url = f"https://generativelanguage.googleapis.com/v1beta/{model}:generateContent?key={api_key}"
+
+        # Prompt requesting a clean image without text overlays
+        user_text = (
+            f"Generate a single photorealistic or illustrative image with a clean, minimal educational style for the topic: {prompt}. "
+            f"No text, letters, words, captions, logos, watermarks, signatures, signage, or numbers on the image. "
+            f"Target size {width}x{height}."
+        )
+
+        payload = {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {"text": user_text}
+                    ]
+                }
+            ],
+            # Best-effort hints; not all fields are honored by preview endpoints
+            "generationConfig": {
+                "temperature": 0.6
+            }
+        }
+
+        headers = {
+            "Content-Type": "application/json"
+        }
+
+        resp = requests.post(url, headers=headers, json=payload, timeout=timeout_s)
+        if resp.status_code != 200:
+            try:
+                print(f"[google] error {resp.status_code}: {resp.text[:200]}")
+            except Exception:
+                print(f"[google] error {resp.status_code}")
+            return False
+
+        try:
+            data = resp.json()
+        except Exception as e:
+            preview = resp.text[:200] if hasattr(resp, 'text') else ''
+            print(f"[google] non-JSON response: {e}; preview: {preview}")
+            return False
+
+        # Try to find an inline image in candidates -> content -> parts
+        image_bytes = None
+        image_url = None
+        candidates = data.get("candidates") or []
+        for cand in candidates:
+            content = (cand or {}).get("content", {})
+            parts = content.get("parts") or []
+            for p in parts:
+                # Inline base64
+                inline = None
+                if isinstance(p, dict):
+                    # Google API uses camelCase (inlineData); be permissive and check both
+                    inline = p.get("inline_data") or p.get("inlineData")
+                if inline and isinstance(inline.get("data"), str):
+                    try:
+                        image_bytes = base64.b64decode(inline.get("data"))
+                        break
+                    except Exception:
+                        pass
+                # URL
+                file_data = None
+                if isinstance(p, dict):
+                    file_data = p.get("file_data") or p.get("fileData")
+                if isinstance(file_data, dict):
+                    image_url = file_data.get("file_uri") or file_data.get("fileUri") or file_data.get("uri")
+                    if image_url:
+                        break
+            if image_bytes or image_url:
+                break
+
+        if image_bytes:
+            with open(out_path, "wb") as f:
+                f.write(image_bytes)
+        elif image_url:
+            try:
+                r = requests.get(image_url, timeout=timeout_s)
+                r.raise_for_status()
+                with open(out_path, "wb") as f:
+                    f.write(r.content)
+            except Exception as e:
+                print(f"[google] failed downloading image_url: {e}")
+                return False
+        else:
+            # Debug keys for troubleshooting
+            try:
+                keys = list(data.keys())
+                print(f"[google] no image content found; keys={keys}")
+            except Exception:
+                print("[google] no image content found")
+            return False
+
+        # Ensure final size
+        try:
+            with Image.open(out_path) as im:
+                if im.size != (width, height):
+                    im = im.convert('RGB').resize((width, height), Image.LANCZOS)
+                    im.save(out_path, format='JPEG', quality=86)
+        except Exception:
+            pass
+
+        return os.path.exists(out_path) and os.path.getsize(out_path) > 1024
+    except Exception as e:
+        print(f"[google] exception: {e}")
+        return False
+
 def _generate_pollinations_image(prompt: str, out_path: str, width: int = 1280, height: int = 720, timeout_s: int = 25) -> bool:
     """Try Pollinations image API. Returns True on success."""
     try:
@@ -556,6 +683,187 @@ def _generate_hf_image(prompt: str, out_path: str, width: int = 1280, height: in
         return False
     except Exception as e:
         print(f"[thumb] HF exception: {e}")
+        return False
+
+def _generate_openrouter_image(prompt: str, out_path: str, width: int = 1280, height: int = 720, timeout_s: int = 60) -> bool:
+    """Generate an image via OpenRouter using Gemini 2.5 Flash Image Preview.
+
+    Env vars used:
+      - OPENROUTER_API_KEY (required)
+      - OPENROUTER_SITE_URL (optional, for rankings)
+      - OPENROUTER_SITE_NAME (optional, for rankings)
+    """
+    try:
+        api_key = os.getenv("OPENROUTER_API_KEY")
+        if not api_key:
+            print("[openrouter] OPENROUTER_API_KEY missing; skipping.")
+            return False
+
+        # Use Chat Completions API per OpenRouter docs
+        url = "https://openrouter.ai/api/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "johnify-backend/1.0"
+        }
+        site_url = os.getenv("OPENROUTER_SITE_URL") or "http://localhost"
+        site_name = os.getenv("OPENROUTER_SITE_NAME") or "Johnify Local"
+        headers["HTTP-Referer"] = site_url
+        headers["X-Title"] = site_name
+        # Origin not required for server calls
+
+        # Ask the model to generate an image without embedded text. Request base64 image output if available.
+        user_text = (
+            f"Generate a single photorealistic or illustrative image with a clean, minimal educational style for the topic: {prompt}. "
+            f"No text, letters, words, captions, logos, watermarks, signatures, signage, or numbers on the image. "
+            f"Target size {width}x{height}."
+        )
+
+        # Use ONLY the requested model for lites image generation; no other model fallbacks
+        model_id = "google/gemini-2.5-flash-image-preview:free"
+        # Match docs: messages with a single user content block (text only for generation)
+        payload = {
+            "model": model_id,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": user_text}
+                    ]
+                }
+            ]
+        }
+
+        resp = requests.post(url, headers=headers, json=payload, timeout=timeout_s, allow_redirects=False)
+        if resp.status_code != 200:
+            try:
+                loc = resp.headers.get('Location', '')
+                print(f"[openrouter] error {resp.status_code} redirect={bool(loc)} loc={loc} body={resp.text[:200]}")
+            except Exception:
+                print(f"[openrouter] error {resp.status_code}")
+            return False
+
+        # Parse JSON; if not JSON, bail out
+        try:
+            data = resp.json()
+        except Exception as e:
+            ctype = resp.headers.get('Content-Type', '') if hasattr(resp, 'headers') else ''
+            preview = resp.text[:200] if hasattr(resp, 'text') else ''
+            print(f"[openrouter] non-JSON response ({resp.status_code}, {ctype}): {e}; preview: {preview}")
+            return False
+        # Try to extract an image (base64 or URL) from the response content.
+        # Supported shapes:
+        #  - choices[0].message.content: list[blocks]
+        #  - (fallbacks) output/content/data as previously handled
+        content = None
+        try:
+            content = data.get("choices", [])[0]["message"]["content"]
+        except Exception:
+            pass
+        if content is None:
+            try:
+                content = data.get("output", [])[0].get("content")
+            except Exception:
+                pass
+        if content is None:
+            content = data.get("content")
+        if content is None:
+            # Some providers wrap in data/output blocks differently
+            try:
+                content = data.get("data", [])[0].get("message", {}).get("content")
+            except Exception:
+                pass
+
+        # Debug: log response shape when content missing or unexpected
+        try:
+            if content is None:
+                print(f"[openrouter] debug: keys={list(data.keys())}")
+                first_choice = (data.get("choices") or [None])[0]
+                if isinstance(first_choice, dict):
+                    msg = first_choice.get("message", {})
+                    print(f"[openrouter] debug: message_keys={list(msg.keys())}")
+            elif isinstance(content, list):
+                types = [b.get("type") for b in content if isinstance(b, dict)]
+                print(f"[openrouter] debug: block types={types}")
+        except Exception:
+            pass
+
+        image_bytes = None
+        image_url = None
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict):
+                    t = block.get("type")
+                    if t in ("output_image", "image"):
+                        # Expected: {type: "output_image", image_base64: "..."}
+                        b64 = (
+                            block.get("image_base64") or
+                            block.get("image", {}).get("base64") or
+                            block.get("b64_json") or
+                            block.get("data")
+                        )
+                        if isinstance(b64, str):
+                            try:
+                                image_bytes = base64.b64decode(b64)
+                                break
+                            except Exception:
+                                pass
+                    if t in ("image_url", "output_image_url"):
+                        url_val = block.get("image_url", {}).get("url") or block.get("url")
+                        if url_val:
+                            image_url = url_val
+                            break
+        # Fallback: some providers put base64 at top-level
+        if image_bytes is None:
+            b64 = (
+                data.get("image") or
+                data.get("image_base64") or
+                data.get("result", {}).get("image") or
+                data.get("result", {}).get("image_base64")
+            )
+            if isinstance(b64, str):
+                try:
+                    image_bytes = base64.b64decode(b64)
+                except Exception:
+                    image_bytes = None
+
+        # Save image if available
+        if image_bytes:
+            with open(out_path, "wb") as f:
+                f.write(image_bytes)
+        elif image_url:
+            try:
+                r = requests.get(image_url, timeout=timeout_s)
+                r.raise_for_status()
+                with open(out_path, "wb") as f:
+                    f.write(r.content)
+            except Exception as e:
+                print(f"[openrouter] failed downloading image_url: {e}")
+                return False
+        else:
+            # Log a brief preview of the content to guide parser updates
+            try:
+                preview = ""
+                if isinstance(content, list) and content and isinstance(content[0], dict):
+                    preview = json.dumps({k: content[0].get(k) for k in list(content[0].keys())[:4]})[:200]
+                print(f"[openrouter] no image content found in response; preview={preview}")
+            except Exception:
+                print("[openrouter] no image content found in response")
+            return False
+
+        # Ensure final size
+        try:
+            with Image.open(out_path) as im:
+                if im.size != (width, height):
+                    im = im.convert('RGB').resize((width, height), Image.LANCZOS)
+                    im.save(out_path, format='JPEG', quality=86)
+        except Exception:
+            pass
+
+        return os.path.exists(out_path) and os.path.getsize(out_path) > 1024
+    except Exception as e:
+        print(f"[openrouter] exception: {e}")
         return False
 
 def _pil_text_thumbnail(text: str, out_path: str, width: int = 1280, height: int = 720, scale: float = 5.0) -> bool:
@@ -1001,6 +1309,10 @@ app.include_router(users_router, prefix="/api/users")
 # Include videos routes
 from . import videos
 app.include_router(videos.router)
+
+# Include lites router (independent pipeline)
+from .lites import router as lites_router
+app.include_router(lites_router)
 
 # Configure CORS with specific allowed origins and credentials
 
@@ -1728,6 +2040,645 @@ async def learn_topic(learn_request: LearnRequest, current_user: models.User = D
 @app.post("/api/learn")
 async def learn_topic_api_alias(learn_request: LearnRequest, current_user: models.User = Depends(security.get_current_active_user)):
     return await learn_topic(learn_request, current_user)  # delegate to primary handler
+
+
+class LiteVideoTask:
+    def __init__(self, topic: str, user_email: str = None, user_id: Optional[int] = None):
+        self.topic = topic
+        self.safe_topic = sanitize_filename(topic)
+        self.timestamp = int(time.time())
+        self.output_dir = None
+        self.user_email = user_email
+        self.user_id = user_id
+
+    def _ensure_hf_bg(self, images_dir: str) -> Optional[str]:
+        try:
+            os.makedirs(images_dir, exist_ok=True)
+            bg_path = os.path.join(images_dir, "bg_001.jpg")
+            prompt = (
+                f"clean minimal educational background for: {self.topic} (lites), without any text, "
+                "letters, words, captions, logos, watermarks, signatures, signage, title"
+            )
+            # Use Google Gemini image generation for Lites background
+            print(f"[lites][google] generating background via Google for topic='{self.topic}' -> {bg_path}")
+            ok = _generate_google_image(self.topic, bg_path, width=1280, height=720)
+            if ok and os.path.exists(bg_path):
+                return bg_path
+        except Exception as _:
+            pass
+        return None
+
+    def _generate_thumbnail_hf(self, out_path: str):
+        try:
+            prompt = (
+                f"clean minimal educational thumbnail for: {self.topic} (lites), without any text, "
+                "letters, words, captions, logos, watermarks, signatures, signage, title"
+            )
+            # Use Google Gemini image generation for Lites thumbnail with PIL fallback
+            print(f"[lites][google] generating thumbnail via Google for topic='{self.topic}' -> {out_path}")
+            ok = _generate_google_image(self.topic, out_path, width=1280, height=720)
+            if not ok:
+                _pil_text_thumbnail(self.topic, out_path, width=1280, height=720, scale=5.0)
+        except Exception:
+            try:
+                _pil_text_thumbnail(self.topic, out_path, width=1280, height=720, scale=5.0)
+            except Exception:
+                pass
+
+    def process(self) -> Dict[str, Any]:
+        """Generate a short (<=60s) Lite video using only HF images."""
+        try:
+            # 1) Setup
+            self.output_dir = f"generated/lite_{self.safe_topic}_{self.timestamp}"
+            os.makedirs(self.output_dir, exist_ok=True)
+
+            # 2) Slides (reuse learn slide/narration generation)
+            slides = slidegen.generate_learn_slides(self.topic, 2)
+            if not slides:
+                raise ValueError("No slides were generated")
+
+            # Narrations
+            try:
+                narrations = slidegen.generate_narration(slides)
+                if not narrations:
+                    raise ValueError("No narrations were generated")
+                if len(narrations) != len(slides):
+                    if len(narrations) < len(slides):
+                        narrations.extend(["Please review this concept carefully."] * (len(slides) - len(narrations)))
+                    else:
+                        narrations = narrations[:len(slides)]
+            except Exception:
+                narrations = [f"Please review the content on this slide about {self.topic}."] * len(slides)
+
+            # Append end card
+            try:
+                slides.append("## Johnify\n")
+                narrations.append("thanks for learning")
+            except Exception:
+                pass
+
+            # 3) Save slides.md with narration meta
+            md_file = os.path.join(self.output_dir, "slides.md")
+            try:
+                slides_with_narr = []
+                for i, (slide, narration) in enumerate(zip(slides, narrations)):
+                    slide = (slide or "").strip()
+                    if slide and not any(line.strip().startswith('#') for line in slide.split('\n')[:3]):
+                        slide = f"## {'Introduction' if i == 0 else 'Key Concepts'}\n{slide}"
+                    if not any(line.strip().startswith('-') for line in slide.split('\n')):
+                        slide = f"{slide}\n- Important point 1\n- Key detail 2\n- Additional information"
+                    slide = '\n'.join([line for line in slide.split('\n') if line.strip()])
+                    slides_with_narr.append(f"{slide}\n\n<!-- NARRATION: {narration} -->")
+                with open(md_file, 'w', encoding='utf-8') as f:
+                    f.write("---\nmarp: true\ntheme: default\npaginate: true\n---\n\n")
+                    for i, s in enumerate(slides_with_narr):
+                        if i > 0:
+                            f.write("\n---\n\n")
+                        f.write(s.strip())
+                        if not s.endswith('\n'):
+                            f.write('\n')
+            except Exception as e:
+                raise RuntimeError(f"Failed to save slides: {e}")
+
+            # 4) Create slide images with HF background only
+            image_dir = os.path.join(self.output_dir, "images")
+            os.makedirs(image_dir, exist_ok=True)
+            # Title slide from HF thumbnail
+            thumb_path = os.path.join(self.output_dir, "thumbnail.jpg")
+            if not os.path.exists(thumb_path):
+                self._generate_thumbnail_hf(thumb_path)
+            try:
+                if os.path.exists(thumb_path):
+                    bg = Image.open(thumb_path).convert('RGB').resize((1920, 1080)).convert('RGBA')
+                    overlay = Image.new('RGBA', bg.size, (0, 0, 0, 120))
+                    bg = Image.alpha_composite(bg, overlay)
+                    draw = ImageDraw.Draw(bg)
+                    title_txt = self.topic.strip()
+                    # choose font
+                    font = None
+                    try:
+                        for fp in [
+                            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                            "C:/Windows/Fonts/arialbd.ttf",
+                            "C:/Windows/Fonts/segoeuib.ttf",
+                        ]:
+                            if os.path.exists(fp):
+                                font = ImageFont.truetype(fp, 96)
+                                break
+                    except Exception:
+                        font = None
+                    if font is None:
+                        try:
+                            font = ImageFont.load_default()
+                        except Exception:
+                            font = None
+                    pad_x = 160
+                    max_w = max(100, 1920 - 2 * pad_x)
+                    words = title_txt.split()
+                    lines: list[str] = []
+                    current = ""
+                    def _text_size(s: str):
+                        try:
+                            bb = draw.textbbox((0, 0), s, font=font)
+                            return bb[2] - bb[0], bb[3] - bb[1]
+                        except Exception:
+                            try:
+                                return int(draw.textlength(s, font=font)), 96  # type: ignore[attr-defined]
+                            except Exception:
+                                return len(s) * 14, 96
+                    for w in words:
+                        test = (w if not current else current + " " + w)
+                        tw, th = _text_size(test)
+                        if tw <= max_w:
+                            current = test
+                        else:
+                            if current:
+                                lines.append(current)
+                                current = w
+                            else:
+                                cut = w
+                                while cut:
+                                    low, high = 1, len(cut)
+                                    idx = 1
+                                    while low <= high:
+                                        mid = (low + high) // 2
+                                        tw2, _ = _text_size(cut[:mid])
+                                        if tw2 <= max_w:
+                                            idx = mid
+                                            low = mid + 1
+                                        else:
+                                            high = mid - 1
+                                    lines.append(cut[:idx])
+                                    cut = cut[idx:]
+                                current = ""
+                    if current:
+                        lines.append(current)
+                    line_heights = []
+                    for ln in lines:
+                        _, th = _text_size(ln)
+                        line_heights.append(th)
+                    line_spacing = 14
+                    total_h = sum(line_heights) + max(0, (len(lines) - 1) * line_spacing)
+                    y = max(0, (1080 - int(total_h)) // 2)
+                    for ln in lines:
+                        tw, th = _text_size(ln)
+                        x = pad_x + max(0, (max_w - int(tw)) // 2)
+                        draw.text((x + 3, y + 3), ln, fill=(0, 0, 0), font=font)
+                        draw.text((x, y), ln, fill=(250, 250, 250), font=font)
+                        y += th + line_spacing
+                    (Path(image_dir) / "slide_000.png").write_bytes(bg.convert('RGB').tobytes())
+                    # The above writes raw RGB; instead save via PIL
+                    bg.convert('RGB').save(Path(image_dir) / "slide_000.png", format='PNG')
+            except Exception:
+                pass
+
+            # Parse slides from md and create images with only HF bg on slide 1; others without bg
+            try:
+                with open(md_file, 'r', encoding='utf-8') as f:
+                    md_content = f.read()
+                md_content = re.sub(r'^---\n.*?\n---\n', '', md_content, flags=re.DOTALL)
+                slide_contents = [s.strip() for s in md_content.split('---') if s.strip()]
+                hf_bg = self._ensure_hf_bg(image_dir)
+                for i, slide_content in enumerate(slide_contents, 1):
+                    slide_content = re.sub(r'<!--.*?-->', '', slide_content, flags=re.DOTALL).strip()
+                    title = f"Slide {i}"
+                    content_lines = []
+                    for line in slide_content.split('\n'):
+                        line = line.strip()
+                        if not line:
+                            continue
+                        if line.startswith('## ') and title == f"Slide {i}":
+                            title = line[3:].strip()
+                            continue
+                        content_lines.append(line)
+                    slide_content = '\n'.join(content_lines)
+                    try:
+                        is_last = (i == len(slide_contents))
+                        if i == 1 and not is_last:
+                            img_mode = "full"; use_bg = hf_bg; text_col = (255, 255, 255); img_alpha = 0.1; theme_use = "johnify"
+                        elif is_last:
+                            img_mode = "full"; use_bg = None; text_col = (0, 0, 0); img_alpha = 1.0; theme_use = "johnify_endcard"
+                        else:
+                            img_mode = "right_panel"; use_bg = hf_bg; text_col = (0, 0, 0); img_alpha = 0.2; theme_use = "johnify"
+                        create_simple_slide(
+                            slide_content,
+                            os.path.join(image_dir, f"slide_{i:03d}.png"),
+                            title=title,
+                            theme=theme_use,
+                            background_path=use_bg,
+                            image_mode=img_mode,
+                            text_color=text_col,
+                            image_alpha=img_alpha,
+                        )
+                    except Exception:
+                        raise RuntimeError(f"Failed to generate slide {i}")
+                # Verify
+                image_files = sorted([str(f) for f in Path(image_dir).glob("*.png")])
+                if not image_files:
+                    raise FileNotFoundError("No slide images were generated")
+            except Exception as e:
+                raise RuntimeError(f"Slide generation failed: {e}")
+
+            # 5) Audio from narrations
+            audio_dir = os.path.join(self.output_dir, "audio")
+            if not narrations:
+                raise ValueError("No narrations provided for audio generation")
+            audio_dir_path = tts.narrations_to_mp3(narrations, audio_dir)
+            audio_files = sorted([str(f) for f in Path(audio_dir_path).glob("*.mp3")])
+            # Optionally add s000.mp3 if slide_000.png exists
+            try:
+                title_png = Path(image_dir) / "slide_000.png"
+                silent_mp3 = Path(audio_dir_path) / "s000.mp3"
+                if title_png.exists():
+                    if not silent_mp3.exists() or os.path.getsize(silent_mp3) == 0:
+                        subprocess.run([
+                            "ffmpeg", "-y",
+                            "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                            "-t", "1.5", "-c:a", "libmp3lame", str(silent_mp3)
+                        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    audio_files = sorted([str(f) for f in Path(audio_dir_path).glob("*.mp3")])
+            except Exception:
+                pass
+
+            # 6) Enforce 60s cap by subsetting/trimming audio, and mirroring selected images
+            from . import video as _video
+            img_files = sorted([str(f) for f in Path(image_dir).glob("slide_*.png")])
+            # Keep only slide_XXX files
+            img_files = [p for p in img_files if re.match(r"^slide_\d{3}\.png$", Path(p).name)]
+            pair_n = min(len(img_files), len(audio_files))
+            if pair_n == 0:
+                raise ValueError("No valid slides or audio files found")
+            selected_imgs: list[str] = []
+            selected_mp3s: list[str] = []
+            total = 0.0
+            cap = 60.0
+            for i in range(pair_n):
+                d = _video.get_audio_duration(Path(audio_files[i]))
+                if total + d < cap - 0.05:
+                    selected_imgs.append(img_files[i])
+                    selected_mp3s.append(audio_files[i])
+                    total += d
+                else:
+                    # take partial of the last segment if room left > 0.25s
+                    remain = max(0.0, cap - total)
+                    if remain >= 0.25:
+                        # create trimmed mp3
+                        tmp_aud_dir = Path(self.output_dir) / "cap_audio"
+                        tmp_img_dir = Path(self.output_dir) / "cap_images"
+                        tmp_aud_dir.mkdir(parents=True, exist_ok=True)
+                        tmp_img_dir.mkdir(parents=True, exist_ok=True)
+                        trimmed = tmp_aud_dir / f"s_trim_{i:03d}.mp3"
+                        try:
+                            subprocess.run([
+                                "ffmpeg", "-y", "-i", audio_files[i], "-t", f"{remain:.2f}",
+                                "-c:a", "libmp3lame", str(trimmed)
+                            ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            selected_imgs.append(img_files[i])
+                            selected_mp3s.append(str(trimmed))
+                        except Exception:
+                            pass
+                    break
+
+            # Mirror selection into temp dirs for stitching
+            tmp_img_dir = Path(self.output_dir) / "cap_images"
+            tmp_aud_dir = Path(self.output_dir) / "cap_audio"
+            tmp_img_dir.mkdir(parents=True, exist_ok=True)
+            tmp_aud_dir.mkdir(parents=True, exist_ok=True)
+            for idx, (im, au) in enumerate(zip(selected_imgs, selected_mp3s), start=1):
+                dst_img = tmp_img_dir / f"slide_{idx:03d}.png"
+                dst_aud = tmp_aud_dir / f"s{idx:03d}.mp3"
+                try:
+                    import shutil
+                    shutil.copyfile(im, dst_img)
+                    shutil.copyfile(au, dst_aud)
+                except Exception:
+                    pass
+
+            # 7) Stitch
+            video_filename = f"lite_{self.safe_topic}_{self.timestamp}.mp4"
+            video_path = os.path.join(self.output_dir, video_filename)
+            _video.stitch_images_and_audio_to_video(img_dir=tmp_img_dir, aud_dir=tmp_aud_dir, out_mp4=Path(video_path))
+            if not os.path.exists(video_path):
+                raise FileNotFoundError(f"Failed to create video at {video_path}")
+
+            # 8) Ensure thumbnail exists (HF only)
+            if not os.path.exists(thumb_path):
+                self._generate_thumbnail_hf(thumb_path)
+
+        except Exception as e:
+            return {"status": "error", "message": f"Error in LiteVideoTask: {e}", "video_url": ""}
+
+        # Upload in production
+        gcs_used = False
+        gcs_video_gs = ""
+        gcs_video_https = ""
+        gcs_thumb_https = ""
+        if IS_PRODUCTION:
+            try:
+                gcs_dir = f"lites/lite_{self.safe_topic}_{self.timestamp}"
+                up_video = gcs_utils.maybe_upload_and_url(
+                    video_path,
+                    parts=[gcs_dir, video_filename],
+                    content_type="video/mp4",
+                )
+                gcs_video_gs = up_video.get("gs_url", "")
+                gcs_video_https = up_video.get("https_url", "")
+                if os.path.exists(thumb_path):
+                    up_thumb = gcs_utils.maybe_upload_and_url(
+                        thumb_path,
+                        parts=[gcs_dir, "thumbnail.jpg"],
+                        content_type="image/jpeg",
+                    )
+                    gcs_thumb_https = up_thumb.get("https_url", "")
+                gcs_used = True
+            except Exception as _:
+                pass
+
+        # Build URL
+        if gcs_used and gcs_video_https:
+            video_url = gcs_video_https
+        else:
+            video_url = f"/videos/lite_{self.safe_topic}_{self.timestamp}/{video_filename}"
+
+        # Record DB post
+        try:
+            from .database import SessionLocal
+            from .auth.models import User, UserPost
+            from sqlalchemy.exc import SQLAlchemyError, IntegrityError
+            from datetime import datetime
+            db = SessionLocal()
+            resolved_user_id = None
+            if self.user_id is not None:
+                resolved_user_id = int(self.user_id)
+            elif self.user_email:
+                u = db.query(User).filter(User.user_email == self.user_email).first()
+                if u:
+                    resolved_user_id = u.user_id
+            if resolved_user_id is not None:
+                if gcs_used and gcs_video_https:
+                    post_path_value = gcs_video_https
+                elif gcs_video_gs:
+                    post_path_value = gcs_video_gs
+                else:
+                    rel_generated_dir = f"generated/lite_{self.safe_topic}_{self.timestamp}"
+                    rel_video_path = f"{rel_generated_dir}/{video_filename}"
+                    post_path_value = rel_video_path
+                post = UserPost(
+                    user_id=resolved_user_id,
+                    post_path=post_path_value,
+                    post_topic=self.topic,
+                    created_on=datetime.utcnow(),
+                    type='lite',
+                    public=True,
+                    tags=["lites"]
+                )
+                db.add(post)
+                try:
+                    db.commit(); db.refresh(post)
+                except Exception:
+                    db.rollback()
+        except Exception:
+            pass
+
+        return {"status": "completed", "video_url": video_url, "thumbnail_url": (gcs_thumb_https if gcs_used and gcs_thumb_https else f"/videos/lite_{self.safe_topic}_{self.timestamp}/thumbnail.jpg"), "message": "Lite video generated"}
+
+class LiteTopic(BaseModel):
+    topic: str
+    minutes_per_day: int
+
+
+class CreateLitesRequest(BaseModel):
+    topics: list[LiteTopic]
+
+
+# Legacy inline Lites endpoint disabled in favor of independent router in backend/app/lites.py
+# Keep mounted under a different path for backward-compat debug only.
+@app.post("/api/lites-legacy")
+async def create_lites(req: CreateLitesRequest, bg: BackgroundTasks, current_user: models.User = Depends(security.get_current_active_user), db: Session = Depends(get_db)):
+    """Create lightweight daily learning packs.
+
+    For now, only generate one background thumbnail per topic using Hugging Face.
+    Pollinations and Cloudflare are NOT used in this endpoint.
+    """
+    try:
+        if not req or not isinstance(req.topics, list) or len(req.topics) == 0:
+            raise HTTPException(status_code=400, detail="At least one topic is required")
+
+        # Normalize topics and allow only small set of minutes
+        allowed = {1, 2, 3, 4, 5, 10, 15}
+        topics: list[dict] = []
+        for t in req.topics[:100]:
+            tp = (t.topic or "").strip()
+            if not tp:
+                continue
+            mpd = int(t.minutes_per_day or 5)
+            if mpd not in allowed:
+                mpd = 5
+            topics.append({"topic": tp, "minutes_per_day": mpd})
+
+        if not topics:
+            raise HTTPException(status_code=400, detail="All topics are empty")
+
+        # Persist the submitted topics as a plan for this user
+        try:
+            # Ensure table exists (idempotent)
+            db.execute(text(
+                """
+                CREATE TABLE IF NOT EXISTS public.lite_topic_plans (
+                    plan_id SERIAL PRIMARY KEY,
+                    user_id INTEGER REFERENCES public.users(user_id),
+                    topics JSONB,
+                    created_on TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW()
+                )
+                """
+            ))
+            # Ensure required columns exist (handle legacy tables)
+            def _ensure_column(col: str, ddl: str):
+                exists = db.execute(text(
+                    """
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema='public' AND table_name='lite_topic_plans' AND column_name=:col
+                    """
+                ), {"col": col}).fetchone()
+                if not exists:
+                    db.execute(text(ddl))
+
+            _ensure_column("topics", "ALTER TABLE public.lite_topic_plans ADD COLUMN IF NOT EXISTS topics JSONB")
+            _ensure_column("created_on", "ALTER TABLE public.lite_topic_plans ADD COLUMN IF NOT EXISTS created_on TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW()")
+
+            # Determine PK/returning column for legacy compatibility
+            pk_col = None
+            for cand in ("plan_id", "post_id"):
+                exists = db.execute(text(
+                    """
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema='public' AND table_name='lite_topic_plans' AND column_name=:col
+                    """
+                ), {"col": cand}).fetchone()
+                if exists:
+                    pk_col = cand
+                    break
+
+            # Build insert dynamically to satisfy legacy NOT NULL columns (e.g., topic_text, minutes_per_day)
+            uid = getattr(current_user, "user_id", None)
+            # Detect post_id constraints (some schemas have NOT NULL post_id without default)
+            post_id_required = False
+            try:
+                col_info = db.execute(text(
+                    """
+                    SELECT is_nullable, column_default
+                    FROM information_schema.columns
+                    WHERE table_schema='public' AND table_name='lite_topic_plans' AND column_name='post_id'
+                    """
+                )).fetchone()
+                if col_info:
+                    is_nullable = (col_info[0] or "").upper() == "YES"
+                    has_default = col_info[1] is not None
+                    post_id_required = (not is_nullable) and (not has_default)
+            except Exception:
+                post_id_required = False
+            # Detect topic_text constraints
+            topic_text_required = False
+            has_topic_text = False
+            try:
+                col_info = db.execute(text(
+                    """
+                    SELECT is_nullable, column_default
+                    FROM information_schema.columns
+                    WHERE table_schema='public' AND table_name='lite_topic_plans' AND column_name='topic_text'
+                    """
+                )).fetchone()
+                if col_info:
+                    has_topic_text = True
+                    is_nullable = (col_info[0] or "").upper() == "YES"
+                    has_default = col_info[1] is not None
+                    topic_text_required = (not is_nullable) and (not has_default)
+            except Exception:
+                has_topic_text = False
+                topic_text_required = False
+
+            # Detect minutes_per_day constraints
+            minutes_required = False
+            has_minutes = False
+            try:
+                col_info = db.execute(text(
+                    """
+                    SELECT is_nullable, column_default
+                    FROM information_schema.columns
+                    WHERE table_schema='public' AND table_name='lite_topic_plans' AND column_name='minutes_per_day'
+                    """
+                )).fetchone()
+                if col_info:
+                    has_minutes = True
+                    is_nullable = (col_info[0] or "").upper() == "YES"
+                    has_default = col_info[1] is not None
+                    minutes_required = (not is_nullable) and (not has_default)
+            except Exception:
+                has_minutes = False
+                minutes_required = False
+
+            insert_cols = ["user_id", "topics"]
+            params = {
+                "user_id": uid,
+                "topics": json.dumps(topics),
+            }
+            if post_id_required:
+                insert_cols.append("post_id")
+                params["post_id"] = str(uuid.uuid4())
+            if has_topic_text and topic_text_required:
+                # Derive a compact topic_text from topics list
+                try:
+                    topic_names = [t.get("topic") for t in (topics or []) if isinstance(t, dict) and t.get("topic")]
+                    topic_text_val = ", ".join(topic_names)[:255] if topic_names else "Lites Plan"
+                except Exception:
+                    topic_text_val = "Lites Plan"
+                insert_cols.append("topic_text")
+                params["topic_text"] = topic_text_val
+
+            if has_minutes and minutes_required:
+                # Derive minutes_per_day from topics (first item or sensible default)
+                try:
+                    mpd = None
+                    if isinstance(topics, list) and topics:
+                        first = topics[0]
+                        if isinstance(first, dict) and isinstance(first.get("minutes_per_day"), (int, float)):
+                            mpd = int(first.get("minutes_per_day") or 0)
+                    if not mpd or mpd <= 0:
+                        # fallback: try average/sum if present
+                        vals = [int(t.get("minutes_per_day")) for t in topics if isinstance(t, dict) and isinstance(t.get("minutes_per_day"), (int, float))]
+                        mpd = int(vals[0]) if vals else 2
+                    mpd = max(1, min(240, mpd))
+                except Exception:
+                    mpd = 2
+                insert_cols.append("minutes_per_day")
+                params["minutes_per_day"] = mpd
+
+            cols_sql = ", ".join(insert_cols)
+            vals_sql = ", ".join([f":{c}" if c != "topics" else "CAST(:topics AS JSONB)" for c in insert_cols])
+            sql = f"INSERT INTO public.lite_topic_plans ({cols_sql}) VALUES ({vals_sql})"
+            if pk_col:
+                sql += f" RETURNING {pk_col}"
+
+            if pk_col:
+                row = db.execute(text(sql), params).fetchone()
+            else:
+                db.execute(text(sql), params)
+                row = None
+            plan_id = row[0] if row else None
+            db.commit()
+        except Exception as e:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            print(f"[lites] failed to persist lite_topic_plans: {e}")
+            # Do not fail the request; continue to generation
+
+        # Capture primitives NOW to avoid accessing detached ORM objects in background
+        captured_user_id = getattr(current_user, "user_id", None)
+        captured_user_email = getattr(current_user, "user_email", None)
+
+        # Background task to generate only HF images per topic
+        def _run_lites_generation(items: list[dict]):
+            try:
+                ts = int(time.time())
+                base_dir = Path("generated/Lites")
+                base_dir.mkdir(parents=True, exist_ok=True)
+                for item in items:
+                    tp = item["topic"]
+                    safe = sanitize_filename(tp)
+                    out_dir = base_dir / f"{safe}_{ts}"
+                    (out_dir / "images").mkdir(parents=True, exist_ok=True)
+                    out_img = out_dir / "images" / "thumb.jpg"
+
+                    # Build prompt and call ONLY Hugging Face helper
+                    prompt = (
+                        f"clean minimal educational thumbnail for: {tp} (lites), without any text, "
+                        "letters, words, captions, logos, watermarks, signatures, signage, title"
+                    )
+                    # Generate image via Google AI Studio directly
+                    ok = _generate_google_image(tp, str(out_img), width=1280, height=720)
+                    # If OpenRouter fails, fall back to a simple PIL thumbnail
+                    if not ok:
+                        _pil_text_thumbnail(tp, str(out_img), width=1280, height=720, scale=5.0)
+
+                    # Trigger video generation as a separate lite pipeline (<=60s, HF images only)
+                    try:
+                        task = LiteVideoTask(topic=tp, user_email=captured_user_email, user_id=captured_user_id)
+                        # run synchronously inside background thread
+                        task.process()
+                    except Exception as e:
+                        print(f"[lites] video generation failed for '{tp}': {e}")
+            except Exception as e:
+                print(f"[lites] background task error: {e}")
+
+        bg.add_task(_run_lites_generation, topics)
+
+        return {"status": "started", "message": "Lite generation started.", "count": len(topics)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 class QuizAnswerRequest(BaseModel):

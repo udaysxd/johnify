@@ -111,10 +111,16 @@ def get_video_files(user_id: int, db: Session) -> List[Dict[str, Any]]:
     """
     print(f"Getting videos for user {user_id}")
     
-    # Get all posts for the user
+    # First, get all posts for the user
     user_posts = db.query(models.UserPost).filter(
-        models.UserPost.user_id == user_id
+        models.UserPost.user_id == user_id,
+        models.UserPost.post_path.isnot(None)  # Only include posts with a valid path
     ).order_by(models.UserPost.created_on.desc()).all()
+    
+    # Debug output
+    print(f"Found {len(user_posts)} total posts for user {user_id}")
+    for post in user_posts[:5]:  # Print first 5 posts for debugging
+        print(f"Post ID: {post.post_id}, Type: {getattr(post, 'type', 'N/A')}, Path: {post.post_path}")
     
     print(f"Found {len(user_posts)} posts for user {user_id}")
     
@@ -146,6 +152,7 @@ def get_video_files(user_id: int, db: Session) -> List[Dict[str, Any]]:
                         "created_at": post.created_on.isoformat() if post.created_on else datetime.utcnow().isoformat(),
                         "video_url": video_url,
                         "thumbnail_url": thumbnail_url,
+                        "type": getattr(post, "type", None),
                         "topic": post.post_topic or "",
                         "status": "completed",
                         "public": bool(getattr(post, "public", True)),
@@ -161,6 +168,7 @@ def get_video_files(user_id: int, db: Session) -> List[Dict[str, Any]]:
                     "created_at": post.created_on.isoformat() if post.created_on else datetime.utcnow().isoformat(),
                     "video_url": video_url,
                     "thumbnail_url": thumbnail_url,
+                    "type": getattr(post, "type", None),
                     "topic": post.post_topic or "",
                     "status": "completed",
                     "public": bool(getattr(post, "public", True)),
@@ -271,6 +279,7 @@ def get_video_files(user_id: int, db: Session) -> List[Dict[str, Any]]:
                     "created_at": post.created_on.isoformat() if post.created_on else datetime.utcnow().isoformat(),
                     "video_url": video_url,
                     "thumbnail_url": thumbnail_url,
+                    "type": getattr(post, "type", None),
                     "topic": post.post_topic or "",
                     "status": "completed",
                     "public": bool(getattr(post, "public", True)),

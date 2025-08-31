@@ -75,6 +75,13 @@ export default function Header() {
       window.location.reload();
     }
   };
+  const handleLitesClick = (e: React.MouseEvent<HTMLAnchorElement>) => {
+    if (pathname === '/lites') {
+      e.preventDefault();
+      // Force a full page reload to reset state and data
+      window.location.reload();
+    }
+  };
   
   return (
     <header className="w-full border-b border-gray-800 bg-gray-900">
@@ -101,6 +108,14 @@ export default function Header() {
                 className="px-3 py-2 text-sm font-bold text-gray-100 hover:text-indigo-300"
               >
                 My Feed
+              </Link>
+              {/* Lites link (authenticated) */}
+              <Link 
+                href="/lites" 
+                onClick={handleLitesClick}
+                className="px-3 py-2 text-sm font-bold text-gray-100 hover:text-indigo-300"
+              >
+                Lites
               </Link>
               {/* My Tutor link (authenticated) */}
               <Link 
@@ -168,6 +183,14 @@ export default function Header() {
                 className="px-3 py-2 text-sm font-bold text-gray-100 hover:text-indigo-300"
               >
                 My Feed
+              </Link>
+              {/* Lites link (unauthenticated) */}
+              <Link 
+                href="/lites" 
+                onClick={handleLitesClick}
+                className="px-3 py-2 text-sm font-bold text-gray-100 hover:text-indigo-300"
+              >
+                Lites
               </Link>
               {/* My Tutor link (unauthenticated) */}
               <Link 

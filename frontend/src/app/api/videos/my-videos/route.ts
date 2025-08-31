@@ -12,6 +12,7 @@ interface BackendVideoItem {
   created_at?: string;
   status?: 'processing' | 'completed' | 'failed' | string;
   public?: boolean;
+  type?: string;
   [key: string]: unknown;
 }
 
@@ -24,6 +25,7 @@ interface FrontendVideoItem {
   createdAt: string;
   status: 'processing' | 'completed' | 'failed';
   public: boolean;
+  type?: string;
 }
 
 const isProduction = process.env.NODE_ENV === 'production';
@@ -100,6 +102,7 @@ export async function GET(request: Request): Promise<NextResponse> {
             const videoUrl = absoluteUrl(v.video_url ?? v.url);
             const thumbnailUrl = absoluteUrl(v.thumbnail_url ?? v.thumbnail);
             const status: FrontendVideoItem['status'] = isValidStatus(v.status) ? v.status : 'completed';
+            const type = typeof v.type === 'string' ? v.type.toLowerCase() : '';
             return {
               id: String(v.id ?? ''),
               title: v.title || 'Untitled Video',
@@ -109,10 +112,11 @@ export async function GET(request: Request): Promise<NextResponse> {
               createdAt: v.created_at || new Date().toISOString(),
               status,
               public: v.public !== false, // default true if missing
+              type,
             };
           })
-          // Filter out entries with no video URL
-          .filter((v) => !!v.videoUrl)
+          // Filter out entries with no video URL and ensure they're lites videos
+          .filter((v) => !!v.videoUrl && v.type === 'lites')
       : [];
 
     return NextResponse.json(videos);
