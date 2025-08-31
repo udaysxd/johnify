@@ -1314,6 +1314,10 @@ app.include_router(videos.router)
 from .lites import router as lites_router
 app.include_router(lites_router)
 
+# Include mlites router (mobile-optimized portrait pipeline)
+from .mlites import router as mlites_router
+app.include_router(mlites_router)
+
 # Configure CORS with specific allowed origins and credentials
 
 # Include routers

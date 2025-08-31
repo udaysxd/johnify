@@ -109,7 +109,7 @@ def get_video_files(user_id: int, db: Session) -> List[Dict[str, Any]]:
     """
     Get all video files for a specific user from the database and filesystem
     """
-    print(f"Getting videos for user {user_id}")
+    # print(f"Getting videos for user {user_id}")
     
     # First, get all posts for the user
     user_posts = db.query(models.UserPost).filter(
@@ -118,27 +118,26 @@ def get_video_files(user_id: int, db: Session) -> List[Dict[str, Any]]:
     ).order_by(models.UserPost.created_on.desc()).all()
     
     # Debug output
-    print(f"Found {len(user_posts)} total posts for user {user_id}")
-    for post in user_posts[:5]:  # Print first 5 posts for debugging
-        print(f"Post ID: {post.post_id}, Type: {getattr(post, 'type', 'N/A')}, Path: {post.post_path}")
-    
-    print(f"Found {len(user_posts)} posts for user {user_id}")
+    # print(f"Found {len(user_posts)} total posts for user {user_id}")
+    # for post in user_posts[:5]:  # Print first 5 posts for debugging
+    #     print(f"Post ID: {post.post_id}, Type: {getattr(post, 'type', 'N/A')}, Path: {post.post_path}")
+    # print(f"Found {len(user_posts)} posts for user {user_id}")
     
     videos = []
     
     for post in user_posts:
         if not post.post_path:
-            print(f"Skipping post {post.post_id} - no post_path")
+            # print(f"Skipping post {post.post_id} - no post_path")
             continue
             
-        print(f"\nProcessing post {post.post_id}")
-        print(f"Post path: {post.post_path}")
-        print(f"Post topic: {post.post_topic}")
+        # print(f"\nProcessing post {post.post_id}")
+        # print(f"Post path: {post.post_path}")
+        # print(f"Post topic: {post.post_topic}")
         
         try:
-            print(f"\n--- Debugging Video Paths ---")
-            print(f"Original post_path: {post.post_path}")
-            print(f"Current working directory: {os.getcwd()}")
+            # print(f"\n--- Debugging Video Paths ---")
+            # print(f"Original post_path: {post.post_path}")
+            # print(f"Current working directory: {os.getcwd()}")
 
             # If post_path is a GCS path or URL, short-circuit to URLs without filesystem access
             pp = (post.post_path or "").strip()
@@ -214,15 +213,15 @@ def get_video_files(user_id: int, db: Session) -> List[Dict[str, Any]]:
             video_dir_path = os.path.join(str(GENERATED_ROOT), directory_name)
             video_dir_path = os.path.normpath(video_dir_path)  # Normalize the path for the current OS
             
-            print(f"Normalized video directory path: {video_dir_path}")
-            print(f"Directory exists: {os.path.exists(video_dir_path)}")
+            # print(f"Normalized video directory path: {video_dir_path}")
+            # print(f"Directory exists: {os.path.exists(video_dir_path)}")
             
             # Find the actual video file in the directory (handles cases where filename might have newlines or spaces)
             video_filename = None
             video_path = None
             
             if os.path.exists(video_dir_path):
-                print(f"Directory contents: {os.listdir(video_dir_path)}")
+                # print(f"Directory contents: {os.listdir(video_dir_path)}")
                 # Look for .mp4 files in the directory
                 for file in os.listdir(video_dir_path):
                     if file.endswith('.mp4'):
@@ -233,17 +232,17 @@ def get_video_files(user_id: int, db: Session) -> List[Dict[str, Any]]:
             
             video_abs_path = os.path.abspath(video_path) if video_path else ""
             
-            print(f"Directory name: {directory_name}")
-            print(f"Found video file: {video_filename}" if video_filename else "No video file found")
-            print(f"Video directory path: {video_dir_path}")
-            print(f"Video path: {video_path}" if video_path else "No video path")
-            print(f"Absolute video path: {video_abs_path}" if video_abs_path else "No absolute path")
-            print(f"Directory exists: {os.path.exists(video_dir_path) if os.path.exists(video_dir_path) else False}")
-            print(f"File exists: {os.path.exists(video_path) if video_path else False}")
+            # print(f"Directory name: {directory_name}")
+            # print(f"Found video file: {video_filename}" if video_filename else "No video file found")
+            # print(f"Video directory path: {video_dir_path}")
+            # print(f"Video path: {video_path}" if video_path else "No video path")
+            # print(f"Absolute video path: {video_abs_path}" if video_abs_path else "No absolute path")
+            # print(f"Directory exists: {os.path.exists(video_dir_path) if os.path.exists(video_dir_path) else False}")
+            # print(f"File exists: {os.path.exists(video_path) if video_path else False}")
             
             # Check if the video file exists
             if video_path and os.path.exists(video_path):
-                print(f"✅ Video found at: {video_path}")
+                # print(f"✅ Video found at: {video_path}")
                 
                 # Generate thumbnail path (assuming it's in the same directory with .jpg extension)
                 thumbnail_filename = "thumbnail.jpg"
@@ -269,9 +268,9 @@ def get_video_files(user_id: int, db: Session) -> List[Dict[str, Any]]:
                     thumb_rel_path = thumb_rel_path.replace('\\', '/').lstrip('/')
                     thumbnail_url = f"{base_url}/videos/{thumb_rel_path}"
                 
-                print(f"Generated video URL: {video_url}")
-                print(f"Generated thumbnail URL: {thumbnail_url}")
-                print(f"Video path: {video_path}")
+                # print(f"Generated video URL: {video_url}")
+                # print(f"Generated thumbnail URL: {thumbnail_url}")
+                # print(f"Video path: {video_path}")
                 
                 videos.append({
                     "id": str(post.post_id),
@@ -286,15 +285,18 @@ def get_video_files(user_id: int, db: Session) -> List[Dict[str, Any]]:
                     "tags": _normalize_post_tags(getattr(post, "tags", None)),
                 })
             else:
-                print(f"❌ Video not found at: {video_path}")
+                # print(f"❌ Video not found at: {video_path}")
                 if video_dir_path and os.path.exists(video_dir_path):
-                    print(f"Directory contents: {os.listdir(video_dir_path)}")
+                    # print(f"Directory contents: {os.listdir(video_dir_path)}")
+                    pass
                 else:
-                    print(f"Directory does not exist: {video_dir_path}")
+                    # print(f"Directory does not exist: {video_dir_path}")
+                    pass
+                    
         except Exception as e:
             import traceback
-            print(f"❌ Error processing video: {str(e)}")
-            print(f"Traceback: {traceback.format_exc()}")
+            # print(f"❌ Error processing video: {str(e)}")
+            # print(f"Traceback: {traceback.format_exc()}")
             raise  # Re-raise the exception to see it in the API response
     
     return videos

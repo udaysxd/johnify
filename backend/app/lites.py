@@ -345,8 +345,22 @@ def _draw_text_slide(
         r"C:\\Windows\\Fonts\\arial.ttf",
     ], 28)
 
+    # Special branding end-card: center the title and skip body
+    if mode == "brand":
+        try:
+            tb = draw.textbbox((0, 0), title, font=title_font)
+            tw, th = tb[2]-tb[0], tb[3]-tb[1]
+        except Exception:
+            tw = len(title) * 14; th = 48
+        tx = (width - tw) // 2
+        ty = (height - th) // 2
+        draw.text((tx+2, ty+2), title, fill=(0,0,0), font=title_font)
+        draw.text((tx, ty), title, fill=(20,20,20), font=title_font)
+        img.save(out_path)
+        return
+
     pad = 40
-    # Title
+    # Title (normal slide)
     try:
         tb = draw.textbbox((0, 0), title, font=title_font)
         tw, th = tb[2]-tb[0], tb[3]-tb[1]
@@ -692,6 +706,36 @@ async def create_lites(req: CreateLitesRequest, bg: BackgroundTasks):
                     slides.append("## Johnify\n")
                     narr.append("thanks for learning")
 
+                    # Dedup check using canonical payload
+                    canon_payload = _canonicalize_slides(structured_slides, narr, tags)
+                    dbcheck = Session()
+                    try:
+                        if user_id is not None and _is_duplicate_content(dbcheck, int(user_id), combined, canon_payload.get("content_hash", "")):
+                            logger.info(f"Skipped duplicate lites content for user={user_id} topic='{combined}'")
+                            try:
+                                dbcheck.close()
+                            except Exception:
+                                pass
+                            # still insert sub-topic link to track coverage
+                            try:
+                                dbt = Session()
+                                tid = _get_or_create_topic_id(dbt, int(user_id), tp, mpd)
+                                if tid is not None:
+                                    _insert_lite_sub_topic(dbt, int(tid), combined)
+                            except Exception:
+                                pass
+                            finally:
+                                try:
+                                    dbt.close()
+                                except Exception:
+                                    pass
+                            continue
+                    finally:
+                        try:
+                            dbcheck.close()
+                        except Exception:
+                            pass
+
                     # 3) Save slides.md with narration comments
                     md_file = out_dir / "slides.md"
                     try:
@@ -703,7 +747,13 @@ async def create_lites(req: CreateLitesRequest, bg: BackgroundTasks):
                                 s = (s or "").strip()
                                 if s and not any(line.strip().startswith('#') for line in s.split('\n')[:3]):
                                     s = f"## Slide {i+1}\n" + s
-                                if not any(line.strip().startswith('-') for line in s.split('\n')):
+                                # For normal content slides, add placeholder bullets if none exist.
+                                # But for the branding end slide ('## Johnify'), do NOT add any bullets.
+                                has_bullets = any(line.strip().startswith('-') for line in s.split('\n'))
+                                is_brand_endcard = any(
+                                    (ln.strip().lower().startswith('## johnify')) for ln in s.split('\n')[:3]
+                                )
+                                if not has_bullets and not is_brand_endcard:
                                     s += "\n- Point 1\n- Point 2\n- Point 3"
                                 s = '\n'.join([ln for ln in s.split('\n') if ln.strip()])
                                 f.write(f"{s}\n\n<!-- NARRATION: {n} -->\n")
@@ -737,7 +787,11 @@ async def create_lites(req: CreateLitesRequest, bg: BackgroundTasks):
                             rendered.append((title_line, body))
                         for idx, (ti, body) in enumerate(rendered, 1):
                             outp = images_dir / f"slide_{idx:03d}.png"
-                            _draw_text_slide(ti, body, outp)
+                            is_brand_endcard = (ti.strip().lower() == "johnify") and (not (body or "").strip())
+                            if is_brand_endcard:
+                                _draw_text_slide(ti, body, outp, mode="brand")
+                            else:
+                                _draw_text_slide(ti, body, outp)
                     except Exception as e:
                         logger.error(f"image render error: {e}")
 
@@ -826,7 +880,7 @@ async def create_lites(req: CreateLitesRequest, bg: BackgroundTasks):
                             # Persist user_posts
                             dbp = Session()
                             try:
-                                _persist_user_post(dbp, user_id=int(user_id), post_path=post_path, post_topic=combined, tags=tags)
+                                _persist_user_post(dbp, user_id=int(user_id), post_path=post_path, post_topic=combined, tags=tags, content_json=canon_payload)
                             finally:
                                 dbp.close()
 
@@ -1061,22 +1115,97 @@ def _insert_lite_sub_topic(db, topic_id: int, sub_topic: str) -> None:
         logger.exception(f"insert into sub-topics failed (table={SUB_TOPICS_TABLE}, topic_id={topic_id}, sub_topic={sub_topic}): {e}")
         raise
 
-def _persist_user_post(db, user_id: int, post_path: str, post_topic: str, tags: Optional[List[str]]):
+def _persist_user_post(db, user_id: int, post_path: str, post_topic: str, tags: Optional[List[str]], content_json: Optional[Dict[str, Any]] = None):
     try:
         db.execute(text(
             """
-            INSERT INTO public.user_posts (user_id, post_path, post_topic, type, public, tags, created_on)
-            VALUES (:uid, :ppath, :ptopic, 'lites', TRUE, CAST(:tags AS JSONB), NOW())
+            INSERT INTO public.user_posts (user_id, post_path, post_topic, type, public, tags, created_on, content)
+            VALUES (:uid, :ppath, :ptopic, 'lites', TRUE, CAST(:tags AS JSONB), NOW(), :content)
             """
         ), {
             "uid": int(user_id),
             "ppath": post_path,
             "ptopic": post_topic,
             "tags": json.dumps(tags or []),
+            "content": json.dumps(content_json, ensure_ascii=False) if content_json is not None else None,
         })
         db.commit()
     except Exception as e:
-        logger.warning(f"persist user_posts failed: {e}")
+        logger.warning(f"persist user_posts with content failed, retrying without content: {e}")
+        try:
+            # Fallback for databases that don't yet have the 'content' column
+            db.rollback()
+        except Exception:
+            pass
+        try:
+            db.execute(text(
+                """
+                INSERT INTO public.user_posts (user_id, post_path, post_topic, type, public, tags, created_on)
+                VALUES (:uid, :ppath, :ptopic, 'lites', TRUE, CAST(:tags AS JSONB), NOW())
+                """
+            ), {
+                "uid": int(user_id),
+                "ppath": post_path,
+                "ptopic": post_topic,
+                "tags": json.dumps(tags or []),
+            })
+            db.commit()
+        except Exception as e2:
+            logger.warning(f"persist user_posts fallback failed: {e2}")
+
+def _canonicalize_slides(structured_slides: List[Dict[str, Any]], narr: List[str], tags: List[str]) -> Dict[str, Any]:
+    """Return a stable payload for storage and hashing. Excludes volatile fields like timestamps.
+    Adds a content_hash field.
+    """
+    # Normalize slides: keep only title and bullets strings
+    slides_norm: List[Dict[str, Any]] = []
+    for sl in structured_slides:
+        if not isinstance(sl, dict):
+            continue
+        title = str(sl.get("title") or "").strip()
+        bullets_in = sl.get("bullets") or []
+        bullets = [str(b).strip() for b in bullets_in if isinstance(b, (str, int, float)) and str(b).strip()]
+        slides_norm.append({"title": title, "bullets": bullets})
+    narr_norm = [str(x).strip() for x in narr if isinstance(x, (str, int, float))]
+    tags_norm = [str(x).strip().lower() for x in tags if isinstance(x, (str, int, float))]
+    base = {"slides": slides_norm, "narrations": narr_norm, "tags": tags_norm}
+    try:
+        canon = json.dumps(base, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        import hashlib
+        h = hashlib.sha256(canon.encode("utf-8")).hexdigest()
+    except Exception:
+        h = ""
+    base["content_hash"] = h
+    return base
+
+def _is_duplicate_content(db, user_id: int, post_topic: str, content_hash: str) -> bool:
+    """Check recent lites posts for the same user for matching content_hash stored in content JSON (as text).
+    Note: We intentionally do not restrict by topic to avoid duplicates across different subtopic titles.
+    """
+    try:
+        rows = db.execute(text(
+            """
+            SELECT content
+            FROM public.user_posts
+            WHERE user_id = :uid AND type = 'lites' AND content IS NOT NULL
+            ORDER BY created_on DESC
+            LIMIT 50
+            """
+        ), {"uid": int(user_id)}).fetchall()
+        for r in rows:
+            try:
+                ctext = r[0] if isinstance(r, (list, tuple)) else (getattr(r, "content", None) if r is not None else None)
+                if not ctext:
+                    continue
+                obj = json.loads(ctext)
+                if isinstance(obj, dict) and obj.get("content_hash") == content_hash:
+                    return True
+            except Exception:
+                continue
+        return False
+    except Exception as e:
+        logger.warning(f"duplicate check failed: {e}")
+        return False
 
 def _generate_single_lite(user_id: int, user_email: Optional[str], topic: str) -> Dict[str, Any]:
     ts = int(time.time())
@@ -1106,6 +1235,16 @@ def _generate_single_lite(user_id: int, user_email: Optional[str], topic: str) -
         pass
     slides.append("## Johnify\n")
     narr.append("thanks for learning")
+
+    # Dedup check using canonical payload before heavy work
+    canon_payload = _canonicalize_slides(structured_slides, narr, tags)
+    dbcheck = Session()
+    try:
+        if _is_duplicate_content(dbcheck, int(user_id), topic, canon_payload.get("content_hash", "")):
+            logger.info(f"Skipped duplicate lites content for user={user_id} topic='{topic}'")
+            return {"status": "skipped", "reason": "duplicate", "topic": topic}
+    finally:
+        dbcheck.close()
 
     # slides.md
     md_file = out_dir / "slides.md"
@@ -1194,7 +1333,7 @@ def _generate_single_lite(user_id: int, user_email: Optional[str], topic: str) -
     # persist DB
     db = Session()
     try:
-        _persist_user_post(db, user_id=user_id, post_path=post_path, post_topic=topic, tags=tags)
+        _persist_user_post(db, user_id=user_id, post_path=post_path, post_topic=topic, tags=tags, content_json=canon_payload)
     finally:
         db.close()
 

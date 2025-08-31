@@ -23,10 +23,16 @@ class SSEBroker:
             try:
                 # Yield an initial comment to open the stream
                 yield ": connected\n\n"
+                # Heartbeat every ~25s to keep intermediaries from closing idle connections
+                heartbeat_interval = 25.0
                 while True:
-                    data = await queue.get()
-                    # data must be a string already formatted as SSE event lines
-                    yield data
+                    try:
+                        data = await asyncio.wait_for(queue.get(), timeout=heartbeat_interval)
+                        # data must be a string already formatted as SSE event lines
+                        yield data
+                    except asyncio.TimeoutError:
+                        # Send SSE comment as heartbeat
+                        yield ": ping\n\n"
             finally:
                 async with self._lock:
                     try:

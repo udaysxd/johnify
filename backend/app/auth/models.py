@@ -1,6 +1,6 @@
 from datetime import datetime, time, timedelta
 from uuid import uuid4
-from sqlalchemy import Column, Integer, String, DateTime, Time, Boolean, ForeignKey
+from sqlalchemy import Column, Integer, String, DateTime, Time, Boolean, ForeignKey, Text
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
@@ -58,6 +58,8 @@ class UserPost(Base):
     public = Column(Boolean, default=True, nullable=True)
     # Tags describing genre/industry/segment/category for the video (array of strings)
     tags = Column(JSONB, nullable=True)
+    # Persisted content payload for the post (e.g., slides JSON for lites)
+    content = Column(Text, nullable=True)
     
     # Relationship to user
     user = relationship("User", back_populates="posts")

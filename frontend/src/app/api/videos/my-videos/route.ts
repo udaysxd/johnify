@@ -71,6 +71,8 @@ function isValidStatus(s: unknown): s is 'processing' | 'completed' | 'failed' {
 
 export async function GET(request: Request): Promise<NextResponse> {
   try {
+    const { searchParams } = new URL(request.url);
+    const typeParam = (searchParams.get('type') || '').toLowerCase();
     const cookieStore = await cookies();
     const cookieAccess = cookieStore.get('access_token')?.value; // primary used by app
     const cookieAuth = cookieStore.get('auth_token')?.value;     // legacy fallback
@@ -115,8 +117,14 @@ export async function GET(request: Request): Promise<NextResponse> {
               type,
             };
           })
-          // Filter out entries with no video URL and ensure they're lites videos
-          .filter((v) => !!v.videoUrl && v.type === 'lites')
+          // Filter out entries with no video URL and by type if specified
+          .filter((v) => {
+            if (!v.videoUrl) return false;
+            if (typeParam === 'all') return true;
+            if (typeParam) return v.type === typeParam;
+            // default behavior: only lites (for backward compatibility)
+            return v.type === 'lites';
+          })
       : [];
 
     return NextResponse.json(videos);
