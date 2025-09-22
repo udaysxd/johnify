@@ -47,18 +47,37 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token", auto_error=False)
 async def get_token_from_cookie(request: Request) -> Optional[str]:
     # Debug: log incoming cookie header and parsed cookie
     try:
-        raw_cookie = request.headers.get('cookie')
+        raw_cookie = request.headers.get('cookie', '')
         if raw_cookie:
             print(f"🍪 Incoming Cookie header: {raw_cookie[:200]}{'...' if len(raw_cookie) > 200 else ''}")
+            
+        # Try to get token from cookies
+        token = request.cookies.get("access_token")
+        
+        # If not in cookies, check Authorization header as fallback
+        if not token:
+            auth_header = request.headers.get("Authorization")
+            if auth_header and auth_header.startswith("Bearer "):
+                token = auth_header.split(" ")[1] if len(auth_header.split(" ")) > 1 else None
+                print(f"🔑 Found token in Authorization header")
+        
+        if token:
+            # Clean up the token
+            token = token.strip()
+            
+            # Remove surrounding quotes if present
+            if (token.startswith('"') and token.endswith('"')) or (token.startswith("'") and token.endswith("'")):
+                token = token[1:-1].strip()
+                
+            print(f"🔑 Extracted token: {token[:10]}...")
+            return token
+            
+        print("❌ No valid token found in cookies or Authorization header")
+        return None
+        
     except Exception as e:
-        print(f"⚠️  Error reading cookie header: {e}")
-
-    token = request.cookies.get("access_token")
-    if token:
-        print(f"🍪 Parsed access_token from cookies: {token[:10]}...")
-    else:
-        print("❌ No access_token cookie found on request")
-    return token
+        print(f"⚠️  Error processing request cookies/headers: {str(e)}")
+        return None
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(plain_password, hashed_password)
@@ -124,18 +143,66 @@ async def get_current_user(
     )
     
     try:
-        # First, decode without verification to see the raw payload
-        unverified_payload = jwt.get_unverified_claims(token)
-        print(f"🔍 Unverified token payload: {unverified_payload}")
-        print(f"🔍 Token algorithm: {jwt.get_unverified_header(token).get('alg')}")
+        # Ensure token is not empty
+        if not token or not isinstance(token, str):
+            print("❌ Empty or invalid token provided")
+            raise credentials_exception
+            
+        # Clean and validate token format
+        token = token.strip()
         
-        # Now verify the token with the secret key
-        payload = jwt.decode(
-            token,
-            SECRET_KEY,
-            algorithms=[ALGORITHM],
-            options={"verify_exp": True, "verify_aud": False}
-        )
+        # Remove 'Bearer ' prefix if present
+        if token.startswith('Bearer '):
+            token = token[7:].strip()
+        
+        # Remove surrounding quotes if present
+        if (token.startswith('"') and token.endswith('"')) or (token.startswith("'") and token.endswith("'")):
+            token = token[1:-1].strip()
+            
+        if not token:
+            print("❌ Empty token after cleaning")
+            raise credentials_exception
+            
+        print(f"🔍 Cleaned token: {token[:10]}...")
+            
+        try:
+            # First, get and verify the header
+            try:
+                unverified_header = jwt.get_unverified_header(token)
+                if not unverified_header or 'alg' not in unverified_header:
+                    print("❌ Invalid token header")
+                    raise credentials_exception
+                    
+                print(f"🔍 Token algorithm: {unverified_header.get('alg')}")
+                
+                # Now verify the token with the secret key
+                payload = jwt.decode(
+                    token=token,
+                    key=SECRET_KEY,
+                    algorithms=[ALGORITHM],
+                    options={
+                        "verify_exp": True,
+                        "verify_aud": False,
+                        "verify_iss": False,
+                        "verify_sub": False
+                    }
+                )
+                print(f"✅ Token verified successfully")
+                
+            except jwt.ExpiredSignatureError:
+                print("❌ Token has expired")
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Token has expired",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            except jwt.JWTError as e:
+                print(f"❌ JWT validation error: {str(e)}")
+                raise credentials_exception
+                
+        except Exception as e:
+            print(f"❌ Unexpected error during token validation: {str(e)}")
+            raise credentials_exception
         
         print(f"✅ Verified token payload: {payload}")
 

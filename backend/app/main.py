@@ -32,10 +32,17 @@ from sqlalchemy import text
 
 # Import local modules
 from . import quiz, slidegen, pptx_gen, tts, video, utils, auth, tutor
+from . import preferences
 from . import gcs_utils
 from .database import engine, init_db, get_db
+from . import scheduler as job_scheduler
 from .auth import models, schemas, security
 import shutil
+
+# Import core configurations and middleware
+from .core.config import settings
+from .core.cors import setup_cors
+from .core.rate_limiter import rate_limit_middleware
 
 def sanitize_filename(filename: str) -> str:
     """
@@ -87,13 +94,77 @@ class QuizRequest(BaseModel):
     num_questions: int = Field(10, ge=1, le=50, description="Number of questions to generate")
     difficulty: Optional[str] = Field(None, description="Difficulty level (optional)")
 
-app = FastAPI(title="Johnify API")
+app = FastAPI(
+    title=settings.APP_NAME,
+    debug=settings.DEBUG,
+    openapi_url=f"{settings.API_V1_STR}/openapi.json"
+)
+
+# Setup CORS
+setup_cors(app)
+
+# Add rate limiting middleware
+app.middleware("http")(rate_limit_middleware)
+
+# Add middleware to handle OPTIONS method for CORS preflight
+@app.middleware("http")
+async def add_cors_headers(request: Request, call_next):
+    if request.method == "OPTIONS":
+        response = Response(
+            status_code=200,
+            headers={
+                "Access-Control-Allow-Origin": ", ".join(settings.CORS_ORIGINS),
+                "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With",
+                "Access-Control-Allow-Credentials": "true",
+                "Access-Control-Max-Age": "600",  # 10 minutes
+            }
+        )
+        return response
+    
+    response = await call_next(request)
+    
+    # Add CORS headers to all responses
+    if "Access-Control-Allow-Origin" not in response.headers:
+        response.headers["Access-Control-Allow-Origin"] = ", ".join(settings.CORS_ORIGINS)
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+    
+    return response
+
+# Scheduler lifecycle hooks (daily Lites/MLites generation)
+@app.on_event("startup")
+async def _scheduler_startup():
+    try:
+        await job_scheduler.start_scheduler()
+    except Exception:
+        # Non-fatal: app should still serve APIs even if scheduler fails
+        pass
+
+@app.on_event("shutdown")
+async def _scheduler_shutdown():
+    try:
+        await job_scheduler.shutdown_scheduler()
+    except Exception:
+        pass
 
 # CORS will be configured later in the file - removing duplicate registration
 
 @app.get("/")
 def root():
     return {"message": "Backend is running"}
+
+# ---- Admin/test: trigger daily generation now (guarded by env SCHEDULER_SECRET) ----
+@app.post("/api/scheduler/run-now")
+async def scheduler_run_now(request: Request):
+    secret_env = os.getenv("SCHEDULER_SECRET")
+    provided = request.query_params.get("secret") if hasattr(request, "query_params") else None
+    if not secret_env or not provided or provided != secret_env:
+        raise HTTPException(status_code=401, detail="unauthorized")
+    try:
+        await job_scheduler._run_daily_generation()  # type: ignore[attr-defined]
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"run-now failed: {e}")
 
 def clean_markdown_text(text):
     """Clean and format markdown text for display."""
@@ -115,6 +186,12 @@ def clean_markdown_text(text):
     # Remove any remaining markdown links
     text = re.sub(r'\[(.*?)\]\(.*?\)', r'\1', text)
     
+    # Remove generic placeholder bullets that should not display
+    placeholder_bullet = re.compile(
+        r"(?mi)^\s*-\s*(important point\s*\d+|key detail\s*\d+|additional information|overview|key idea\s*\d+|step\s*\d+)\s*$"
+    )
+    text = placeholder_bullet.sub("", text)
+
     # Clean up any multiple newlines
     text = re.sub(r'\n{3,}', '\n\n', text)
     
@@ -956,23 +1033,44 @@ def _pil_text_thumbnail(text: str, out_path: str, width: int = 1280, height: int
         print(f"[thumb] PIL fallback failed: {e}")
         return False
 
-def generate_thumbnail_with_fallbacks(topic: str, out_path: str, label: str = "learn") -> bool:
-    """Try Pollinations → Hugging Face → Cloudflare → PIL in order."""
+def generate_thumbnail_with_fallbacks(topic: str, out_path: str, label: str = "learn", *, width: int = 1280, height: int = 720) -> bool:
+    """Try Google Gemini → Pollinations → Hugging Face → Cloudflare → PIL in order.
+    Width/height control the target size for all generators.
+    """
     prompt = (
         f"clean minimal educational thumbnail for: {topic} ({label}), without any text, "
         "letters, words, captions, logos, watermarks, signatures, signage, title"
     )
+    # Env switches: if disabled, short-circuit to PIL fallback
+    try:
+        def _is_off(val: str) -> bool:
+            return str(val or "").strip().lower() in {"0", "false", "off", "no"}
+
+        # Per-label override takes precedence over global
+        per_label = os.getenv(f"{str(label or '').upper()}_THUMBNAIL_AI", "")
+        global_flag = os.getenv("THUMBNAIL_AI", "")
+        if _is_off(per_label) or (_is_off(global_flag) and per_label == ""):
+            return _pil_text_thumbnail(topic, out_path, width=width, height=height, scale=5.0)
+    except Exception:
+        # On any error evaluating flags, continue with normal flow
+        pass
+    # 0) Google Gemini (image preview)
+    try:
+        if _generate_google_image(topic, out_path, width=width, height=height):
+            return True
+    except Exception:
+        pass
     # 1) Pollinations
-    if _generate_pollinations_image(prompt, out_path):
+    if _generate_pollinations_image(prompt, out_path, width=width, height=height):
         return True
     # 2) Hugging Face
-    if _generate_hf_image(prompt, out_path):
+    if _generate_hf_image(prompt, out_path, width=width, height=height):
         return True
     # 3) Cloudflare (temporarily set size via env override)
     old_w = os.getenv("CLOUDFLARE_IMG_W")
     old_h = os.getenv("CLOUDFLARE_IMG_H")
-    os.environ["CLOUDFLARE_IMG_W"] = "1280"
-    os.environ["CLOUDFLARE_IMG_H"] = "720"
+    os.environ["CLOUDFLARE_IMG_W"] = str(int(width))
+    os.environ["CLOUDFLARE_IMG_H"] = str(int(height))
     try:
         if generate_cloudflare_image(prompt, out_path):
             return True
@@ -986,7 +1084,7 @@ def generate_thumbnail_with_fallbacks(topic: str, out_path: str, label: str = "l
         else:
             os.environ.pop("CLOUDFLARE_IMG_H", None)
     # 4) PIL fallback (5x larger font)
-    return _pil_text_thumbnail(topic, out_path, scale=5.0)
+    return _pil_text_thumbnail(topic, out_path, width=width, height=height, scale=5.0)
 
 def generate_cloudflare_image(prompt: str, out_path: str, seed: Optional[int] = None) -> bool:
     """Generate an image via Cloudflare AI and save to out_path.
@@ -1318,11 +1416,19 @@ app.include_router(lites_router)
 from .mlites import router as mlites_router
 app.include_router(mlites_router)
 
+# Include mlites_beauty router (stock-video-based beauty pipeline)
+from .mlites_beauty import router as mlites_beauty_router
+app.include_router(mlites_beauty_router)
+
 # Configure CORS with specific allowed origins and credentials
 
 # Include routers
 app.include_router(quiz.router)
 app.include_router(tutor.router)
+app.include_router(preferences.router)
+
+# SSE broker for progress updates
+from .services.sse_broker import broker
 
 class LearnVideoTask:
     def __init__(self, topic: str, complexity_level: int = 3, user_email: str = None, user_id: Optional[int] = None, tags: Optional[List[str]] = None):
@@ -1336,18 +1442,54 @@ class LearnVideoTask:
         # Optional precomputed tags from request
         self.tags: Optional[List[str]] = tags
 
+        # progress tracking
+        self._t0 = time.time()
+
+    def _publish_progress(self, stage: str, pct: float, detail: str = "", eta_ms: Optional[int] = None) -> None:
+        """Publish a progress event via SSE for this user, if user_id is available."""
+        try:
+            if not self.user_id:
+                return
+            # Simple ETA estimation based on assumed total duration
+            if eta_ms is None:
+                elapsed = max(0.0, time.time() - self._t0)
+                # assume typical total around 90s; guard rails 30..240s
+                assumed_total = 90.0
+                remaining = max(0.0, assumed_total * (max(0.0, 100.0 - pct) / 100.0))
+                eta_ms = int(remaining * 1000)
+            payload = {
+                "stage": stage,
+                "pct": max(0.0, min(100.0, float(pct))),
+                "eta_ms": int(eta_ms),
+                "detail": detail or "",
+                "topic": self.topic,
+                "ts": self.timestamp,
+                "kind": "learn",
+            }
+            import asyncio as _aio
+            try:
+                _ = _aio.get_running_loop()
+                _aio.create_task(broker.publish_json(int(self.user_id), "learn_progress", payload))
+            except RuntimeError:
+                _aio.run(broker.publish_json(int(self.user_id), "learn_progress", payload))
+        except Exception:
+            # best-effort; do not crash task on progress errors
+            pass
+
     def process(self):
         """Process the video generation for the learn endpoint (synchronous)."""
         try:
             # Create output directory
             self.output_dir = f"generated/learn_{self.safe_topic}_{self.timestamp}"
             os.makedirs(self.output_dir, exist_ok=True)
+            self._publish_progress("start", 2.0, "Starting learn video job")
             
             # Generate slides (similar to quiz pipeline)
             print(f"\n1️⃣ Generating slides for topic: {self.topic}")
             slides = slidegen.generate_learn_slides(self.topic, self.complexity_level)
             if not slides:
                 raise ValueError("No slides were generated")
+            self._publish_progress("slides", 15.0, f"Generated {len(slides)} slides")
             
             # Debug: Print the generated slides
             print("\n📄 Generated slides content:")
@@ -1381,11 +1523,13 @@ class LearnVideoTask:
                         narrations = narrations[:len(slides)]
                 
                 print(f"✅ Generated {len(narrations)} narrations")
+                self._publish_progress("narration", 28.0, f"Generated {len(narrations)} narrations")
                 
             except Exception as e:
                 print(f"❌ Error generating narrations: {str(e)}")
                 print("⚠️ Using default narrations")
                 narrations = [f"Please review the content on this slide about {self.topic}."] * len(slides)
+                self._publish_progress("narration_fallback", 25.0, "Using default narrations")
             
             # Append a closing endcard slide and narration
             try:
@@ -1445,6 +1589,7 @@ class LearnVideoTask:
             if not os.path.exists(md_file):
                 raise FileNotFoundError(f"Failed to save slides to {md_file}")
             print(f"✅ Saved slides to {md_file}")
+            self._publish_progress("slides_saved", 32.0, "Slides saved to markdown")
             
             # Generate images using Python fallback
             print("\n4️⃣ Generating slide images using Python fallback...")
@@ -1551,6 +1696,7 @@ class LearnVideoTask:
                         print(f"(Learn) Title slide created: {title_png_path}")
                     except Exception as te:
                         print(f"⚠️ (Learn) Failed to create title slide: {te}")
+                self._publish_progress("title_slide", 38.0, "Title slide prepared")
             except Exception as e:
                 print(f"⚠️ (Learn) Unexpected error while creating title slide: {e}")
 
@@ -1674,6 +1820,13 @@ class LearnVideoTask:
                             text_color=text_col,
                             image_alpha=img_alpha,
                         )
+                        # Progress within image generation block (40% -> 65%)
+                        try:
+                            pct_base, pct_end = 40.0, 65.0
+                            pct = pct_base + (pct_end - pct_base) * (i / max(1, len(slide_contents)))
+                            self._publish_progress("images", pct, f"Generated slide image {i}/{len(slide_contents)}")
+                        except Exception:
+                            pass
                     except Exception as e:
                         raise RuntimeError(f"Failed to generate slide {i}")
                 
@@ -1681,8 +1834,9 @@ class LearnVideoTask:
                 image_files = sorted([str(f) for f in Path(image_dir).glob("*.png")])
                 if not image_files:
                     raise FileNotFoundError("No slide images were generated")
-                    
+                
                 print(f"✅ Generated {len(image_files)} slide images using Python fallback")
+                self._publish_progress("images_done", 66.0, f"Generated {len(image_files)} images")
                 
             except Exception as e:
                 print(f"❌ Error in Python fallback slide generation: {str(e)}")
@@ -1741,6 +1895,7 @@ class LearnVideoTask:
                 
                 image_files = image_files[:min_length]
                 audio_files = audio_files[:min_length]
+                self._publish_progress("audio", 78.0, f"Prepared {len(audio_files)} audio files")
                 
             except Exception as e:
                 print(f"❌ Error in audio generation or file matching: {str(e)}")
@@ -1750,12 +1905,14 @@ class LearnVideoTask:
             print("\n7️⃣ Generating video...")
             video_filename = f"learn_{self.safe_topic}_{self.timestamp}.mp4"
             video_path = os.path.join(self.output_dir, video_filename)
+            self._publish_progress("video_start", 82.0, "Stitching video")
             
             # Ensure we have matching number of images and audio files
             min_length = min(len(image_files), len(audio_files))
             if min_length == 0:
                 raise ValueError("No valid slides or audio files found")
-                
+            
+    
             image_files = image_files[:min_length]
             audio_files = audio_files[:min_length]
             
@@ -1780,6 +1937,7 @@ class LearnVideoTask:
                     raise FileNotFoundError(f"Failed to create video at {video_path}")
                 
                 print(f"✅ Video generated: {video_path}")
+                self._publish_progress("video", 92.0, "Video generated")
             except Exception as e:
                 print(f"❌ Error generating video: {str(e)}")
                 raise
@@ -1794,6 +1952,7 @@ class LearnVideoTask:
                     print(f"❌ Failed to generate thumbnail even after fallbacks: {thumb_path}")
             else:
                 print(f"✅ Thumbnail saved: {thumb_path}")
+            self._publish_progress("thumb", 95.0, "Thumbnail ready")
         except Exception as e:
             error_msg = f"Error in LearnVideoTask: {str(e)}"
             print(error_msg)
@@ -1803,6 +1962,10 @@ class LearnVideoTask:
                 "video_url": ""  # Explicitly include video_url for consistent response structure
             }
             print(f"❌ Returning error response: {response}")
+            try:
+                self._publish_progress("error", 100.0, error_msg, eta_ms=0)
+            except Exception:
+                pass
             return response
 
         # If in production, upload artifacts to GCS and use public HTTPS URLs
@@ -1832,6 +1995,7 @@ class LearnVideoTask:
                 gcs_used = True
             except Exception as e:
                 print(f"⚠️ GCS upload failed (learn): {e}")
+        self._publish_progress("upload_done", 97.0, "Upload step finished")
 
         # Create a URL for the video (prefer GCS in production)
         if gcs_used and gcs_video_https:
@@ -1970,6 +2134,11 @@ class LearnVideoTask:
             "message": "Video generated successfully"
         }
         print(f"✅ Returning success response: {response}")
+        # Final progress event
+        try:
+            self._publish_progress("done", 100.0, "Video generated successfully", eta_ms=0)
+        except Exception:
+            pass
         return response
 
 
@@ -2046,6 +2215,17 @@ async def learn_topic_api_alias(learn_request: LearnRequest, current_user: model
     return await learn_topic(learn_request, current_user)  # delegate to primary handler
 
 
+@app.get("/api/learn/stream")
+async def learn_stream(user_id: Optional[int] = None):
+    """
+    Server-Sent Events stream for Learn progress updates per user.
+    Usage: new EventSource(`/api/learn/stream?user_id=123`)
+    """
+    if user_id is None:
+        raise HTTPException(status_code=400, detail="user_id is required")
+    return StreamingResponse(broker.subscribe(int(user_id)), media_type="text/event-stream")
+
+
 class LiteVideoTask:
     def __init__(self, topic: str, user_email: str = None, user_id: Optional[int] = None):
         self.topic = topic
@@ -2081,6 +2261,7 @@ class LiteVideoTask:
             # Use Google Gemini image generation for Lites thumbnail with PIL fallback
             print(f"[lites][google] generating thumbnail via Google for topic='{self.topic}' -> {out_path}")
             ok = _generate_google_image(self.topic, out_path, width=1280, height=720)
+            # If OpenRouter fails, fall back to a simple PIL thumbnail
             if not ok:
                 _pil_text_thumbnail(self.topic, out_path, width=1280, height=720, scale=5.0)
         except Exception:
@@ -2335,7 +2516,8 @@ class LiteVideoTask:
                         try:
                             subprocess.run([
                                 "ffmpeg", "-y", "-i", audio_files[i], "-t", f"{remain:.2f}",
-                                "-c:a", "libmp3lame", str(trimmed)
+                                "-c:a", "libmp3lame",
+                                str(trimmed)
                             ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                             selected_imgs.append(img_files[i])
                             selected_mp3s.append(str(trimmed))
@@ -2912,8 +3094,8 @@ def generate(req: QuizAnswerRequest, bg: BackgroundTasks):
                                 "format=duration", "-of", "default=noprint_wrappers=1:nokey=1",
                                 mp3_path
                             ]).decode().strip())
-                        except Exception as e:
-                            print(f"⚠️ Error getting duration for {mp3_path}: {e}")
+                        except Exception:
+                            print(f"⚠️ Error getting duration for {mp3_path}:")
                             duration = 5.0  # Fallback duration
                     else:
                         duration = 5.0  # Default duration if no audio
@@ -2957,8 +3139,8 @@ def generate(req: QuizAnswerRequest, bg: BackgroundTasks):
                         ], capture_output=True, text=True, check=True)
                         duration = float(result.stdout.strip())
                         print(f"  🎧 Audio duration: {duration:.2f}s")
-                    except Exception as e:
-                        print(f"⚠️  Could not get audio duration: {e}")
+                    except Exception:
+                        print(f"⚠️  Could not get audio duration:")
                         duration = 5.0  # Default duration
                     
                     # Create video segment with audio
@@ -3314,7 +3496,8 @@ def _generate_video_from_request(request: "VideoRequest") -> Dict[str, Any]:
             thumb_ok = False
             # Try Pollinations (aligns with learn flow) with basic retries
             try:
-                prompt = f"clean minimal educational thumbnail for: {request.topic} (quiz review), without any text, letters, words, captions, logos, watermarks, signatures, signage, title"
+                prompt = f"clean minimal educational thumbnail for: {request.topic} (quiz review), without any text, "
+                "letters, words, captions, logos, watermarks, signatures, signage, title"
                 encoded = urllib.parse.quote(prompt[:200])
                 url = f"https://image.pollinations.ai/prompt/{encoded}"
                 headers = {"User-Agent": "Johnify/1.0 (+https://johnify.com)"}
@@ -3438,7 +3621,7 @@ def _generate_video_from_request(request: "VideoRequest") -> Dict[str, Any]:
                         db.add(post)
                         try:
                             db.commit()
-                            db.refresh(post)
+                            db.refresh(post)  # Refresh to get the generated ID
                             print(f"✅ Saved quiz post to user_posts id={post.post_id} type='tutor'")
                         except IntegrityError as ie:
                             db.rollback()

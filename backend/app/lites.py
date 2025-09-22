@@ -7,11 +7,15 @@ import time
 import os
 import json
 import subprocess
+import random
+import threading
+from collections import deque
 from PIL import Image, ImageDraw, ImageFont
 import google.generativeai as genai
 import logging
 from sqlalchemy import text
 from .database import Session
+from . import gcs_utils
 
 # Independent Lites router (no imports from learn or tutor)
 router = APIRouter(prefix="/api/lites", tags=["lites"])  
@@ -25,9 +29,67 @@ if not logger.handlers:
     logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
-# Configurable sub-topics table name (existing in DB)
-# Default updated to new table name: public.lites_sub_topics
-SUB_TOPICS_TABLE = os.getenv("LITES_SUB_TOPICS_TABLE", "public.lites_sub_topics")
+# Global concurrency controls
+_TTS_MAX = int(os.getenv("TTS_MAX_CONCURRENCY", "3") or "3")
+_GEM_MAX = int(os.getenv("GEMINI_MAX_CONCURRENCY", "2") or "2")
+_TTS_SEM = threading.BoundedSemaphore(max(1, _TTS_MAX))
+_GEM_SEM = threading.BoundedSemaphore(max(1, _GEM_MAX))
+
+"""Gemini rate limiter (requests per 60s). Primary and two fallbacks have distinct RPMs."""
+_GEM_PRIMARY_MODEL = os.getenv("GEMINI_PRIMARY_MODEL", "models/gemini-2.5-flash-lite")
+_GEM_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "models/gemini-2.0-flash-lite")
+_GEM_FALLBACK2_MODEL = os.getenv("GEMINI_FALLBACK2_MODEL", "models/gemini-2.0-flash")
+_GEM_RPM = int(os.getenv("GEMINI_RPM", "15") or "15")  # primary default 15 rpm
+_GEM_FALLBACK_RPM = int(os.getenv("GEMINI_FALLBACK_RPM", "30") or "30")
+_GEM_FALLBACK2_RPM = int(os.getenv("GEMINI_FALLBACK2_RPM", "15") or "15")
+_GEM_WINDOW_SEC = 60.0
+
+# per-model sliding window state
+_GEM_TIMES_PRIMARY = deque()  # type: ignore[var-annotated]
+_GEM_TIMES_FALLBACK = deque()  # type: ignore[var-annotated]
+_GEM_TIMES_FALLBACK2 = deque()  # type: ignore[var-annotated]
+_GEM_TIMES_LOCK = threading.Lock()
+
+def _gemini_acquire_slot_for(model_name: str):
+    if model_name == _GEM_FALLBACK_MODEL:
+        rpm = _GEM_FALLBACK_RPM
+        times = _GEM_TIMES_FALLBACK
+    elif model_name == _GEM_FALLBACK2_MODEL:
+        rpm = _GEM_FALLBACK2_RPM
+        times = _GEM_TIMES_FALLBACK2
+    else:
+        rpm = _GEM_RPM
+        times = _GEM_TIMES_PRIMARY
+    while True:
+        now = time.time()
+        with _GEM_TIMES_LOCK:
+            while times and (now - times[0]) >= _GEM_WINDOW_SEC:
+                times.popleft()
+            if len(times) < max(1, rpm):
+                times.append(now)
+                return
+            oldest = times[0]
+            wait_for = max(0.0, _GEM_WINDOW_SEC - (now - oldest))
+        time.sleep(min(wait_for + random.uniform(0.0, 0.1), 2.0))
+
+def _sleep_backoff(attempt: int, base: float = 0.5, factor: float = 2.0, cap: float = 8.0, jitter: float = 0.25) -> None:
+    delay = min(cap, base * (factor ** (attempt - 1)))
+    # add jitter +/- up to jitter*delay
+    jitter_amt = delay * jitter
+    time.sleep(max(0.0, delay + random.uniform(-jitter_amt, jitter_amt)))
+
+# Sub-topics table: match MLites exactly
+SUB_TOPICS_TABLE = "public.lites_sub_topics"
+
+# Determine the root directory for generated artifacts consistently across environments
+def _get_generated_root() -> Path:
+    ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
+    IS_PRODUCTION = ENVIRONMENT == "production"
+    if IS_PRODUCTION:
+        base_root = Path("/tmp")
+    else:
+        base_root = Path(__file__).resolve().parent.parent.parent
+    return (base_root / "generated").resolve()
 
 # SSE broker (per-user streams)
 try:
@@ -44,6 +106,29 @@ def _sanitize_filename(filename: str) -> str:
     filename = re.sub(r'[\\/*?:"<>| ]', '_', filename)
     filename = re.sub(r'_+', '_', filename).strip('_')
     return filename or "lite"
+
+def _strip_placeholder_bullets(text: str) -> str:
+    """Remove generic placeholder bullets such as '- Point 1/2/3', 'Key idea 1', 'Step 1', etc."""
+    if not text:
+        return text
+    import re as _re
+    lines = text.replace('\r\n', '\n').split('\n')
+    patt = _re.compile(r"^\s*-\s*(point\s*\d+|key idea\s*\d+|step\s*\d+|example\s*\d+|takeaway\s*\d+|overview|additional information)\s*$", _re.IGNORECASE)
+    out = []
+    for ln in lines:
+        if patt.match(ln):
+            continue
+        out.append(ln)
+    # collapse extra blank lines
+    cleaned = []
+    prev_blank = False
+    for ln in out:
+        blank = not ln.strip()
+        if blank and prev_blank:
+            continue
+        cleaned.append(ln)
+        prev_blank = blank
+    return "\n".join(cleaned).strip()
 
 def _ensure_dirs(base: Path) -> Dict[str, Path]:
     base.mkdir(parents=True, exist_ok=True)
@@ -147,8 +232,7 @@ def _create_silent_video_from_image(image_path: Path, out_path: Path, duration: 
         "-loop", "1", "-t", str(max(1.0, duration)), "-i", str(image_path),
         "-f", "lavfi", "-t", str(max(1.0, duration)), "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
         "-c:v", "libx264", "-pix_fmt", "yuv420p",
-        "-vf", "fps=30,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1",
-        "-c:a", "aac", "-shortest",
+        "-c:a", "aac", "-ar", "44100", "-ac", "2", "-b:a", "128k", "-shortest",
         str(out_path)
     ]
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
@@ -163,7 +247,7 @@ def _gemini_generate(topic: str) -> Dict[str, Any]:
     if not api_key:
         raise RuntimeError("GOOGLE_API_KEY not set for Gemini")
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("models/gemini-2.5-flash-lite")
+    model_name = _GEM_PRIMARY_MODEL
     prompt = (
         "You are generating concise educational slide content for the topic.\n"
         "Return ONLY a strict JSON object with keys: slides, narrations, tags.\n"
@@ -172,13 +256,55 @@ def _gemini_generate(topic: str) -> Dict[str, Any]:
         "- tags: array of 5-10 short keywords (lowercase, no punctuation).\n"
         f"Topic: {topic}\n"
     )
-    resp = model.generate_content(prompt)
-    text = ""
-    try:
-        text = resp.text or ""
-    except Exception:
-        text = str(resp)
 
+    # Retry Gemini call with semaphore limiting concurrency
+    attempts = int(os.getenv("GEMINI_MAX_RETRIES", "5") or "5")
+    text = ""
+    last_err: Optional[Exception] = None
+    for attempt in range(1, max(1, attempts) + 1):
+        # Respect per-model RPM before attempting
+        _gemini_acquire_slot_for(model_name)
+        _GEM_SEM.acquire()
+        try:
+            model = genai.GenerativeModel(model_name)
+            resp = model.generate_content(prompt)
+            try:
+                text = resp.text or ""
+            except Exception:
+                text = str(resp)
+            last_err = None
+            break
+        except Exception as e:
+            last_err = e
+            logger.warning(f"Gemini generate attempt {attempt} failed: {e}")
+            # If rate limited, switch to fallback model and continue
+            emsg = str(e)
+            if ("429" in emsg or "Rate" in emsg or "rate" in emsg):
+                if model_name == _GEM_PRIMARY_MODEL:
+                    logger.info(f"Switching Gemini model to fallback1 {_GEM_FALLBACK_MODEL} due to rate limit")
+                    model_name = _GEM_FALLBACK_MODEL
+                    _GEM_SEM.release()
+                    _sleep_backoff(attempt, base=0.4, factor=1.8, cap=8.0, jitter=0.3)
+                    continue
+                elif model_name == _GEM_FALLBACK_MODEL:
+                    logger.info(f"Switching Gemini model to fallback2 {_GEM_FALLBACK2_MODEL} due to rate limit")
+                    model_name = _GEM_FALLBACK2_MODEL
+                    _GEM_SEM.release()
+                    _sleep_backoff(attempt, base=0.4, factor=1.8, cap=8.0, jitter=0.3)
+                    continue
+            if attempt >= attempts:
+                _GEM_SEM.release()
+                raise
+            _GEM_SEM.release()
+            _sleep_backoff(attempt, base=0.6, factor=2.0, cap=10.0, jitter=0.35)
+            continue
+        finally:
+            # If no exception, release here; on exception we already released above
+            try:
+                if last_err is None:
+                    _GEM_SEM.release()
+            except Exception:
+                pass
     # Try to extract JSON
     data: Dict[str, Any] = {"slides": [], "narrations": [], "tags": []}
     try:
@@ -238,14 +364,38 @@ def _narrations_to_mp3(narrations: List[str], out_dir: str) -> Path:
         pitch=0.0,
         sample_rate_hertz=44100,
     )
+    attempts = int(os.getenv("TTS_MAX_RETRIES", "5") or "5")
     for i, narration in enumerate(narrations):
         synthesis_input = texttospeech.SynthesisInput(text=narration)
-        response = client.synthesize_speech(
-            input=synthesis_input, voice=voice, audio_config=audio_config
-        )
-        mp3_path = out_p / f"s{i+1:03d}.mp3"
-        mp3_path.write_bytes(response.audio_content)
-        logger.info(f"Created {mp3_path}")
+        last_err: Optional[Exception] = None
+        for attempt in range(1, max(1, attempts) + 1):
+            _TTS_SEM.acquire()
+            try:
+                response = client.synthesize_speech(
+                    input=synthesis_input, voice=voice, audio_config=audio_config
+                )
+                mp3_path = out_p / f"s{i+1:03d}.mp3"
+                mp3_path.write_bytes(response.audio_content)
+                logger.info(f"Created {mp3_path}")
+                last_err = None
+                break
+            except Exception as e:
+                last_err = e
+                logger.warning(f"TTS synth attempt {attempt} failed: {e}")
+                if attempt >= attempts:
+                    _TTS_SEM.release()
+                    raise
+                _TTS_SEM.release()
+                _sleep_backoff(attempt, base=0.6, factor=2.0, cap=10.0, jitter=0.35)
+                continue
+            finally:
+                try:
+                    if last_err is None:
+                        _TTS_SEM.release()
+                except Exception:
+                    pass
+        # tiny spacing to avoid burst
+        time.sleep(random.uniform(0.05, 0.2))
     return out_p
 
 
@@ -254,10 +404,13 @@ def _get_audio_duration(mp3: Path) -> float:
     try:
         result = subprocess.run(
             ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', str(mp3)],
-            capture_output=True, text=True
+            capture_output=True, text=True, timeout=15
         )
         data = json.loads(result.stdout or '{}')
         return float(data.get('format', {}).get('duration', 0.0))
+    except subprocess.TimeoutExpired:
+        logger.warning(f"ffprobe timeout when probing duration for {mp3}")
+        return 0.0
     except Exception as e:
         logger.warning(f"duration error: {e}")
         return 0.0
@@ -269,8 +422,24 @@ def _create_slide_video(img: Path, mp3: Path, out_mp4: Path, duration_override: 
             'ffmpeg','-y','-loop','1','-i',str(img),'-i',str(mp3),'-t',str(duration),
             '-c:v','libx264','-preset','ultrafast','-tune','stillimage','-crf','28','-r','30','-threads','1','-pix_fmt','yuv420p',
             '-c:a','aac','-ar','44100','-ac','2','-b:a','128k','-shortest', str(out_mp4)
-        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, timeout=180)
         return out_mp4
+    except subprocess.TimeoutExpired:
+        # Fallback: create a short silent segment to avoid stalling the pipeline
+        try:
+            fallback_dur = 3.0
+            subprocess.run([
+                'ffmpeg','-y','-loop','1','-i',str(img),
+                '-f','lavfi','-i','anullsrc=channel_layout=stereo:sample_rate=44100',
+                '-t',str(fallback_dur),
+                '-c:v','libx264','-preset','ultrafast','-tune','stillimage','-crf','28','-r','30','-threads','1','-pix_fmt','yuv420p',
+                '-c:a','aac','-ar','44100','-ac','2','-b:a','128k','-shortest', str(out_mp4)
+            ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, timeout=60)
+            logger.warning(f"ffmpeg segment timeout for audio {mp3}; wrote silent fallback segment {out_mp4}")
+            return out_mp4
+        except Exception as e2:
+            logger.error(f"silent fallback segment failed for {out_mp4}: {e2}")
+            raise
     except Exception as e:
         logger.error(f"segment error: {e}")
         raise
@@ -300,9 +469,14 @@ def _stitch_images_and_audio_to_video(img_dir: Path, aud_dir: Path, out_mp4: Pat
         segs = []
         for i in range(pair_n):
             seg = temp_dir / f"seg_{i+1:03d}.mp4"
-            orig = _get_audio_duration(mp3s[i])
+            mp3_i = mp3s[i]
+            # Avoid probing the synthetic silent intro "s000.mp3" (use fixed 1.5s)
+            if mp3_i.name == "s000.mp3":
+                orig = 1.5
+            else:
+                orig = _get_audio_duration(mp3_i)
             use_dur = min(per_cap, max(min_per, orig))
-            _create_slide_video(imgs[i], mp3s[i], seg, duration_override=use_dur)
+            _create_slide_video(imgs[i], mp3_i, seg, duration_override=use_dur)
             segs.append(seg)
         if not segs:
             raise ValueError('No segments created')
@@ -315,7 +489,7 @@ def _stitch_images_and_audio_to_video(img_dir: Path, aud_dir: Path, out_mp4: Pat
             'ffmpeg','-y','-f','concat','-safe','0','-i',str(concat),
             '-c:v','libx264','-preset','ultrafast','-crf','28','-r','30','-threads','1','-pix_fmt','yuv420p',
             '-c:a','aac','-ar','44100','-ac','2','-b:a','128k','-movflags','+faststart', str(out_mp4)
-        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, timeout=300)
         logger.info(f"Final video: {out_mp4}")
         return out_mp4
     finally:
@@ -450,10 +624,7 @@ def _ensure_lites_tables(db) -> None:
 def _ensure_sub_topics_table(db) -> None:
     """Ensure the configured sub-topics table exists with expected schema and unique constraint."""
     try:
-        # Only allow safe known table names
         table = SUB_TOPICS_TABLE
-        if table not in {"public.lites_sub_topics", os.getenv("LITES_SUB_TOPICS_TABLE", "public.lites_sub_topics")}:
-            table = "public.lites_sub_topics"
         # Create table and unique index if they don't exist
         db.execute(text(
             f"""
@@ -465,30 +636,14 @@ def _ensure_sub_topics_table(db) -> None:
             );
             CREATE UNIQUE INDEX IF NOT EXISTS uq_lites_sub_topics_topic_sub
                 ON {table} (topic_id, sub_topic);
-            -- Ensure 'id' column has a default/identity even if the table pre-existed without it
-            DO $$
-            DECLARE
-                v_schema text := split_part('{table}', '.', 1);
-                v_table  text := split_part('{table}', '.', 2);
-                v_has_default boolean;
-            BEGIN
-                SELECT (column_default IS NOT NULL) INTO v_has_default
-                FROM information_schema.columns
-                WHERE table_schema = v_schema AND table_name = v_table AND column_name = 'id'
-                LIMIT 1;
-                IF NOT COALESCE(v_has_default, false) THEN
-                    BEGIN
-                        EXECUTE format('ALTER TABLE %I.%I ALTER COLUMN id ADD GENERATED BY DEFAULT AS IDENTITY', v_schema, v_table);
-                    EXCEPTION WHEN duplicate_object THEN
-                        -- already identity/default; ignore
-                        NULL;
-                    END;
-                END IF;
-            END $$;
             """
         ))
         db.commit()
     except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
         logger.warning(f"ensure sub-topics table failed: {e}")
 
 def _get_or_create_topic_id(db, user_id: int, topic: str, minutes_per_day: int) -> Optional[int]:
@@ -604,19 +759,8 @@ async def upsert_lites_topics(req: LitesTopicsUpsertRequest):
             ), {"uid": int(req.user_id), "topic": it["topic"], "mpd": int(it["minutes_per_day"])})
         db.commit()
 
-        # Ensure a default sub-topic row exists for each topic (idempotent)
-        for it in items:
-            try:
-                tid = _get_or_create_topic_id(db, int(req.user_id), it["topic"], int(it["minutes_per_day"]))
-                if tid is not None:
-                    # Use the base topic string as an initial sub-topic entry
-                    _insert_lite_sub_topic(db, int(tid), it["topic"])
-            except Exception as e:
-                logger.warning(f"sub-topic insert during upsert ignored for topic='{it['topic']}': {e}")
-                try:
-                    db.rollback()
-                except Exception:
-                    pass
+        # Do NOT create any default sub-topic rows here. Sub-topics are inserted only when
+        # actual lites are generated with a concrete sub-topic, mirroring mlites behavior.
 
         # Return updated list
         rows = db.execute(text(
@@ -661,7 +805,7 @@ async def create_lites(req: CreateLitesRequest, bg: BackgroundTasks):
 
     def _run(items: List[Dict[str, Any]], user_email: Optional[str], user_id: Optional[int], ts: int):
         try:
-            base_dir = Path("generated")
+            base_dir = _get_generated_root()
             base_dir.mkdir(parents=True, exist_ok=True)
             for item in items:
                 tp = item["topic"]
@@ -672,6 +816,7 @@ async def create_lites(req: CreateLitesRequest, bg: BackgroundTasks):
                     if not isinstance(sub, str) or not sub.strip():
                         continue
                     combined = f"{tp} - {sub.strip()}"
+                    sub_only = sub.strip()
                     safe = _sanitize_filename(combined)
                     out_dir = base_dir / f"lites_{safe}_{ts}"
                     dirs = _ensure_dirs(out_dir)
@@ -714,14 +859,14 @@ async def create_lites(req: CreateLitesRequest, bg: BackgroundTasks):
                             logger.info(f"Skipped duplicate lites content for user={user_id} topic='{combined}'")
                             try:
                                 dbcheck.close()
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logger.warning(f"lites: failed to update user_posts with sub_topic_id for post_path={post_path}: {e}")
                             # still insert sub-topic link to track coverage
                             try:
                                 dbt = Session()
                                 tid = _get_or_create_topic_id(dbt, int(user_id), tp, mpd)
                                 if tid is not None:
-                                    _insert_lite_sub_topic(dbt, int(tid), combined)
+                                    _insert_lite_sub_topic(dbt, int(tid), sub_only)
                             except Exception:
                                 pass
                             finally:
@@ -753,9 +898,16 @@ async def create_lites(req: CreateLitesRequest, bg: BackgroundTasks):
                                 is_brand_endcard = any(
                                     (ln.strip().lower().startswith('## johnify')) for ln in s.split('\n')[:3]
                                 )
-                                if not has_bullets and not is_brand_endcard:
-                                    s += "\n- Point 1\n- Point 2\n- Point 3"
-                                s = '\n'.join([ln for ln in s.split('\n') if ln.strip()])
+                                if is_brand_endcard:
+                                    # Force endcard to contain only the title, no bullets
+                                    title_only = next((ln for ln in s.split('\n') if ln.strip().startswith('## ')), '## Johnify')
+                                    s = title_only.strip()
+                                else:
+                                    if not has_bullets:
+                                        s += "\n- Point 1\n- Point 2\n- Point 3"
+                                    # Strip any placeholder bullets that might have been added or leaked
+                                    s = _strip_placeholder_bullets(s)
+                                    s = '\n'.join([ln for ln in s.split('\n') if ln.strip()])
                                 f.write(f"{s}\n\n<!-- NARRATION: {n} -->\n")
                     except Exception as e:
                         logger.error(f"failed to write slides.md: {e}")
@@ -779,11 +931,15 @@ async def create_lites(req: CreateLitesRequest, bg: BackgroundTasks):
                             title_line = ""
                             for ln in b2.split('\n')[:3]:
                                 if ln.strip().startswith('## '):
-                                    title_line = ln.strip()[3:].strip()
-                                    break
+                                    title_line = ln.strip()[3:].strip(); break
                             if not title_line:
                                 title_line = "Slide"
                             body = '\n'.join([ln for ln in b2.split('\n') if not ln.strip().startswith('## ')])
+                            # Ensure placeholder bullets are removed; brand endcard has no body
+                            if title_line.strip().lower() == 'johnify':
+                                body = ''
+                            else:
+                                body = _strip_placeholder_bullets(body)
                             rendered.append((title_line, body))
                         for idx, (ti, body) in enumerate(rendered, 1):
                             outp = images_dir / f"slide_{idx:03d}.png"
@@ -843,6 +999,13 @@ async def create_lites(req: CreateLitesRequest, bg: BackgroundTasks):
                             Image.open(images_dir / "slide_000.png").convert('RGB').save(thumb, format='JPEG', quality=88)
                         elif image_files:
                             Image.open(image_files[0]).convert('RGB').save(thumb, format='JPEG', quality=88)
+                        # If still missing or tiny, use unified generator (Gemini→Pollinations→HF→CF→PIL)
+                        try:
+                            if (not thumb.exists()) or (thumb.exists() and thumb.stat().st_size < 1024):
+                                from .main import generate_thumbnail_with_fallbacks  # type: ignore
+                                _ = generate_thumbnail_with_fallbacks(tp, str(thumb), label="lites", width=1280, height=720)
+                        except Exception:
+                            pass
                     except Exception as e:
                         logger.error(f"thumbnail error: {e}")
 
@@ -850,16 +1013,15 @@ async def create_lites(req: CreateLitesRequest, bg: BackgroundTasks):
                     try:
                         if user_id is not None:
                             # Determine generated root similar to /status
-                            ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
-                            IS_PRODUCTION = ENVIRONMENT == "production"
-                            if IS_PRODUCTION:
-                                base_root = Path("/tmp")
-                            else:
-                                base_root = Path(__file__).resolve().parent.parent.parent
-                            GENERATED_ROOT = (base_root / "generated").resolve()
+                            GENERATED_ROOT = _get_generated_root()
 
                             base_url = os.getenv("BACKEND_URL", "http://localhost:8000").rstrip('/')
-                            # Compute rel paths and URLs
+
+                            # Default (dev/local) URLs based on filesystem under /videos endpoint
+                            rel_video = ""
+                            video_url = ""
+                            rel_thumb = ""
+                            thumbnail_url = ""
                             try:
                                 rel_video = video_path.resolve().relative_to(GENERATED_ROOT).as_posix()
                                 video_url = f"{base_url}/videos/{rel_video}"
@@ -867,7 +1029,6 @@ async def create_lites(req: CreateLitesRequest, bg: BackgroundTasks):
                                 rel_video = video_path.as_posix()
                                 video_url = ""
                             thumb_path = out_dir / "thumbnail.jpg"
-                            thumbnail_url = ""
                             try:
                                 if thumb_path.exists():
                                     rel_thumb = thumb_path.resolve().relative_to(GENERATED_ROOT).as_posix()
@@ -875,7 +1036,49 @@ async def create_lites(req: CreateLitesRequest, bg: BackgroundTasks):
                             except Exception:
                                 pass
 
+                            # Attempt GCS upload in production, falling back to local paths in development
                             post_path = f"generated/{rel_video}"
+                            try:
+                                # Store under content/lites with lites_* naming
+                                base_name = f"lites_{safe}_{ts}"
+                                folder = base_name  # e.g., lites_<safe>_<ts>
+                                obj_name = f"{base_name}.mp4"  # lites_<safe>_<ts>.mp4
+                                upload_v = gcs_utils.maybe_upload_and_url(
+                                    video_path,
+                                    parts=["content", "lites", folder, obj_name],
+                                    content_type="video/mp4",
+                                    make_public=True,
+                                )
+                                if upload_v and upload_v.get("used_gcs"):
+                                    video_url = str(upload_v.get("https_url") or "")
+                                    post_path = video_url  # store public HTTPS URL in production
+                                # Thumbnail upload (best-effort)
+                                if thumb_path.exists():
+                                    folder = base_name
+                                    thumb_obj = f"{base_name}_thumbnail.jpg"  # lites_<safe>_<ts>_thumbnail.jpg
+                                    upload_t = gcs_utils.maybe_upload_and_url(
+                                        thumb_path,
+                                        parts=["content", "lites", folder, thumb_obj],
+                                        content_type="image/jpeg",
+                                        make_public=True,
+                                    )
+                                    if upload_t and upload_t.get("used_gcs"):
+                                        thumbnail_url = str(upload_t.get("https_url") or "")
+                                    # Also upload a canonical copy named exactly 'thumbnail.jpg' for frontend URL derivation
+                                    try:
+                                        upload_t2 = gcs_utils.maybe_upload_and_url(
+                                            thumb_path,
+                                            parts=["content", "lites", folder, "thumbnail.jpg"],
+                                            content_type="image/jpeg",
+                                            make_public=True,
+                                        )
+                                        if upload_t2 and upload_t2.get("used_gcs"):
+                                            # Prefer canonical URL if present
+                                            thumbnail_url = str(upload_t2.get("https_url") or thumbnail_url)
+                                    except Exception as e2:
+                                        logger.warning(f"lites: secondary thumbnail.jpg upload skipped/failed: {e2}")
+                            except Exception as e:
+                                logger.warning(f"GCS upload skipped/failure (falling back to local paths): {e}")
 
                             # Persist user_posts
                             dbp = Session()
@@ -884,14 +1087,39 @@ async def create_lites(req: CreateLitesRequest, bg: BackgroundTasks):
                             finally:
                                 dbp.close()
 
-                            # Ensure parent topic exists and insert sub-topic row
+                            # Ensure parent topic exists and insert sub-topic row; capture id for user_posts
+                            stid_val: Optional[int] = None
                             dbt = Session()
                             try:
                                 tid = _get_or_create_topic_id(dbt, int(user_id), tp, mpd)
                                 if tid is not None:
-                                    _insert_lite_sub_topic(dbt, int(tid), combined)
+                                    try:
+                                        stid_val = _get_or_create_lite_sub_topic_id(dbt, int(tid), sub_only)
+                                        if stid_val is None:
+                                            logger.info(f"lites: sub-topic id not created for topic_id={tid}, sub='{sub_only}'")
+                                    except Exception:
+                                        stid_val = None
                             finally:
                                 dbt.close()
+
+                            # Update user_posts row for this post_path with sub_topic_id if we have it
+                            try:
+                                if stid_val is not None:
+                                    dbu = Session()
+                                    try:
+                                        _ensure_user_posts_subtopic_column(dbu)
+                                        dbu.execute(text(
+                                            """
+                                            UPDATE public.user_posts
+                                            SET sub_topic_id = :stid
+                                            WHERE user_id = :uid AND post_path = :ppath AND type = 'lites'
+                                            """
+                                        ), {"stid": int(stid_val), "uid": int(user_id), "ppath": post_path})
+                                        dbu.commit()
+                                    finally:
+                                        dbu.close()
+                            except Exception:
+                                pass
 
                             payload = {
                                 "event": "lite_video",
@@ -969,6 +1197,53 @@ async def lites_diag():
         },
     }
 
+@router.get("/diag-db")
+async def lites_diag_db():
+    """Read-only DB diagnostics: checks sub-topics table existence, user_posts columns, and recent rows."""
+    db = Session()
+    try:
+        out: Dict[str, Any] = {}
+        try:
+            out["sub_topics_table"] = db.execute(text("SELECT to_regclass('public.lites_sub_topics')")).scalar()
+        except Exception as e:
+            out["sub_topics_table_error"] = str(e)
+        try:
+            cols = db.execute(text("""
+                SELECT column_name FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'user_posts'
+                ORDER BY 1
+            """)).fetchall()
+            out["user_posts_columns"] = [c[0] for c in cols]
+        except Exception as e:
+            out["user_posts_columns_error"] = str(e)
+        try:
+            rows = db.execute(text("""
+                SELECT id, topic_id, sub_topic, created_on
+                FROM public.lites_sub_topics
+                ORDER BY id DESC LIMIT 10
+            """
+            )).fetchall()
+            out["recent_sub_topics"] = [list(r) for r in rows]
+        except Exception as e:
+            out["recent_sub_topics_error"] = str(e)
+        try:
+            posts = db.execute(text("""
+                SELECT id, post_topic, type, sub_topic_id, created_on
+                FROM public.user_posts
+                WHERE type IN ('lites','mlites')
+                ORDER BY created_on DESC LIMIT 10
+            """
+            )).fetchall()
+            out["recent_posts"] = [list(r) for r in posts]
+        except Exception as e:
+            out["recent_posts_error"] = str(e)
+        return out
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
 @router.get("/status")
 async def lites_status(request: Request):
     """Check readiness of one or more Lites jobs.
@@ -989,7 +1264,7 @@ async def lites_status(request: Request):
             base_root = Path("/tmp")
         else:
             base_root = Path(__file__).resolve().parent.parent.parent
-        GENERATED_ROOT = (base_root / "generated").resolve()
+        GENERATED_ROOT = _get_generated_root()
 
         base_url = os.getenv("BACKEND_URL", "http://localhost:8000").rstrip('/')
 
@@ -1054,7 +1329,17 @@ async def lites_stream(user_id: Optional[int] = None):
     """
     if user_id is None:
         raise HTTPException(status_code=400, detail="user_id is required")
-    return StreamingResponse(broker.subscribe(int(user_id)), media_type="text/event-stream")
+    # Add standard SSE headers to avoid buffering and keep the connection alive
+    headers = {
+        "Cache-Control": "no-cache, no-transform",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    }
+    return StreamingResponse(
+        broker.subscribe(int(user_id)),
+        media_type="text/event-stream",
+        headers=headers,
+    )
 
 
 # ---- Planning and sequential generation with persistence ----
@@ -1096,8 +1381,10 @@ def _gemini_plan_subtopics(topic: str, minutes_per_day: int, count: int = 1) -> 
             if isinstance(s, str) and s.strip():
                 out.append(s.strip())
         return out or [topic]
-    except Exception:
+    except Exception as e:
+        logger.warning(f"_gemini_plan_subtopics failed: {e}")
         return [topic]
+
 
 def _insert_lite_sub_topic(db, topic_id: int, sub_topic: str) -> None:
     """Insert a sub-topic row into the configured sub-topics table.
@@ -1112,23 +1399,113 @@ def _insert_lite_sub_topic(db, topic_id: int, sub_topic: str) -> None:
         db.commit()
         logger.info("lites sub-topic insert ok (or already existed)")
     except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
         logger.exception(f"insert into sub-topics failed (table={SUB_TOPICS_TABLE}, topic_id={topic_id}, sub_topic={sub_topic}): {e}")
-        raise
+        # swallow error to avoid aborting background tasks; subsequent operations can continue
 
-def _persist_user_post(db, user_id: int, post_path: str, post_topic: str, tags: Optional[List[str]], content_json: Optional[Dict[str, Any]] = None):
+def _ensure_user_posts_subtopic_column(db) -> None:
+    """Ensure user_posts has an optional sub_topic_id column referencing lites_sub_topics(id)."""
     try:
         db.execute(text(
             """
-            INSERT INTO public.user_posts (user_id, post_path, post_topic, type, public, tags, created_on, content)
-            VALUES (:uid, :ppath, :ptopic, 'lites', TRUE, CAST(:tags AS JSONB), NOW(), :content)
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = 'public' AND table_name = 'user_posts' AND column_name = 'sub_topic_id'
+                ) THEN
+                    ALTER TABLE public.user_posts ADD COLUMN sub_topic_id INTEGER;
+                END IF;
+                -- Add FK if possible (ignore if fails due to permissions or pre-existing)
+                BEGIN
+                    ALTER TABLE public.user_posts
+                    ADD CONSTRAINT fk_user_posts_sub_topic
+                    FOREIGN KEY (sub_topic_id) REFERENCES public.lites_sub_topics(id) ON DELETE SET NULL;
+                EXCEPTION WHEN duplicate_object THEN
+                    NULL;
+                WHEN undefined_table THEN
+                    NULL;
+                END;
+            END $$;
             """
-        ), {
-            "uid": int(user_id),
-            "ppath": post_path,
-            "ptopic": post_topic,
-            "tags": json.dumps(tags or []),
-            "content": json.dumps(content_json, ensure_ascii=False) if content_json is not None else None,
-        })
+        ))
+        db.commit()
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+def _get_or_create_lite_sub_topic_id(db, topic_id: int, sub_topic: str) -> Optional[int]:
+    """Insert sub-topic if not exists and return its id. Returns None on failure."""
+    try:
+        if not sub_topic:
+            return None
+        _ensure_sub_topics_table(db)
+        # Try select existing (public.lites_sub_topics, to match mlites)
+        row = db.execute(text(
+            """
+            SELECT id FROM public.lites_sub_topics
+            WHERE topic_id = :tid AND sub_topic = :st
+            LIMIT 1
+            """
+        ), {"tid": int(topic_id), "st": sub_topic}).mappings().first()
+        if row and "id" in row:
+            return int(row["id"])  # type: ignore[index]
+        # Insert new
+        row2 = db.execute(text(
+            """
+            INSERT INTO public.lites_sub_topics (topic_id, sub_topic, created_on)
+            VALUES (:tid, :st, NOW())
+            RETURNING id
+            """
+        ), {"tid": int(topic_id), "st": sub_topic}).mappings().first()
+        db.commit()
+        return int(row2["id"]) if row2 and "id" in row2 else None  # type: ignore[index]
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return None
+
+def _persist_user_post(db, user_id: int, post_path: str, post_topic: str, tags: Optional[List[str]], content_json: Optional[Dict[str, Any]] = None, sub_topic_id: Optional[int] = None):
+    try:
+        # Best effort ensure column exists
+        try:
+            _ensure_user_posts_subtopic_column(db)
+        except Exception:
+            pass
+        if sub_topic_id is not None:
+            db.execute(text(
+                """
+                INSERT INTO public.user_posts (user_id, post_path, post_topic, type, public, tags, sub_topic_id, created_on, content)
+                VALUES (:uid, :ppath, :ptopic, 'lites', TRUE, CAST(:tags AS JSONB), :stid, NOW(), :content)
+                """
+            ), {
+                "uid": int(user_id),
+                "ppath": post_path,
+                "ptopic": post_topic,
+                "tags": json.dumps(tags or []),
+                "stid": int(sub_topic_id),
+                "content": json.dumps(content_json, ensure_ascii=False) if content_json is not None else None,
+            })
+        else:
+            db.execute(text(
+                """
+                INSERT INTO public.user_posts (user_id, post_path, post_topic, type, public, tags, created_on, content)
+                VALUES (:uid, :ppath, :ptopic, 'lites', TRUE, CAST(:tags AS JSONB), NOW(), :content)
+                """
+            ), {
+                "uid": int(user_id),
+                "ppath": post_path,
+                "ptopic": post_topic,
+                "tags": json.dumps(tags or []),
+                "content": json.dumps(content_json, ensure_ascii=False) if content_json is not None else None,
+            })
         db.commit()
     except Exception as e:
         logger.warning(f"persist user_posts with content failed, retrying without content: {e}")
@@ -1138,17 +1515,31 @@ def _persist_user_post(db, user_id: int, post_path: str, post_topic: str, tags: 
         except Exception:
             pass
         try:
-            db.execute(text(
-                """
-                INSERT INTO public.user_posts (user_id, post_path, post_topic, type, public, tags, created_on)
-                VALUES (:uid, :ppath, :ptopic, 'lites', TRUE, CAST(:tags AS JSONB), NOW())
-                """
-            ), {
-                "uid": int(user_id),
-                "ppath": post_path,
-                "ptopic": post_topic,
-                "tags": json.dumps(tags or []),
-            })
+            if sub_topic_id is not None:
+                db.execute(text(
+                    """
+                    INSERT INTO public.user_posts (user_id, post_path, post_topic, type, public, tags, sub_topic_id, created_on)
+                    VALUES (:uid, :ppath, :ptopic, 'lites', TRUE, CAST(:tags AS JSONB), :stid, NOW())
+                    """
+                ), {
+                    "uid": int(user_id),
+                    "ppath": post_path,
+                    "ptopic": post_topic,
+                    "tags": json.dumps(tags or []),
+                    "stid": int(sub_topic_id),
+                })
+            else:
+                db.execute(text(
+                    """
+                    INSERT INTO public.user_posts (user_id, post_path, post_topic, type, public, tags, created_on)
+                    VALUES (:uid, :ppath, :ptopic, 'lites', TRUE, CAST(:tags AS JSONB), NOW())
+                    """
+                ), {
+                    "uid": int(user_id),
+                    "ppath": post_path,
+                    "ptopic": post_topic,
+                    "tags": json.dumps(tags or []),
+                })
             db.commit()
         except Exception as e2:
             logger.warning(f"persist user_posts fallback failed: {e2}")
@@ -1209,7 +1600,9 @@ def _is_duplicate_content(db, user_id: int, post_topic: str, content_hash: str) 
 
 def _generate_single_lite(user_id: int, user_email: Optional[str], topic: str) -> Dict[str, Any]:
     ts = int(time.time())
-    base_dir = Path("generated")
+    # Use the same resolved generated root as elsewhere to avoid prod path mismatches
+    # (e.g., /app/generated vs /tmp/generated). See _get_generated_root().
+    base_dir = _get_generated_root()
     base_dir.mkdir(parents=True, exist_ok=True)
     safe = _sanitize_filename(topic)
     out_dir = base_dir / f"lites_{safe}_{ts}"
@@ -1256,9 +1649,19 @@ def _generate_single_lite(user_id: int, user_email: Optional[str], topic: str) -
             s = (s or "").strip()
             if s and not any(line.strip().startswith('#') for line in s.split('\n')[:3]):
                 s = f"## Slide {i+1}\n" + s
-            if not any(line.strip().startswith('-') for line in s.split('\n')):
-                s += "\n- Point 1\n- Point 2\n- Point 3"
-            s = '\n'.join([ln for ln in s.split('\n') if ln.strip()])
+            # Detect brand end-card and ensure no bullets
+            has_bullets = any(line.strip().startswith('-') for line in s.split('\n'))
+            is_brand_endcard = any(
+                (ln.strip().lower().startswith('## johnify')) for ln in s.split('\n')[:3]
+            )
+            if is_brand_endcard:
+                title_only = next((ln for ln in s.split('\n') if ln.strip().startswith('## ')), '## Johnify')
+                s = title_only.strip()
+            else:
+                if not has_bullets:
+                    s += "\n- Point 1\n- Point 2\n- Point 3"
+                s = _strip_placeholder_bullets(s)
+                s = '\n'.join([ln for ln in s.split('\n') if ln.strip()])
             f.write(f"{s}\n\n<!-- NARRATION: {n} -->\n")
 
     # render images
@@ -1280,10 +1683,18 @@ def _generate_single_lite(user_id: int, user_email: Optional[str], topic: str) -
         if not title_line:
             title_line = "Slide"
         body = '\n'.join([ln for ln in b2.split('\n') if not ln.strip().startswith('## ')])
+        if title_line.strip().lower() == 'johnify':
+            body = ''
+        else:
+            body = _strip_placeholder_bullets(body)
         rendered.append((title_line, body))
     for idx, (ti, body) in enumerate(rendered, 1):
         outp = images_dir / f"slide_{idx:03d}.png"
-        _draw_text_slide(ti, body, outp)
+        is_brand_endcard = (ti.strip().lower() == "johnify") and (not (body or "").strip())
+        if is_brand_endcard:
+            _draw_text_slide(ti, body, outp, mode="brand")
+        else:
+            _draw_text_slide(ti, body, outp)
 
     # audio
     audio_dir = dirs["audio"]
@@ -1315,25 +1726,86 @@ def _generate_single_lite(user_id: int, user_email: Optional[str], topic: str) -
         Image.open(images_dir / "slide_000.png").convert('RGB').save(thumb, format='JPEG', quality=88)
     elif image_files:
         Image.open(image_files[0]).convert('RGB').save(thumb, format='JPEG', quality=88)
+    # If still missing or too small, use unified generator (Gemini-first) at 1280x720
+    try:
+        if (not thumb.exists()) or (thumb.exists() and thumb.stat().st_size < 1024):
+            from .main import generate_thumbnail_with_fallbacks  # type: ignore
+            _ = generate_thumbnail_with_fallbacks(topic, str(thumb), label="lites", width=1280, height=720)
+    except Exception:
+        pass
 
     # URLs and post_path
     ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
     IS_PRODUCTION = ENVIRONMENT == "production"
     base_root = Path("/tmp") if IS_PRODUCTION else Path(__file__).resolve().parent.parent.parent
-    GENERATED_ROOT = (base_root / "generated").resolve()
+    GENERATED_ROOT = _get_generated_root()
     base_url = os.getenv("BACKEND_URL", "http://localhost:8000").rstrip('/')
     rel_video = video_path.resolve().relative_to((GENERATED_ROOT)).as_posix()
     video_url = f"{base_url}/videos/{rel_video}"
     thumbnail_url = ""
     if thumb.exists():
-        rel_thumb = thumb.resolve().relative_to(GENERATED_ROOT).as_posix()
+        rel_thumb = thumb.relative_to(GENERATED_ROOT).as_posix()
         thumbnail_url = f"{base_url}/videos/{rel_thumb}"
     post_path = f"generated/{rel_video}"
 
-    # persist DB
+    # Attempt GCS upload in production, falling back to local paths in development
+    try:
+        base_name = f"lites_{safe}_{ts}"
+        folder = base_name
+        obj_name = f"{base_name}.mp4"
+        upload_v = gcs_utils.maybe_upload_and_url(
+            video_path,
+            parts=["content", "lites", folder, obj_name],
+            content_type="video/mp4",
+            make_public=True,
+        )
+        if upload_v and upload_v.get("used_gcs"):
+            video_url = str(upload_v.get("https_url") or "")
+            post_path = video_url  # store public HTTPS URL in production
+        # Thumbnail upload (best-effort)
+        if thumb.exists():
+            thumb_obj = f"{base_name}_thumbnail.jpg"
+            upload_t = gcs_utils.maybe_upload_and_url(
+                thumb,
+                parts=["content", "lites", folder, thumb_obj],
+                content_type="image/jpeg",
+                make_public=True,
+            )
+            if upload_t and upload_t.get("used_gcs"):
+                thumbnail_url = str(upload_t.get("https_url") or thumbnail_url)
+            # Also upload a canonical copy named exactly 'thumbnail.jpg' for frontend URL derivation
+            try:
+                upload_t2 = gcs_utils.maybe_upload_and_url(
+                    thumb,
+                    parts=["content", "lites", folder, "thumbnail.jpg"],
+                    content_type="image/jpeg",
+                    make_public=True,
+                )
+                if upload_t2 and upload_t2.get("used_gcs"):
+                    thumbnail_url = str(upload_t2.get("https_url") or thumbnail_url)
+            except Exception as e2:
+                logger.warning(f"lites(single): secondary thumbnail.jpg upload skipped/failed: {e2}")
+    except Exception as e:
+        logger.warning(f"lites(single): GCS upload skipped/failure (falling back to local paths): {e}")
+
+    # persist DB (attempt to resolve parent topic and sub_topic id if topic is of form "Parent - Sub")
     db = Session()
     try:
-        _persist_user_post(db, user_id=user_id, post_path=post_path, post_topic=topic, tags=tags, content_json=canon_payload)
+        stid_val: Optional[int] = None
+        try:
+            parent = None
+            sub = None
+            if isinstance(topic, str) and (' - ' in topic):
+                parts = topic.split(' - ', 1)
+                parent = parts[0].strip() or None
+                sub = parts[1].strip() or None
+            if parent:
+                tid = _get_or_create_topic_id(db, int(user_id), parent, 2)
+                if tid is not None and sub:
+                    stid_val = _get_or_create_lite_sub_topic_id(db, int(tid), sub)
+        except Exception:
+            stid_val = None
+        _persist_user_post(db, user_id=user_id, post_path=post_path, post_topic=topic, tags=tags, content_json=canon_payload, sub_topic_id=stid_val)
     finally:
         db.close()
 
@@ -1416,7 +1888,12 @@ async def generate_lites(req: GenerateLitesRequest, bg: BackgroundTasks):
                 if tid is not None:
                     db2 = Session()
                     try:
-                        _insert_lite_sub_topic(db2, int(tid), topic_text)
+                        # derive sub-only text if combined form "Parent - Sub" is used
+                        sub_only = topic_text
+                        if isinstance(topic_text, str) and (' - ' in topic_text):
+                            parts = topic_text.split(' - ', 1)
+                            sub_only = (parts[1] or '').strip() or topic_text
+                        _insert_lite_sub_topic(db2, int(tid), sub_only)
                     finally:
                         db2.close()
             except Exception as e:
@@ -1424,3 +1901,65 @@ async def generate_lites(req: GenerateLitesRequest, bg: BackgroundTasks):
 
     bg.add_task(_seq_run, int(req.user_id), plans)
     return {"status": "started", "planned": len(plans)}
+
+def run_lites_for_user(user_id: int, max_per_topic: int = 1) -> Dict[str, Any]:
+    """Run Lites generation inline (non-HTTP context) for a user.
+    Mirrors the planning and sequential generation performed in generate_lites(),
+    but executes synchronously, suitable for scheduler invocation.
+    """
+    # Fetch active topics
+    db = Session()
+    try:
+        _ensure_lites_tables(db)
+        rows = db.execute(text(
+            """
+            SELECT topic_id, topic, minutes_per_day
+            FROM public.lites_topics
+            WHERE user_id = :uid AND active = TRUE
+            ORDER BY topic_id ASC
+            """
+        ), {"uid": int(user_id)}).mappings().all()
+    finally:
+        db.close()
+
+    if not rows:
+        return {"status": "skipped", "planned": 0}
+
+    # Plan subtopics
+    plans: List[Dict[str, Any]] = []
+    for r in rows:
+        parent_topic = r["topic"]
+        parent_topic_id = int(r["topic_id"]) if "topic_id" in r else None
+        mpd = int(r["minutes_per_day"])
+        subs = _gemini_plan_subtopics(parent_topic, mpd, count=max(1, int(max_per_topic)))
+        for s in subs:
+            if isinstance(s, str) and s.strip():
+                sub_topic = f"{parent_topic} - {s.strip()}"
+                plans.append({
+                    "topic_id": parent_topic_id,
+                    "sub_topic": sub_topic,
+                })
+
+    # Run sequentially inline
+    for it in plans:
+        try:
+            topic_text = it.get("sub_topic") or ""
+            if not isinstance(topic_text, str) or not topic_text.strip():
+                continue
+            _generate_single_lite(user_id=int(user_id), user_email=None, topic=topic_text)
+
+            tid = it.get("topic_id")
+            if tid is not None:
+                db2 = Session()
+                try:
+                    sub_only = topic_text
+                    if isinstance(topic_text, str) and (' - ' in topic_text):
+                        parts = topic_text.split(' - ', 1)
+                        sub_only = (parts[1] or '').strip() or topic_text
+                    _insert_lite_sub_topic(db2, int(tid), sub_only)
+                finally:
+                    db2.close()
+        except Exception as e:
+            logger.exception(f"sequential generation failed for {it}: {e}")
+
+    return {"status": "completed", "planned": len(plans)}
