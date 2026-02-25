@@ -22,6 +22,9 @@ class UserCreate(UserBase):
             raise ValueError('Password must contain at least one number')
         return v
 
+class ProfilePicUpdate(BaseModel):
+    profile_pic_url: str = Field(..., min_length=5, max_length=2048)
+
 
 class ForgotPasswordDirectRequest(BaseModel):
     user_email: EmailStr
@@ -71,6 +74,7 @@ class UserResponse(UserBase):
     created_on: datetime
     updated_on: datetime
     active: bool
+    profile_pic_url: Optional[str] = None
 
     class Config:
         orm_mode = True

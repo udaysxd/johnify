@@ -24,9 +24,11 @@ module.exports = {
           800: '#153E3A',
           900: '#0B2321',
         },
+        // Dedicated peach token for ad-hoc utilities
+        peach: '#fcb785',
         accent: {
           // Amber
-          DEFAULT: '#FFB433',
+          DEFAULT: '#fcb785',
           50: '#FFF4DE',
           100: '#FFE9BD',
           200: '#FFD98A',

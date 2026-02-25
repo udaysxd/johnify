@@ -69,9 +69,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // For production, we'll use the production backend URL directly
       // since environment variables might not be available at runtime in Cloud Run
       const isProduction = process.env.NODE_ENV === 'production';
-      const backendUrl = isProduction 
-        ? 'https://johnify-backend-873155673176.us-central1.run.app'
-        : process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+      const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
         
       console.log(`AuthProvider - Running in ${isProduction ? 'production' : 'development'} mode`);
       console.log('AuthProvider - Using backend URL:', backendUrl);

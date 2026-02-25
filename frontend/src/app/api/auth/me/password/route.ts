@@ -2,10 +2,7 @@ import { NextResponse } from 'next/server';
 
 export async function PUT(request: Request) {
   try {
-    const isProduction = process.env.NODE_ENV === 'production';
-    const backendUrl = isProduction 
-      ? 'https://johnify-backend-873155673176.us-central1.run.app'
-      : process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+    const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || process.env.BACKEND_URL || 'http://localhost:8000';
 
     const cookieHeader = request.headers.get('cookie') || '';
     const body = await request.text();

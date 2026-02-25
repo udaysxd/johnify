@@ -28,8 +28,13 @@ const nextConfig: NextConfig = {
         destination: '/api/auth/:path*',
       },
       {
+        // Handle trailing slash variant first to ensure it matches before the generic rule
+        source: '/api/:path*/',
+        destination: `${process.env.NEXT_PUBLIC_BACKEND_URL}/api/:path*`,
+      },
+      {
         source: '/api/:path*',
-        destination: `${process.env.NEXT_PUBLIC_BACKEND_URL}/:path*`,
+        destination: `${process.env.NEXT_PUBLIC_BACKEND_URL}/api/:path*`,
       },
     ];
   },

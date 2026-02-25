@@ -24,6 +24,8 @@ from .security import (
     COOKIE_SAME_SITE,
     IS_PRODUCTION
 )
+from google.oauth2 import id_token as google_id_token
+from google.auth.transport import requests as google_requests
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
 
@@ -52,6 +54,135 @@ try:
     print(f"🌐 FRONTEND_URL effective: {FRONTEND_URL}")
 except Exception:
     pass
+
+# Google OAuth configuration
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
+
+@router.get("/google/config")
+async def google_config():
+    if not GOOGLE_CLIENT_ID:
+        # Expose empty string to allow frontend to hide button when not configured
+        return {"client_id": ""}
+    return {"client_id": GOOGLE_CLIENT_ID}
+
+def _verify_google_id_token(token: str) -> dict:
+    if not isinstance(token, str) or not token:
+        raise HTTPException(status_code=400, detail="id_token is required")
+    try:
+        request = google_requests.Request()
+        # Verify with audience if configured; otherwise accept token but still verify signature
+        if GOOGLE_CLIENT_ID:
+            info = google_id_token.verify_oauth2_token(token, request, GOOGLE_CLIENT_ID)
+        else:
+            info = google_id_token.verify_oauth2_token(token, request)
+        # Basic checks
+        if info.get("iss") not in {"accounts.google.com", "https://accounts.google.com"}:
+            raise ValueError("Wrong issuer")
+        return info
+    except ValueError as e:
+        raise HTTPException(status_code=401, detail=f"Invalid Google token: {e}")
+
+@router.post("/google")
+async def google_sign_in(payload: dict, db: Session = Depends(get_db)):
+    """
+    Sign in/up with Google ID token.
+    Body: { id_token: string }
+    Returns: { access_token, token_type, user: {..}, expires_at }
+    Sets HTTP-only cookie for web; Android can ignore cookie and use JSON fields.
+    """
+    id_tok = (payload or {}).get("id_token")
+    info = _verify_google_id_token(id_tok)
+
+    email = info.get("email") or ""
+    email_verified = bool(info.get("email_verified", True))
+    name = info.get("name") or (email.split("@")[0] if email else "")
+    picture = info.get("picture")
+    google_sub = info.get("sub")  # stable Google user id
+
+    if not email:
+        raise HTTPException(status_code=400, detail="Google token missing email")
+
+    # Upsert user
+    user = db.query(models.User).filter(models.User.user_email == email).first()
+    created = False
+    if not user:
+        user = models.User(
+            user_email=email,
+            user_name=name or email,
+            is_verified=True if email_verified else True,
+            user_uid=str(google_sub) if google_sub else None,
+        )
+        # Set a random password to satisfy non-null constraint if any
+        try:
+            user.set_password(secrets.token_urlsafe(24))
+        except Exception:
+            pass
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        created = True
+
+    else:
+        # Update linkage if missing
+        changed = False
+        if not getattr(user, "user_uid", None) and google_sub:
+            user.user_uid = str(google_sub)
+            changed = True
+        if not getattr(user, "user_name", None) and name:
+            user.user_name = name
+            changed = True
+        if changed:
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+
+    # Try to persist profile picture URL if column exists
+    try:
+        if picture:
+            db.execute(text("UPDATE public.users SET profile_pic_url = :pic WHERE user_id = :uid"), {"pic": picture, "uid": int(user.user_id)})
+            db.commit()
+    except Exception:
+        # Best-effort; ignore if column missing
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+    # Issue JWT
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": str(user.user_id), "user_email": user.user_email, "user_id": user.user_id},
+        expires_delta=access_token_expires,
+    )
+
+    from fastapi.responses import JSONResponse
+    expires_at = datetime.now(timezone.utc) + access_token_expires
+    resp = JSONResponse(content={
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": {
+            "user_id": str(user.user_id),
+            "user_email": user.user_email,
+            "user_name": user.user_name or user.user_email,
+            "is_verified": True,
+        },
+        "expires_at": expires_at.isoformat(),
+        "created": created,
+    })
+
+    # Also set cookie for web use
+    resp.set_cookie(
+        key="access_token",
+        value=access_token,
+        httponly=COOKIE_HTTP_ONLY,
+        max_age=int(access_token_expires.total_seconds()),
+        expires=expires_at,
+        secure=COOKIE_SECURE,
+        samesite='None' if COOKIE_SECURE else 'lax',
+        domain=COOKIE_DOMAIN if COOKIE_DOMAIN != "localhost" else None,
+        path="/",
+    )
+    return resp
 
 # Redirect handler so emailed links to backend /auth/reset still work.
 # This forwards to the frontend app's reset page carrying the token.
@@ -274,7 +405,7 @@ async def register_user(
             
             # Create new token
             token = secrets.token_urlsafe(32)
-            expires_on = datetime.utcnow() + timedelta(hours=EMAIL_TOKEN_TTL_HOURS)
+            expires_on = datetime.now() + timedelta(hours=EMAIL_TOKEN_TTL_HOURS)
             
             local_db.execute(text(
                 """
@@ -510,7 +641,7 @@ async def verify_email(
                 print(f"ℹ️ Token found but used={used_token.used}, expires_on={used_token.expires_on}")
                 if used_token.used:
                     error_reason = "already_used"
-                elif used_token.expires_on <= datetime.utcnow():
+                elif used_token.expires_on <= datetime.now():
                     error_reason = "expired"
                 else:
                     error_reason = "invalid"
@@ -640,7 +771,7 @@ async def verify_email_complete(payload: dict, db: Session = Depends(get_db)):
         if is_used:
             db.rollback()
             raise HTTPException(status_code=401, detail="already_used")
-        if expires_on and expires_on <= datetime.utcnow():
+        if expires_on and expires_on <= datetime.now():
             db.rollback()
             raise HTTPException(status_code=401, detail="expired")
 
@@ -717,7 +848,7 @@ async def resend_verification(
             """
         ), {"uid": int(user.user_id)})
         token = secrets.token_urlsafe(32)
-        expires_on = datetime.utcnow() + timedelta(hours=EMAIL_TOKEN_TTL_HOURS)
+        expires_on = datetime.now() + timedelta(hours=EMAIL_TOKEN_TTL_HOURS)
         db.execute(text(
             """
             INSERT INTO public.email_verification_tokens (user_id, token, expires_on, used)
@@ -742,7 +873,11 @@ async def resend_verification(
         raise HTTPException(status_code=500, detail="Failed to resend verification")
 
 @router.get("/me", response_model=schemas.UserResponse)
-async def read_users_me(current_user: models.User = Depends(get_current_active_user)):
+@router.get("/me/", response_model=schemas.UserResponse)
+async def read_users_me(
+    current_user: models.User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
     """
     Get current user information
     """
@@ -755,6 +890,17 @@ async def read_users_me(current_user: models.User = Depends(get_current_active_u
             return str(val).strip().lower() in {"true", "1", "t", "yes", "y"}
         except Exception:
             return True
+
+    # Fetch profile_pic_url directly from DB to avoid ORM attribute mismatches
+    try:
+        row = db.execute(
+            text("SELECT profile_pic_url FROM public.users WHERE user_id = :uid LIMIT 1"),
+            {"uid": int(getattr(current_user, "user_id", 0) or 0)},
+        ).fetchone()
+        profile_pic_url = (row or [None])[0]
+    except Exception:
+        profile_pic_url = None
+
     return {
         "user_id": int(getattr(current_user, "user_id", 0) or 0),
         "user_email": getattr(current_user, "user_email", "") or "",
@@ -764,6 +910,7 @@ async def read_users_me(current_user: models.User = Depends(get_current_active_u
         "updated_on": getattr(current_user, "updated_on", None),
         "uuid": getattr(current_user, "uuid", None),
         "active": _is_active(getattr(current_user, "active", True)),
+        "profile_pic_url": profile_pic_url,
     }
 
 @router.put("/me/name", response_model=schemas.UserResponse)
@@ -1016,8 +1163,61 @@ async def forgot_password(payload: schemas.ForgotPasswordRequest, db: Session = 
     if user:
         try:
             _ensure_password_reset_table(db)
+            # Basic rate limiting and deduplication to prevent repeated emails
+            # 1) If an unused, unexpired token exists very recently, reuse it (do not send another email)
+            recent_row = db.execute(text(
+                """
+                SELECT token, created_on
+                FROM public.password_reset_tokens
+                WHERE user_id = :uid AND used = FALSE AND expires_on > NOW()
+                ORDER BY created_on DESC
+                LIMIT 1
+                """
+            ), {"uid": int(user.user_id)}).mappings().first()
+
+            # 2) Cap total number of resets to 3 per hour per user
+            hourly_count = db.execute(text(
+                """
+                SELECT COUNT(*) AS cnt
+                FROM public.password_reset_tokens
+                WHERE user_id = :uid AND created_on > NOW() - INTERVAL '1 hour'
+                """
+            ), {"uid": int(user.user_id)}).scalar() or 0
+
+            # Determine requester IP for logging (best-effort)
+            try:
+                fwd_for = request.headers.get("x-forwarded-for") if request else None
+                client_ip = (fwd_for.split(",")[0].strip() if fwd_for else (request.client.host if request and request.client else "unknown"))
+            except Exception:
+                client_ip = "unknown"
+
+            if recent_row:
+                # If the most recent token was created within 15 minutes, do not issue another
+                reuse_recent = False
+                try:
+                    created_on = recent_row.get("created_on")
+                    if created_on and (datetime.utcnow() - created_on).total_seconds() <= 15 * 60:
+                        reuse_recent = True
+                except Exception:
+                    pass
+                if reuse_recent:
+                    try:
+                        print(f"[auth] Skipping new reset token: recent valid token exists for {user.user_email} from {client_ip}")
+                    except Exception:
+                        pass
+                    # Do not include debug link to avoid leaking tokens; response stays generic
+                    return resp_obj
+
+            if hourly_count >= 3:
+                try:
+                    print(f"[auth] Rate limit hit: skipping reset email for {user.user_email} from {client_ip} (last hour count={hourly_count})")
+                except Exception:
+                    pass
+                return resp_obj
+
+            # Otherwise, issue a new token and send email
             token = secrets.token_urlsafe(32)
-            expires_on = datetime.utcnow() + timedelta(minutes=RESET_TOKEN_TTL_MIN)
+            expires_on = datetime.now() + timedelta(minutes=RESET_TOKEN_TTL_MIN)
             db.execute(text(
                 """
                 INSERT INTO public.password_reset_tokens (user_id, token, expires_on, used)
@@ -1029,7 +1229,7 @@ async def forgot_password(payload: schemas.ForgotPasswordRequest, db: Session = 
             base = FRONTEND_URL
             reset_link = f"{base}/auth/reset?token={token}"
             try:
-                print(f"[gmail] Sending reset email to {user.user_email} -> {reset_link}")
+                print(f"[gmail] Sending reset email to {user.user_email} from {client_ip} -> {reset_link}")
                 _send_reset_email(user.user_email, reset_link)
             except Exception:
                 # Don't expose email errors to client
@@ -1101,7 +1301,7 @@ async def reset_password(payload: schemas.ResetPasswordRequest, db: Session = De
             raise HTTPException(status_code=400, detail="Invalid or expired token")
         if bool(row["used"]):
             raise HTTPException(status_code=400, detail="Token already used")
-        if row["expires_on"] < datetime.utcnow():
+        if row["expires_on"] < datetime.now():
             raise HTTPException(status_code=400, detail="Token expired")
 
         user = db.query(models.User).filter(models.User.user_id == int(row["user_id"])) .first()

@@ -1,5 +1,5 @@
 import asyncio
-from typing import AsyncIterator, Dict, Set
+from typing import AsyncIterator, Dict, Set, Optional
 
 class SSEBroker:
     """
@@ -9,6 +9,14 @@ class SSEBroker:
     def __init__(self) -> None:
         self._channels: Dict[int, Set[asyncio.Queue]] = {}
         self._lock = asyncio.Lock()
+        # Store the main event loop so background threads can publish via run_coroutine_threadsafe
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+
+    def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        try:
+            self._loop = loop
+        except Exception:
+            self._loop = None
 
     async def subscribe(self, user_id: int) -> AsyncIterator[str]:
         try:
@@ -67,6 +75,25 @@ class SSEBroker:
                 q.put_nowait(msg)
             except Exception:
                 # Best-effort; drop if queue is full or closed
+                pass
+
+    # Thread-safe helper for background tasks running outside the main event loop
+    def publish_json_threadsafe(self, user_id: int, event: str, payload: dict) -> None:
+        try:
+            loop = self._loop
+            if loop and loop.is_running():
+                fut = asyncio.run_coroutine_threadsafe(self.publish_json(int(user_id), event, payload), loop)
+                # Optionally wait a tiny bit to surface exceptions early
+                fut.result(timeout=2)
+            else:
+                # Fallback: attempt to get a running loop and schedule
+                loop2 = asyncio.get_running_loop()
+                loop2.create_task(self.publish_json(int(user_id), event, payload))
+        except RuntimeError:
+            # No running loop; last resort: create a new loop just to no-op safely
+            try:
+                asyncio.run(self.publish_json(int(user_id), event, payload))
+            except Exception:
                 pass
 
 # Global broker instance

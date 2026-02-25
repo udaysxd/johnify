@@ -25,6 +25,7 @@ interface FrontendVideoItem {
   status: 'processing' | 'completed' | 'failed';
   userId?: string;
   userName?: string;
+  profilePicUrl?: string;
 }
 
 const isProduction = process.env.NODE_ENV === 'production';
@@ -87,7 +88,7 @@ export async function GET(request: Request): Promise<NextResponse> {
 
     const data = (await resp.json()) as BackendVideoItem[];
 
-    const videos: FrontendVideoItem[] = Array.isArray(data)
+    let videos: FrontendVideoItem[] = Array.isArray(data)
       ? data
           .map((v) => {
             const videoUrl = absoluteUrl(v.video_url ?? v.url);
@@ -107,6 +108,56 @@ export async function GET(request: Request): Promise<NextResponse> {
           })
           .filter((v) => !!v.videoUrl)
       : [];
+
+    // Enrich with profile picture URLs (best-effort)
+    try {
+      const uniqueUserIds = Array.from(
+        new Set(
+          videos
+            .map((v) => v.userId)
+            .filter((x): x is string => typeof x === 'string' && x.trim().length > 0)
+        )
+      );
+
+      if (uniqueUserIds.length) {
+        const results = await Promise.all(
+          uniqueUserIds.map(async (uid) => {
+            try {
+              const r = await fetch(`${API_BASE_URL}/api/users/${encodeURIComponent(uid)}`, {
+                method: 'GET',
+                headers: { 'Accept': 'application/json' },
+                cache: 'no-store',
+              });
+              if (!r.ok) return [uid, undefined] as const;
+              const u = await r.json();
+              const url = typeof u?.profile_pic_url === 'string' ? (u.profile_pic_url as string) : undefined;
+              const name = typeof u?.user_name === 'string' ? (u.user_name as string) : undefined;
+              return [uid, { profilePicUrl: url, userName: name }] as const;
+            } catch {
+              return [uid, undefined] as const;
+            }
+          })
+        );
+
+        const byUser: Record<string, { profilePicUrl?: string; userName?: string }> = {};
+        for (const [uid, info] of results) {
+          if (info) byUser[uid] = info;
+        }
+
+        if (Object.keys(byUser).length) {
+          videos = videos.map((v) => {
+            if (v.userId && byUser[v.userId]) {
+              return {
+                ...v,
+                profilePicUrl: byUser[v.userId].profilePicUrl ?? v.profilePicUrl,
+                userName: v.userName || byUser[v.userId].userName || v.userName,
+              };
+            }
+            return v;
+          });
+        }
+      }
+    } catch {}
 
     return NextResponse.json(videos);
   } catch (error) {

@@ -39,7 +39,7 @@ export async function POST(request: Request) {
     const ct = resp.headers.get('content-type') || '';
     if (!resp.ok) {
       if (ct.includes('application/json')) {
-        const err = await resp.json().catch(() => ({} as any));
+        const err = await resp.json().catch(() => ({} as { message?: string; detail?: string }));
         return NextResponse.json({ message: err?.message || err?.detail || 'Failed to generate' }, { status: resp.status });
       } else {
         const text = await resp.text().catch(() => '');

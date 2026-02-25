@@ -37,12 +37,15 @@ from . import gcs_utils
 from .database import engine, init_db, get_db
 from . import scheduler as job_scheduler
 from .auth import models, schemas, security
+from .videos import router as videos_router
+from .mlites_health import router as mlites_health_router
 import shutil
 
 # Import core configurations and middleware
 from .core.config import settings
 from .core.cors import setup_cors
 from .core.rate_limiter import rate_limit_middleware
+from .services.sse_broker import broker
 
 def sanitize_filename(filename: str) -> str:
     """
@@ -145,6 +148,16 @@ async def _scheduler_shutdown():
     try:
         await job_scheduler.shutdown_scheduler()
     except Exception:
+        pass
+
+# Ensure the SSE broker knows the main event loop for thread-safe publishing
+@app.on_event("startup")
+async def _sse_broker_startup():
+    try:
+        loop = asyncio.get_running_loop()
+        broker.set_loop(loop)
+    except Exception:
+        # Non-fatal
         pass
 
 # CORS will be configured later in the file - removing duplicate registration
@@ -1419,6 +1432,22 @@ app.include_router(mlites_router)
 # Include mlites_beauty router (stock-video-based beauty pipeline)
 from .mlites_beauty import router as mlites_beauty_router
 app.include_router(mlites_beauty_router)
+
+# Include mlites_books router (15-min longform book summaries)
+from .mlites_books import router as mlites_books_router
+app.include_router(mlites_books_router)
+
+# Include mlites_thumbnail router (thumbnail-only generation)
+from .mlites_thumbnail import router as mlites_thumbnail_router
+app.include_router(mlites_thumbnail_router)
+
+# Include mlites_personalities router (feed for personalities videos)
+from .mlites_personalities import router as mlites_personalities_router
+app.include_router(mlites_personalities_router)
+
+# Include mlites_relationships router (feed for relationships videos)
+from .mlites_relationships import router as mlites_relationships_router
+app.include_router(mlites_relationships_router)
 
 # Configure CORS with specific allowed origins and credentials
 
@@ -3737,3 +3766,7 @@ async def generate_video_status(job_id: str):
     if status == "error":
         return {"status": "error", "error": job.get("error", "Unknown error")}
     return {"status": status}
+
+# Include routers
+app.include_router(videos_router)
+app.include_router(mlites_health_router)

@@ -35,9 +35,9 @@ function LearnPageContent() {
   const [isLoading, setIsLoading] = useState(false);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [progressPct, setProgressPct] = useState<number | null>(null);
   const [feedSimilar, setFeedSimilar] = useState<FeedVideo[]>([]);
   const [feedOthers, setFeedOthers] = useState<FeedVideo[]>([]);
-  const [feedQueryTags, setFeedQueryTags] = useState<string[]>([]);
   const [feedLoading, setFeedLoading] = useState(false);
   const [showFeed, setShowFeed] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -67,6 +67,9 @@ function LearnPageContent() {
 
     setIsLoading(true);
     setError(null);
+    // reset progress state for a fresh run
+    setProgressPct(0);
+    // reset transient fields
 
     try {
       const userEmail = user?.user_email;
@@ -133,6 +136,32 @@ function LearnPageContent() {
       setIsLoading(false);
     }
   };
+
+  // Subscribe to Learn progress SSE
+  useEffect(() => {
+    if (!user || !user.user_id) return;
+    let es: EventSource | null = null;
+    try {
+      es = new EventSource(`/api/learn/stream?user_id=${encodeURIComponent(user.user_id)}`);
+      const onLearnProgress = (ev: MessageEvent) => {
+        try {
+          const payload = JSON.parse(ev.data || '{}');
+          if (!payload || typeof payload !== 'object') return;
+          // accept only kind learn if present
+          if (payload.kind && payload.kind !== 'learn') return;
+          const pct = typeof payload.pct === 'number' ? payload.pct : undefined;
+          if (pct !== undefined) setProgressPct(Math.max(0, Math.min(100, pct)));
+        } catch {}
+      };
+      es.addEventListener('learn_progress', onLearnProgress);
+    } catch {
+      // swallow
+    }
+    return () => {
+      try { es?.close(); } catch {}
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.user_id]);
 
   // Get DeepSeek-generated tags first (retry a few times), then use those to fetch the feed
   const fetchPrecomputedTags = async (t: string): Promise<string[]> => {
@@ -207,7 +236,6 @@ function LearnPageContent() {
       // API route returns keys: similar, others, queryTags
       setFeedSimilar(Array.isArray(data?.similar) ? data.similar : []);
       setFeedOthers(Array.isArray(data?.others) ? data.others : []);
-      setFeedQueryTags(Array.isArray(data?.queryTags) ? data.queryTags : []);
     } catch (error) {
       console.error('Error in fetchLearnFeed:', error);
     } finally {
@@ -243,18 +271,18 @@ function LearnPageContent() {
   }, [isAuthenticated, isAuthLoading, searchParams, topic]);
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-[var(--color-background)]">
       <div className="py-12 px-4 sm:px-6 lg:px-8">
         <div className="max-w-3xl mx-auto">
           <div className="text-center mb-8">
-            <h1 className="text-3xl font-bold text-gray-900 mb-2">Learn Something New</h1>
-            <p className="text-gray-600">Enter a topic and we&apos;ll generate an educational video for you</p>
+            <h1 className="text-3xl font-bold text-[var(--color-foreground)] mb-2">Learn Something New</h1>
+            <p className="text-gray-600">Enter a topic and we&#39;ll generate an educational video for you</p>
           </div>
 
           {isAuthLoading ? (
             <div className="min-h-[200px] flex items-center justify-center">
               <div className="text-center">
-                <div className="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto"></div>
+                <div className="w-12 h-12 border-4 border-[var(--color-secondary)] border-t-transparent rounded-full animate-spin mx-auto"></div>
                 <p className="mt-4 text-gray-600">Loading...</p>
               </div>
             </div>
@@ -270,7 +298,7 @@ function LearnPageContent() {
                     id="topic"
                     value={topic}
                     onChange={(e) => setTopic(e.target.value)}
-                    className="w-full px-4 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
+                    className="w-full px-4 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-2 focus:ring-[var(--color-secondary)] focus:border-[var(--color-secondary)]"
                     placeholder="e.g., Ancient Rome, Machine Learning, Pasta recipe"
                     disabled={isLoading}
                     required
@@ -281,19 +309,26 @@ function LearnPageContent() {
                   <button
                     type="submit"
                     disabled={isAuthLoading || !isAuthenticated || isLoading || !topic.trim()}
-                    className={`w-full flex justify-center py-3 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white ${
-                      isAuthLoading || !isAuthenticated || isLoading || !topic.trim()
-                        ? 'bg-indigo-300 cursor-not-allowed'
-                        : 'bg-indigo-600 hover:bg-indigo-700'
-                    } focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500`}
+                    className={`w-full flex justify-center py-3 px-4 rounded-md shadow-sm text-sm font-medium btn-primary ${
+                      isAuthLoading || !isAuthenticated || isLoading || !topic.trim() ? 'opacity-50 cursor-not-allowed' : ''
+                    }`}
                   >
                     {isLoading ? 'Generating Video...' : 'Generate Learning Video'}
                   </button>
                 </div>
                 {isLoading && (
-                  <p className="mt-3 text-center text-sm text-gray-700" aria-live="polite">
-                    Please be patient. Video will be ready in few minutes...
-                  </p>
+                  <div className="mt-4" aria-live="polite">
+                    {/* removed stage and ETA labels */}
+                    <div className="w-full bg-gray-200 rounded h-2 overflow-hidden">
+                      <div
+                        className="h-2 transition-all bg-[var(--color-primary)]"
+                        style={{ width: `${Math.round(progressPct ?? 5)}%` }}
+                      />
+                    </div>
+                    <div className="mt-2 text-xs text-gray-600">
+                      Please be patient. It takes a few minutes to generate.
+                    </div>
+                  </div>
                 )}
               </form>
             
@@ -446,13 +481,13 @@ function LearnPageContent() {
             <div className="space-x-4">
               <button
                 onClick={() => setVideoUrl(null)}
-                className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                className="inline-flex items-center px-4 py-2 text-sm font-medium rounded-md shadow-sm btn-primary"
               >
                 Create Another Video
               </button>
               <button
                 onClick={() => router.push('/')}
-                className="inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                className="inline-flex items-center px-4 py-2 text-sm font-medium rounded-md btn-outline"
               >
                 Back to Home
               </button>

@@ -2,10 +2,7 @@ import { NextResponse } from 'next/server';
 
 export async function GET(request: Request) {
   try {
-    const isProduction = process.env.NODE_ENV === 'production';
-    const backendUrl = isProduction 
-      ? 'https://johnify-backend-873155673176.us-central1.run.app'
-      : process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+    const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || process.env.BACKEND_URL || 'http://localhost:8000';
     
     const cookieHeader = request.headers.get('cookie');
     if (process.env.NODE_ENV !== 'production') {
@@ -26,15 +23,27 @@ export async function GET(request: Request) {
       }
     } catch {}
 
-    const response = await fetch(`${backendUrl}/api/auth/me`, {
-      headers: {
-        'Accept': 'application/json',
-        // Forward the cookie header from the client to the backend
-        'Cookie': cookieHeader,
-        // Fallback in case backend misses cookies
-        ...(bearerToken ? { 'Authorization': `Bearer ${bearerToken}` } : {}),
-      },
-    });
+    // Small retry with backoff to handle transient 429/503 from backend or edge
+    const fetchWithRetry = async (attempt = 1): Promise<Response> => {
+      const resp = await fetch(`${backendUrl}/api/auth/me`, {
+        headers: {
+          'Accept': 'application/json',
+          // Forward the cookie header from the client to the backend
+          'Cookie': cookieHeader,
+          // Fallback in case backend misses cookies
+          ...(bearerToken ? { 'Authorization': `Bearer ${bearerToken}` } : {}),
+        },
+        cache: 'no-store',
+      });
+      if ((resp.status === 429 || resp.status === 503) && attempt < 3) {
+        const delay = 150 * Math.pow(2, attempt - 1);
+        await new Promise(r => setTimeout(r, delay));
+        return fetchWithRetry(attempt + 1);
+      }
+      return resp;
+    };
+
+    const response = await fetchWithRetry();
 
     if (!response.ok) {
       let backendError = 'Unknown error';
@@ -55,7 +64,8 @@ export async function GET(request: Request) {
     
     // Create a new response with the user data
     const responseData = NextResponse.json(userData);
-    responseData.headers.set('Cache-Control', 'no-store');
+    // Short private cache to reduce bursts from multiple components
+    responseData.headers.set('Cache-Control', 'private, max-age=20');
     
     // Forward any set-cookie headers from the backend
     const setCookie = response.headers.get('set-cookie');

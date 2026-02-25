@@ -1,9 +1,6 @@
 import { NextResponse } from 'next/server';
 
-const isProduction = process.env.NODE_ENV === 'production';
-const API_BASE_URL = isProduction
-  ? (process.env.BACKEND_URL || 'https://johnify-backend-873155673176.us-central1.run.app')
-  : (process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000');
+const API_BASE_URL = process.env.BACKEND_URL || process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
 
 function createErrorResponse(message: string, status: number, details?: unknown): NextResponse {
   console.error(`[API Error] ${message}`, details || '');

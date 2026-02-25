@@ -14,6 +14,17 @@ class UserResponse(UserBase):
     created_on: datetime
     updated_on: datetime
     active: bool
+    # Optional profile fields
+    profile_pic_url: Optional[str] = None
+    bio: Optional[str] = None
+    link: Optional[str] = None
+    user_uid: Optional[str] = None
 
     class Config:
         orm_mode = True
+
+
+class UserProfileUpdate(BaseModel):
+    bio: Optional[str] = None
+    link: Optional[str] = None
+    user_uid: Optional[str] = None

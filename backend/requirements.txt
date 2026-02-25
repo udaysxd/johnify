@@ -61,11 +61,19 @@ gdown==4.6.0
 # Web server
 gunicorn==20.1.0
 
-# Ensure correct Pydantic version
-pydantic[email]==1.10.13
+# Ensure correct Pydantic version (1.x line; 1.10.17 has Python 3.13 compatibility fixes)
+pydantic[email]==1.10.17
 
 # PostgreSQL driver for SQLAlchemy
 pg8000>=1.16.6,<2.0.0
 openai>=1.0.0,<2.0.0
 requests>=2.31.0,<3.0.0
 google-generativeai>=0.7.2
+
+# Gmail API for password reset emails
+google-api-python-client>=2.132.0,<3.0.0
+google-auth>=2.30.0,<3.0.0
+google-auth-httplib2>=0.2.0,<1.0.0
+
+# Scheduler
+APScheduler>=3.10.4,<4.0.0

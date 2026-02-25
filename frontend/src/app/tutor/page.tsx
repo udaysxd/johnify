@@ -458,7 +458,7 @@ function TutorPageContent() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-[var(--color-background)]">
       <div className="py-12 px-4 sm:px-6 lg:px-8">
         <div className="max-w-3xl mx-auto">
       {!quiz ? (
@@ -481,7 +481,7 @@ function TutorPageContent() {
                 value={quizTopic}
                 onChange={(e) => setQuizTopic(e.target.value)}
                 placeholder="e.g., Jazz Music, Ancient Rome, World History"
-                className="w-full px-4 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
+                className="w-full px-4 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-2 focus:ring-[var(--color-secondary)] focus:border-[var(--color-secondary)]"
                 disabled={isLoading}
               />
             </div>
@@ -489,9 +489,9 @@ function TutorPageContent() {
               <button
                 type="submit"
                 disabled={authLoading || !isAuthenticated || !quizTopic.trim() || isLoading}
-                className={`w-full flex justify-center py-3 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white ${
-                  authLoading || !isAuthenticated || !quizTopic.trim() || isLoading ? 'bg-indigo-300 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700'
-                } focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500`}
+                className={`w-full flex justify-center py-3 px-4 rounded-md shadow-sm text-sm font-medium btn-primary ${
+                  authLoading || !isAuthenticated || !quizTopic.trim() || isLoading ? 'opacity-50 cursor-not-allowed' : ''
+                }`}
               >
                 {isLoading ? 'Generating Assessment...' : 'Start Assessment'}
               </button>
@@ -531,7 +531,7 @@ function TutorPageContent() {
                                 type="radio"
                                 checked={answers[questionKey] === optionKey}
                                 onChange={() => handleAnswer(questionKey, optionKey)}
-                                className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300"
+                                className="h-4 w-4 text-[var(--color-secondary)] focus:ring-[var(--color-secondary)] border-gray-300"
                               />
                               <label htmlFor={inputId} className="ml-3 block text-gray-700">
                                 {option}
@@ -552,7 +552,7 @@ function TutorPageContent() {
                                 type="radio"
                                 checked={answers[questionKey] === key}
                                 onChange={() => handleAnswer(questionKey, key)}
-                                className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300"
+                                className="h-4 w-4 text-[var(--color-secondary)] focus:ring-[var(--color-secondary)] border-gray-300"
                               />
                               <label htmlFor={inputId} className="ml-3 block text-gray-700">
                                 {String(value)}
@@ -575,10 +575,8 @@ function TutorPageContent() {
             <button
               onClick={submitQuiz}
               disabled={authLoading || !isAuthenticated || Object.keys(answers).length < quiz.questions.length || isLoading}
-              className={`px-6 py-2 text-white font-medium rounded-md focus:outline-none focus:ring-2 focus:ring-offset-2 ${
-                authLoading || !isAuthenticated || Object.keys(answers).length < quiz.questions.length || isLoading
-                  ? 'bg-indigo-300 cursor-not-allowed'
-                  : 'bg-indigo-600 hover:bg-indigo-700 focus:ring-indigo-500'
+              className={`px-6 py-2 font-medium rounded-md btn-primary ${
+                authLoading || !isAuthenticated || Object.keys(answers).length < quiz.questions.length || isLoading ? 'opacity-50 cursor-not-allowed' : ''
               }`}
             >
               {isLoading ? 'Submitting...' : 'Submit Quiz'}
@@ -600,7 +598,7 @@ function TutorPageContent() {
                     <button
                       onClick={generateVideo}
                       disabled={authLoading || !isAuthenticated || isGeneratingVideo}
-                      className={`px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-md hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 ${isGeneratingVideo ? 'opacity-50 cursor-not-allowed' : ''}`}
+                      className={`px-4 py-2 text-sm font-medium rounded-md btn-primary ${isGeneratingVideo ? 'opacity-50 cursor-not-allowed' : ''}`}
                     >
                       {isGeneratingVideo ? 'Generating...' : 'Generate Video'}
                     </button>
@@ -673,7 +671,7 @@ function TutorPageContent() {
                     <button
                       onClick={generateVideo}
                       disabled={authLoading || !isAuthenticated || isGeneratingVideo}
-                      className={`inline-flex items-center px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-md hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 ${isGeneratingVideo ? 'opacity-50 cursor-not-allowed' : ''}`}
+                      className={`inline-flex items-center px-4 py-2 text-sm font-medium rounded-md btn-primary ${isGeneratingVideo ? 'opacity-50 cursor-not-allowed' : ''}`}
                     >
                       <svg className="-ml-1 mr-2 h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />

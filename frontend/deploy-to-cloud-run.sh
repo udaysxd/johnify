@@ -2,7 +2,7 @@
 set -e
 
 # Configuration
-PROJECT_ID="optimum-shape-467809-h9"  # Replace with your GCP project ID
+PROJECT_ID="johnify-476816"  # Replace with your GCP project ID
 SERVICE_NAME="johnify-frontend"
 REGION="us-central1"  # or your preferred region
 IMAGE_NAME="gcr.io/${PROJECT_ID}/${SERVICE_NAME}:latest"

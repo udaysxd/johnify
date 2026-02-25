@@ -81,15 +81,53 @@ export async function GET(request: Request): Promise<NextResponse> {
     const authToken = bearer || cookieAccess || cookieAuth;
     if (!authToken) return createErrorResponse('Authentication required', 401);
 
-    const resp = await fetch(`${API_BASE_URL}/api/videos/my-videos`, {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${authToken}`,
-        'Content-Type': 'application/json',
-      },
-      credentials: 'include',
-      cache: 'no-store',
-    });
+    async function sleep(ms: number) {
+      return new Promise((r) => setTimeout(r, ms));
+    }
+
+    async function fetchWithRetry(): Promise<Response> {
+      const maxRetries = 4;
+      let attempt = 0;
+      while (true) {
+        const resp = await fetch(`${API_BASE_URL}/api/videos/my-videos`, {
+          method: 'GET',
+          headers: {
+            Authorization: `Bearer ${authToken}`,
+            'Content-Type': 'application/json',
+          },
+          credentials: 'include',
+          cache: 'no-store',
+        });
+
+        if (resp.ok) return resp;
+
+        // 429 backoff with Retry-After support
+        if (resp.status === 429 && attempt < maxRetries) {
+          const retryAfter = resp.headers.get('retry-after');
+          let delayMs = Math.min(30_000, 1000 * Math.pow(2, attempt));
+          if (retryAfter) {
+            const seconds = parseInt(retryAfter, 10);
+            if (!Number.isNaN(seconds) && seconds > 0) {
+              delayMs = Math.min(60_000, seconds * 1000);
+            }
+          }
+          await sleep(delayMs);
+          attempt++;
+          continue;
+        }
+
+        // quick retry for transient 5xx
+        if (resp.status >= 500 && resp.status < 600 && attempt < 2) {
+          await sleep(1000 * (attempt + 1));
+          attempt++;
+          continue;
+        }
+
+        return resp; // give up
+      }
+    }
+
+    const resp = await fetchWithRetry();
 
     if (!resp.ok) {
       const errorData = await resp.json().catch(() => ({}));
@@ -120,10 +158,9 @@ export async function GET(request: Request): Promise<NextResponse> {
           // Filter out entries with no video URL and by type if specified
           .filter((v) => {
             if (!v.videoUrl) return false;
-            if (typeParam === 'all') return true;
-            if (typeParam) return v.type === typeParam;
-            // default behavior: only lites (for backward compatibility)
-            return v.type === 'lites';
+            // Default: include all types unless a specific type filter is provided
+            if (!typeParam || typeParam === 'all') return true;
+            return v.type === typeParam;
           })
       : [];
 

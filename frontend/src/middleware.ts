@@ -52,13 +52,7 @@ function isPublicPath(pathname: string, request: NextRequest): boolean {
   );
 }
 
-// Helper function to check if an API path is public
-function isPublicApiPath(pathname: string): boolean {
-  return publicApiRoutes.some(route => 
-    pathname === route || 
-    pathname.startsWith(`${route}/`)
-  );
-}
+// (Removed) isPublicApiPath was unused
 
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
@@ -88,11 +82,11 @@ export async function middleware(request: NextRequest) {
   // Read token early for auth-page redirect logic
   const accessTokenPre = request.cookies.get('access_token')?.value;
 
-  // If an authenticated user hits any auth page (e.g., /auth/signin), send them to /my-learning
+  // If an authenticated user hits any auth page (e.g., /auth/signin or /auth/register), send them to preferences to complete onboarding
   if (pathname.startsWith('/auth') && accessTokenPre) {
     const { isValid } = await verifyToken(accessTokenPre, JWT_SECRET);
     if (isValid) {
-      return NextResponse.redirect(new URL('/my-learning', request.url));
+      return NextResponse.redirect(new URL('/preferences', request.url));
     }
   }
 
@@ -179,7 +173,38 @@ export async function middleware(request: NextRequest) {
     
     return response;
   }
-  
+  // If user is authenticated, ensure they have completed preferences before accessing the rest of the app
+  try {
+    // Avoid loops: allow preferences page itself, auth pages, API (already returned), and public
+    const isPreferencesPage = pathname === '/preferences';
+    const isAuth = pathname.startsWith('/auth');
+    const isPublic = isPublicPath(pathname, request);
+
+    if (isValid && !isPreferencesPage && !isAuth && !isPublic) {
+      // Query our own API proxy (it forwards cookies) to check if preferences exist
+      const prefsResp = await fetch(new URL('/api/preferences', request.url), {
+        method: 'GET',
+        headers: {
+          'Accept': 'application/json',
+        },
+        cache: 'no-store',
+      });
+      if (prefsResp.ok) {
+        type Prefs = { language_id?: number; topic_ids?: unknown };
+        const prefs: Prefs = await prefsResp.json().catch(() => ({} as Prefs));
+        const hasLanguage = typeof prefs?.language_id === 'number';
+        const topics = Array.isArray(prefs?.topic_ids) ? (prefs.topic_ids as unknown[]) : [];
+        const hasTopics = topics.length > 0;
+        if (!hasLanguage && !hasTopics) {
+          return NextResponse.redirect(new URL('/preferences', request.url));
+        }
+      }
+      // If API failed, do not block navigation
+    }
+  } catch (e) {
+    // On any error, continue normally
+  }
+
   return response;
 }
 

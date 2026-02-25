@@ -24,6 +24,73 @@ export default function SignInPage() {
   const { signIn, loading: isAuthLoading } = useAuth();
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+  const [googleClientId, setGoogleClientId] = useState<string>('');
+  
+  useEffect(() => {
+    // Surface friendly messages based on query params
+    const deactivated = searchParams.get('deactivated');
+    if (deactivated) {
+      setError('Your account is no longer active. Reach out to customer support at hello@johnify.com');
+    }
+  }, [searchParams]);
+
+  useEffect(() => {
+    let cleanup = false;
+    const load = async () => {
+      try {
+        const res = await fetch('/api/auth/google/config', { cache: 'no-store' });
+        const data = await res.json();
+        const clientId = data?.client_id || '';
+        if (!clientId) return;
+        if (cleanup) return;
+        setGoogleClientId(clientId);
+        const script = document.createElement('script');
+        script.src = 'https://accounts.google.com/gsi/client';
+        script.async = true;
+        script.defer = true;
+        script.onload = () => {
+          try {
+            // @ts-expect-error Google Identity script attaches `google` to window at runtime
+            const google = window.google;
+            if (!google) return;
+            google.accounts.id.initialize({
+              client_id: clientId,
+              callback: async (response: { credential?: string }) => {
+                try {
+                  const id_token = response?.credential;
+                  if (!id_token) return;
+                  const r = await fetch('/api/auth/google', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                    body: JSON.stringify({ id_token }),
+                    credentials: 'include',
+                  });
+                  const j = await r.json();
+                  if (!r.ok) {
+                    setError(j?.error || 'Google sign-in failed');
+                    return;
+                  }
+                  window.location.href = '/my-learning';
+                } catch {
+                  setError('Google sign-in failed');
+                }
+              },
+              ux_mode: 'popup',
+              auto_select: false,
+            });
+            const btn = document.getElementById('google_signin_btn');
+            if (btn) {
+              google.accounts.id.renderButton(btn, { theme: 'outline', size: 'large', width: 320 });
+            }
+          } catch {}
+        };
+        document.body.appendChild(script);
+      } catch {}
+    };
+    load();
+    return () => { cleanup = true; };
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     console.log('[SignInPage] handleSubmit called', e);
@@ -57,6 +124,10 @@ export default function SignInPage() {
       // Use the signIn function from our auth hook
       const { error } = await signIn(username, password);
       if (error) {
+        // Normalize backend inactive message
+        if (/no longer active/i.test(error)) {
+          throw new Error('Your account is no longer active. Reach out to customer support at hello@johnify.com');
+        }
         throw new Error(error);
       }
       
@@ -83,10 +154,10 @@ export default function SignInPage() {
 
   return (
     <NoSSRWrapper>
-      <div className="min-h-screen flex items-center justify-center bg-gray-50 py-12 px-4 sm:px-6 lg:px-8">
+      <div className="min-h-screen flex items-center justify-center bg-[var(--color-background)] py-12 px-4 sm:px-6 lg:px-8">
         <div className="max-w-md w-full space-y-8">
           <div>
-            <h2 className="mt-6 text-center text-3xl font-extrabold text-gray-900">
+            <h2 className="mt-6 text-center text-3xl font-extrabold text-[var(--color-foreground)]">
               Sign in to your account
             </h2>
           </div>
@@ -97,7 +168,7 @@ export default function SignInPage() {
               </div>
             )}
             <div>
-              <label htmlFor="username" className="block text-sm font-medium text-gray-700">
+              <label htmlFor="username" className="block text-sm font-medium text-[var(--color-foreground)]">
                 Username
               </label>
               <div className="mt-1">
@@ -106,36 +177,73 @@ export default function SignInPage() {
                   name="username"
                   type="text"
                   required
-                  className="appearance-none block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                  className="appearance-none block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-[var(--color-secondary)] focus:border-[var(--color-secondary)] sm:text-sm"
                 />
               </div>
             </div>
 
             <div>
-              <label htmlFor="password" className="block text-sm font-medium text-gray-700">
+              <label htmlFor="password" className="block text-sm font-medium text-[var(--color-foreground)]">
                 Password
               </label>
-              <div className="mt-1">
+              <div className="mt-1 relative">
                 <input
                   id="password"
                   name="password"
-                  type="password"
+                  type={showPassword ? 'text' : 'password'}
                   autoComplete="current-password"
                   required
-                  className="appearance-none block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                  className="appearance-none block w-full pr-10 px-3 py-2 border border-gray-300 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-[var(--color-secondary)] focus:border-[var(--color-secondary)] sm:text-sm"
                 />
+                <button
+                  type="button"
+                  aria-label={showPassword ? 'Hide password' : 'Show password'}
+                  onClick={() => setShowPassword((v) => !v)}
+                  className="absolute inset-y-0 right-2 flex items-center text-gray-500 hover:text-gray-700"
+                >
+                  {showPassword ? (
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M17.94 17.94A10.94 10.94 0 0 1 12 20C7 20 2.73 16.11 1 12c.58-1.27 1.4-2.45 2.43-3.5M9.88 9.88A3 3 0 0 1 12 9c1.66 0 3 1.34 3 3 0 .7-.24 1.34-.64 1.84" />
+                      <path d="M1 1l22 22" />
+                    </svg>
+                  ) : (
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z" />
+                      <circle cx="12" cy="12" r="3" />
+                    </svg>
+                  )}
+                </button>
               </div>
+            </div>
+
+            <div className="flex justify-end -mt-2 mb-2">
+              <a href="/auth/forgot" className="text-sm text-[var(--color-secondary)] hover:opacity-80">
+                Forgot password?
+              </a>
             </div>
 
             <div>
               <button
                 type="submit"
                 disabled={isSubmitting || isAuthLoading}
-                className={`w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 ${isSubmitting || isAuthLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                className={`w-full flex justify-center py-2 px-4 rounded-md shadow-sm text-sm font-medium btn-primary ${isSubmitting || isAuthLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
               >
                 {isSubmitting || isAuthLoading ? 'Signing in...' : 'Sign in'}
               </button>
             </div>
+
+            {googleClientId ? (
+              <>
+                <div className="flex items-center gap-4 my-4">
+                  <span className="h-px flex-1 bg-gray-200" aria-hidden="true" />
+                  <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">Or continue with</span>
+                  <span className="h-px flex-1 bg-gray-200" aria-hidden="true" />
+                </div>
+                <div className="flex items-center justify-center">
+                  <div id="google_signin_btn" aria-label="Sign in with Google" />
+                </div>
+              </>
+            ) : null}
           </form>
         </div>
       </div>

@@ -39,8 +39,11 @@ export async function GET(request: Request) {
     const ct = resp.headers.get('content-type') || '';
     if (!resp.ok) {
       if (ct.includes('application/json')) {
-        const err = await resp.json().catch(() => ({} as any));
-        return NextResponse.json({ message: err?.message || err?.detail || 'Failed to fetch status' }, { status: resp.status });
+        const err = (await resp.json().catch(() => ({}))) as Record<string, unknown>;
+        const msg = (typeof err.message === 'string' && err.message)
+          || (typeof err.detail === 'string' && err.detail)
+          || 'Failed to fetch status';
+        return NextResponse.json({ message: msg }, { status: resp.status });
       } else {
         const text = await resp.text().catch(() => '');
         return NextResponse.json({ message: text?.slice(0, 500) || 'Failed to fetch status' }, { status: resp.status });
@@ -59,8 +62,8 @@ export async function GET(request: Request) {
         return NextResponse.json({ message: text }, { status: 200 });
       }
     }
-  } catch (error: any) {
-    if (error?.name === 'AbortError') {
+  } catch (error: unknown) {
+    if (error && typeof error === 'object' && 'name' in error && (error as { name?: unknown }).name === 'AbortError') {
       return NextResponse.json({ message: 'Status request timed out' }, { status: 504 });
     }
     console.error('Error in /api/mlites/status:', error);

@@ -35,7 +35,7 @@ export async function GET(request: Request) {
     const ct = resp.headers.get('content-type') || '';
     if (!resp.ok) {
       if (ct.includes('application/json')) {
-        const err = await resp.json().catch(() => ({} as any));
+        const err = await resp.json().catch(() => ({} as { message?: string; detail?: string }));
         return NextResponse.json({ message: err?.message || err?.detail || 'Failed to fetch topics' }, { status: resp.status });
       } else {
         const text = await resp.text().catch(() => '');
@@ -88,7 +88,7 @@ export async function DELETE(request: Request) {
     const ct = resp.headers.get('content-type') || '';
     if (!resp.ok) {
       if (ct.includes('application/json')) {
-        const err = await resp.json().catch(() => ({} as any));
+        const err = await resp.json().catch(() => ({} as { message?: string; detail?: string }));
         return NextResponse.json({ message: err?.message || err?.detail || 'Failed to unsubscribe topic' }, { status: resp.status });
       } else {
         const text = await resp.text().catch(() => '');
@@ -142,7 +142,7 @@ export async function POST(request: Request) {
 
     if (!resp.ok) {
       if (ct.includes('application/json')) {
-        const err = await resp.json().catch(() => ({} as any));
+        const err = await resp.json().catch(() => ({} as { message?: string; detail?: string }));
         return NextResponse.json({ message: err?.message || err?.detail || 'Failed to upsert topics' }, { status: resp.status });
       } else {
         const text = await resp.text().catch(() => '');

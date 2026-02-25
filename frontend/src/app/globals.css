@@ -4,12 +4,14 @@
 
 @layer base {
   :root {
-    /* Brand palette (light) */
-    --color-primary: #80CBC4; /* teal */
-    --color-accent: #FFB433;  /* amber */
-    --color-surface: #B4EBE6; /* light teal */
-    --color-background: #FBF8EF; /* warm light */
-    --color-foreground: #153E3A; /* deep teal text */
+    /* Brand palette (updated) */
+    /* YouTube-inspired palette */
+    --color-primary: #5D688A;   /* Primary */
+    --color-accent:  #fcb785;   /* Peach accent (links/buttons) */
+    --color-secondary: #fcb785; /* secondary ring/hover */
+    --color-surface: #F9F9F9;   /* light surface cards */
+    --color-background: #FFFFFF;/* page background */
+    --color-foreground: #0F0F0F; /* near-black text */
 
     /* Legacy vars kept for compatibility */
     --background: var(--color-background);
@@ -18,11 +20,12 @@
 
   .dark {
     /* Simple dark counterparts */
-    --color-primary: #5FB9B0;
-    --color-accent: #E99F1E;
-    --color-surface: #153E3A;
-    --color-background: #0B2321;
-    --color-foreground: #FBF8EF;
+    --color-primary: #5D688A;
+    --color-accent:  #fcb785;
+    --color-secondary: #fcb785;
+    --color-surface: #272727;
+    --color-background: #0F0F0F;
+    --color-foreground: #FFFFFF;
 
     --background: var(--color-background);
     --foreground: var(--color-foreground);
@@ -45,6 +48,52 @@ body {
 
 /* Helpful element-level defaults using palette */
 @layer base {
-  a { color: var(--color-primary); }
+  a { color: var(--color-secondary); }
   a:hover { color: var(--color-accent); }
+}
+
+/* Themed components */
+@layer components {
+  .btn-primary {
+    @apply inline-flex items-center justify-center px-4 py-2 rounded-md font-medium text-white transition-colors shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2;
+    background-color: var(--color-primary);
+    border: 1px solid transparent;
+  }
+  .btn-primary:hover { filter: brightness(0.9); }
+  .btn-primary:focus { --tw-ring-color: var(--color-secondary); }
+
+  .btn-accent {
+    @apply inline-flex items-center justify-center px-4 py-2 rounded-md font-medium transition-colors shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2;
+    background-color: var(--color-accent);
+    color: var(--color-foreground);
+    border: 1px solid transparent;
+  }
+  .btn-accent:hover { filter: brightness(0.95); }
+  .btn-accent:focus { --tw-ring-color: var(--color-secondary); }
+
+  .btn-outline {
+    @apply inline-flex items-center justify-center px-4 py-2 rounded-md font-medium transition-colors shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2;
+    background-color: white;
+    color: var(--color-primary);
+    border: 1px solid var(--color-primary);
+  }
+  .btn-outline:hover { background-color: var(--color-surface); }
+  .btn-outline:focus { --tw-ring-color: var(--color-secondary); }
+
+  .card-surface {
+    @apply rounded-2xl border shadow-sm;
+    background-color: var(--color-surface);
+    border-color: color-mix(in srgb, var(--color-primary) 20%, transparent);
+  }
+
+  .section-warm {
+    /* Warm gradient blending peach into surface and background */
+    background: linear-gradient(
+      180deg,
+      var(--color-surface) 0%,
+      color-mix(in srgb, #fcb785 35%, var(--color-surface)) 30%,
+      color-mix(in srgb, #fcb785 20%, var(--color-background)) 65%,
+      var(--color-background) 100%
+    );
+  }
 }

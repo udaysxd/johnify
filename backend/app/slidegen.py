@@ -382,6 +382,35 @@ def remove_marp_headers_and_styles(md: str) -> str:
     return md.strip()
 
 
+def strip_placeholder_bullets(md: str) -> str:
+    """Remove generic placeholder bullet lines that sometimes leak from the model.
+    Examples removed (case-insensitive):
+      - Important point 1
+      - Key detail 2
+      - Additional information
+      - Overview / Key idea N / Step N
+    """
+    if not md:
+        return md
+    lines = md.replace('\r\n', '\n').split('\n')
+    out = []
+    patt = re.compile(r"^\s*-\s*(important point\s*\d+|key detail\s*\d+|additional information|overview|key idea\s*\d+|step\s*\d+)\s*$",
+                      re.IGNORECASE)
+    for ln in lines:
+        if patt.match(ln):
+            continue
+        out.append(ln)
+    # Remove consecutive blank lines
+    cleaned = []
+    prev_blank = False
+    for ln in out:
+        blank = not ln.strip()
+        if blank and prev_blank:
+            continue
+        cleaned.append(ln)
+        prev_blank = blank
+    return "\n".join(cleaned).strip()
+
 
 def generate_creative_slides(topic: str, complexity_desc: str, client: OpenAI, temperature: float = 0.8) -> List[str]:
     """Let DeepSeek design the outline, slide count, and content. Return list of slide markdown strings.
@@ -642,7 +671,7 @@ def _split_markdown_slides(md: str) -> List[str]:
     for part in parts:
         s = part.strip()
         if s:
-            slides.append(s)
+            slides.append(strip_placeholder_bullets(s))
     return slides
 
 def generate_learn_slides(topic: str, complexity_level: int = 3, style: str = "minimal") -> List[str]:
@@ -761,9 +790,22 @@ def _refine_slide_with_model(topic: str, slide_md: str, client: OpenAI, complexi
             if len(body_text) > max_chars:
                 body_text = body_text[:max_chars].rstrip()
             slide_text = (title_line + ('\n' + body_text if body_text else '')).strip()
-        return slide_text
+        return strip_placeholder_bullets(slide_text)
     except Exception:
-        return slide_md
+        return strip_placeholder_bullets(slide_md)
+
+def strip_placeholder_bullets(slide_md: str) -> str:
+    lines = slide_md.split('\n')
+    title_line = lines[0] if lines else ""
+    body_lines = lines[1:]
+    filtered_body_lines = []
+    for line in body_lines:
+        if line.strip().startswith('- '):
+            bullet_text = line.strip().replace('- ', '', 1)
+            if bullet_text.lower() in ['overview', 'key idea 1', 'key idea 2', 'key idea 3', 'step 1', 'step 2', 'step 3', 'example 1', 'example 2', 'example 3', 'takeaway 1', 'takeaway 2', 'next steps']:
+                continue
+        filtered_body_lines.append(line)
+    return '\n'.join([title_line] + filtered_body_lines)
 
 def generate_narration(slides: list[str]) -> list[str]:
     """Generate narration for each slide using DeepSeek.

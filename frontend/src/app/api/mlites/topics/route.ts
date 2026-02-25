@@ -1,11 +1,42 @@
 import { NextResponse } from 'next/server';
 
 function getBackendUrl() {
-  const isProduction = process.env.NODE_ENV === 'production';
-  const envUrl = process.env.NEXT_PUBLIC_BACKEND_URL;
-  if (envUrl && envUrl.trim()) return envUrl;
-  if (isProduction) return 'https://johnify-backend-873155673176.us-central1.run.app';
-  return 'http://localhost:8000';
+  const raw = process.env.BACKEND_URL || process.env.NEXT_PUBLIC_BACKEND_URL;
+  if (raw && typeof raw === 'string') return raw.replace(/\/$/, '');
+  if (process.env.NODE_ENV === 'development') return 'http://localhost:8000';
+  return 'https://johnify-backend-873155673176.us-central1.run.app';
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchWithRetry(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const maxRetries = 4;
+  let attempt = 0;
+  while (true) {
+    const resp = await fetch(input, init);
+    if (resp.ok) return resp;
+    if (resp.status === 429 && attempt < maxRetries) {
+      const retryAfter = resp.headers.get('retry-after');
+      let delayMs = Math.min(30_000, 1000 * Math.pow(2, attempt));
+      if (retryAfter) {
+        const seconds = parseInt(retryAfter, 10);
+        if (!Number.isNaN(seconds) && seconds > 0) {
+          delayMs = Math.min(60_000, seconds * 1000);
+        }
+      }
+      await sleep(delayMs);
+      attempt++;
+      continue;
+    }
+    if (resp.status >= 500 && resp.status < 600 && attempt < 2) {
+      await sleep(1000 * (attempt + 1));
+      attempt++;
+      continue;
+    }
+    return resp;
+  }
 }
 
 export async function GET(request: Request) {
@@ -22,7 +53,7 @@ export async function GET(request: Request) {
     const authHeader = request.headers.get('authorization') || request.headers.get('Authorization') || '';
     const cookieHeader = request.headers.get('cookie') || request.headers.get('Cookie') || '';
 
-    const resp = await fetch(url, {
+    const resp = await fetchWithRetry(url, {
       method: 'GET',
       headers: {
         ...(authHeader ? { Authorization: authHeader } : {}),
@@ -35,7 +66,7 @@ export async function GET(request: Request) {
     const ct = resp.headers.get('content-type') || '';
     if (!resp.ok) {
       if (ct.includes('application/json')) {
-        const err = await resp.json().catch(() => ({} as any));
+        const err = await resp.json().catch(() => ({} as { message?: string; detail?: string }));
         return NextResponse.json({ message: err?.message || err?.detail || 'Failed to fetch topics' }, { status: resp.status });
       } else {
         const text = await resp.text().catch(() => '');
@@ -76,7 +107,7 @@ export async function DELETE(request: Request) {
     const authHeader = request.headers.get('authorization') || request.headers.get('Authorization') || '';
     const cookieHeader = request.headers.get('cookie') || request.headers.get('Cookie') || '';
 
-    const resp = await fetch(url, {
+    const resp = await fetchWithRetry(url, {
       method: 'DELETE',
       headers: {
         ...(authHeader ? { Authorization: authHeader } : {}),
@@ -88,7 +119,7 @@ export async function DELETE(request: Request) {
     const ct = resp.headers.get('content-type') || '';
     if (!resp.ok) {
       if (ct.includes('application/json')) {
-        const err = await resp.json().catch(() => ({} as any));
+        const err = await resp.json().catch(() => ({} as { message?: string; detail?: string }));
         return NextResponse.json({ message: err?.message || err?.detail || 'Failed to unsubscribe topic' }, { status: resp.status });
       } else {
         const text = await resp.text().catch(() => '');
@@ -127,7 +158,7 @@ export async function POST(request: Request) {
     const authHeader = request.headers.get('authorization') || request.headers.get('Authorization') || '';
     const cookieHeader = request.headers.get('cookie') || request.headers.get('Cookie') || '';
 
-    const resp = await fetch(url, {
+    const resp = await fetchWithRetry(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -142,7 +173,7 @@ export async function POST(request: Request) {
 
     if (!resp.ok) {
       if (ct.includes('application/json')) {
-        const err = await resp.json().catch(() => ({} as any));
+        const err = await resp.json().catch(() => ({} as { message?: string; detail?: string }));
         return NextResponse.json({ message: err?.message || err?.detail || 'Failed to upsert topics' }, { status: resp.status });
       } else {
         const text = await resp.text().catch(() => '');

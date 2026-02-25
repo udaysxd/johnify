@@ -67,7 +67,7 @@ export async function POST(request: Request) {
 
     if (!response.ok) {
       if (ct.includes('application/json')) {
-        const err = await response.json().catch(() => ({} as any));
+        const err = await response.json().catch(() => ({} as { message?: string; detail?: string }));
         return NextResponse.json(
           { message: err?.message || err?.detail || 'Failed to create lites' },
           { status: response.status }
@@ -95,15 +95,16 @@ export async function POST(request: Request) {
         return NextResponse.json({ message: text }, { status: 200 });
       }
     }
-  } catch (error: any) {
-    if (error?.name === 'AbortError') {
+  } catch (error: unknown) {
+    const errObj = (error && typeof error === 'object') ? (error as { name?: string; message?: string }) : {};
+    if (errObj.name === 'AbortError') {
       return NextResponse.json({ message: 'Request timed out. Please try again.' }, { status: 504 });
     }
     console.error('Error in /api/lites:', error);
     return NextResponse.json(
       {
         message: 'Internal server error',
-        details: process.env.NODE_ENV === 'development' && error?.message ? error.message : undefined,
+        details: process.env.NODE_ENV === 'development' && errObj.message ? errObj.message : undefined,
       },
       { status: 500 }
     );

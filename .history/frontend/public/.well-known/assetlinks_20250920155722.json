@@ -1,0 +1,12 @@
+[
+    {
+      "relation": ["delegate_permission/common.handle_all_urls"],
+      "target": {
+        "namespace": "android_app",
+        "package_name": "com.johnify",
+        "sha256_cert_fingerprints": [
+          "A8:3E:EC:CB:A7:A2:7E:CB:82:29:70:C2:75:2F:BE:C4:A3:FD:41:79:6C:BB:D6:F8:90:2A:47:1A:49:1F:03:A4"
+        ]
+      }
+    }
+]

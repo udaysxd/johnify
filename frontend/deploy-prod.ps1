@@ -28,7 +28,7 @@ Write-Host "NEXT_PUBLIC_BACKEND_URL: $env:NEXT_PUBLIC_BACKEND_URL"
 npm run build
 
 # Submit build to Google Cloud Build
-$IMAGE="gcr.io/optimum-shape-467809-h9/johnify-frontend"
+$IMAGE="gcr.io/johnify-476816/johnify-frontend"
 gcloud builds submit --tag $IMAGE
 
 # Deploy to Cloud Run using only build-time environment variables

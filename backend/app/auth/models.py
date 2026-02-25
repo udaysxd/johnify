@@ -24,9 +24,14 @@ class User(Base):
     updated_on = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=True)
     verification_token_expires = None  # Not used anymore
     uuid = Column(UUID(as_uuid=True), default=uuid4, nullable=False, unique=True)
+    # New optional profile fields
+    bio = Column(Text, nullable=True)
+    link = Column(String(255), nullable=True)
+    user_uid = Column(String(100), unique=True, nullable=True)
     
     # Relationship to user_posts
     posts = relationship("UserPost", back_populates="user")
+    creator_program = relationship("CreatorsProgram", uselist=False, back_populates="user")
     
     def set_password(self, password: str):
         """Hash and set the user's password"""
@@ -63,3 +68,14 @@ class UserPost(Base):
     
     # Relationship to user
     user = relationship("User", back_populates="posts")
+
+
+class CreatorsProgram(Base):
+    __tablename__ = 'creators_program'
+    __table_args__ = {'schema': 'public'}
+
+    user_id = Column(Integer, ForeignKey('public.users.user_id'), primary_key=True)
+    is_member = Column(Boolean, default=False, nullable=False)
+    joined_on = Column(DateTime, nullable=True)
+
+    user = relationship("User", back_populates="creator_program")

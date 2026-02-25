@@ -57,6 +57,24 @@ export default function HomePage() {
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<{ open: boolean; video: Video | null }>({ open: false, video: null });
 
+  // Build canonical share URL like https://johnify.com/lites/<video path>
+  const canonicalLinkFor = (videoUrl: string | undefined): string => {
+    if (!videoUrl) return '';
+    try {
+      const base = typeof window !== 'undefined' ? window.location.origin : 'https://johnify.com';
+      const u = new URL(videoUrl, base);
+      const idx = u.pathname.indexOf('/videos/');
+      if (idx >= 0) {
+        const rel = u.pathname.slice(idx + '/videos/'.length).replace(/^\/+/, '');
+        return `https://johnify.com/lites/${rel}`;
+      }
+      const p = u.pathname.replace(/^\/+/, '');
+      return `https://johnify.com/lites/${p}`;
+    } catch {
+      return '';
+    }
+  };
+
   // Close the card action menu when clicking outside or pressing Escape
   useEffect(() => {
     const handleDocClick = (e: MouseEvent) => {
@@ -260,8 +278,8 @@ export default function HomePage() {
             </h1>
             {videos.length > 0 && (
               <Link
-                href="/learn"
-                className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                href="/mlites"
+                className="btn-primary text-sm"
               >
                 Learn New
               </Link>
@@ -305,8 +323,8 @@ export default function HomePage() {
               <p className="mt-1 text-sm text-gray-500">Get started by creating your first AI tutor.</p>
               <div className="mt-6">
                 <Link
-                  href="/learn"
-                  className="inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                  href="/mlites"
+                  className="btn-primary text-sm"
                 >
                   <svg
                     className="-ml-1 mr-2 h-5 w-5"
@@ -412,6 +430,18 @@ export default function HomePage() {
                               onClick={() => handleToggleVisibility(video, !video.public)}
                             >
                               {video.public ? 'Make Private' : 'Make Public'}
+                            </button>
+                            <button
+                              className="w-full text-left px-4 py-2 hover:bg-gray-100"
+                              onClick={() => {
+                                const link = canonicalLinkFor(video.videoUrl);
+                                if (link) {
+                                  try { navigator.clipboard.writeText(link); } catch {}
+                                }
+                                setMenuOpenId(null);
+                              }}
+                            >
+                              Share
                             </button>
                             <button
                               className="w-full text-left px-4 py-2 hover:bg-gray-100 text-red-600"

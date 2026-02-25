@@ -56,9 +56,15 @@ export async function GET(req: NextRequest) {
         'X-Accel-Buffering': 'no',
       },
     });
-  } catch (err: any) {
+  } catch (err: unknown) {
+    const errMsg = (err && typeof err === 'object' && 'message' in err)
+      ? (() => {
+          const r = err as Record<string, unknown>;
+          return typeof r.message === 'string' ? r.message : String(r.message);
+        })()
+      : String(err);
     return new Response(
-      JSON.stringify({ message: 'Error connecting to mlites stream', error: String(err && err.message || err) }),
+      JSON.stringify({ message: 'Error connecting to mlites stream', error: errMsg }),
       { status: 502, headers: { 'Content-Type': 'application/json' } }
     );
   }

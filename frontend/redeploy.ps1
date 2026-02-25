@@ -1,9 +1,9 @@
 # Configuration
-$PROJECT_ID = "optimum-shape-467809-h9"
+$PROJECT_ID = "johnify-476816"
 $SERVICE_NAME = "johnify-frontend"
 $REGION = "us-central1"
 $IMAGE_NAME = "gcr.io/$PROJECT_ID/$SERVICE_NAME"
-$BACKEND_URL = "https://johnify-backend-873155673176.us-central1.run.app"
+$BACKEND_URL = "https://johnify-backend-854586330033.us-central1.run.app"
 
 # Enable detailed error reporting
 $ErrorActionPreference = "Stop"

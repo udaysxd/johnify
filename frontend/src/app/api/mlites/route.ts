@@ -18,7 +18,8 @@ export async function POST(request: Request) {
     }
 
     const backendUrl = getBackendUrl();
-    const url = `${backendUrl}/api/mlites`;
+    // Default to Beauty pipeline going forward
+    const url = `${backendUrl}/api/mlites/beauty`;
 
     const authHeader = request.headers.get('authorization') || request.headers.get('Authorization') || '';
     const cookieHeader = request.headers.get('cookie') || request.headers.get('Cookie') || '';
@@ -41,7 +42,7 @@ export async function POST(request: Request) {
     const ct = resp.headers.get('content-type') || '';
     if (!resp.ok) {
       if (ct.includes('application/json')) {
-        const err = await resp.json().catch(() => ({} as any));
+        const err = await resp.json().catch(() => ({} as { message?: string; detail?: string }));
         return NextResponse.json({ message: err?.message || err?.detail || 'Failed to start mlites' }, { status: resp.status });
       } else {
         const text = await resp.text().catch(() => '');

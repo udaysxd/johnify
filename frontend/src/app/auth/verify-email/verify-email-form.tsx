@@ -1,45 +1,86 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useSearchParams } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 
 export default function VerifyEmailForm() {
   const searchParams = useSearchParams();
+  const router = useRouter();
   const token = searchParams.get('token');
   const [status, setStatus] = useState<'verifying' | 'success' | 'error' | 'invalid'>('verifying');
   const [error, setError] = useState('');
 
   useEffect(() => {
     const verifyEmail = async () => {
-      if (!token) {
-        setStatus('invalid');
+      // Check for success/error in URL first
+      const success = searchParams.get('success');
+      const errorParam = searchParams.get('error');
+      
+      if (success === 'true') {
+        setStatus('success');
+        return;
+      }
+      
+      if (errorParam) {
+        setError(
+          errorParam === 'invalid_token' ? 'Invalid or expired verification link' :
+          errorParam === 'already_used' ? 'Your email has already been verified.' :
+          errorParam === 'expired' ? 'This verification link has expired' :
+          errorParam === 'user_not_found' ? 'User not found' :
+          'Verification failed'
+        );
+        setStatus('error');
         return;
       }
 
-      try {
-        const response = await fetch(`/api/auth/verify-email?token=${encodeURIComponent(token)}`);
-        
-        if (response.ok) {
-          setStatus('success');
-        } else {
-          const data = await response.json();
-          setError(data.detail || 'Verification failed');
-          setStatus('error');
-        }
-      } catch (err) {
-        console.error('Verification error:', err);
-        setError('An error occurred during verification');
-        setStatus('error');
+      // If no success/error in URL but we have a token, navigate to API route so cookies and redirects work reliably
+      if (token) {
+        window.location.href = `/api/auth/verify-email?token=${encodeURIComponent(token)}`;
+        return;
+      } else {
+        setStatus('invalid');
       }
     };
 
-    if (token) {
-      verifyEmail();
-    } else {
-      setStatus('invalid');
-    }
-  }, [token]);
+    verifyEmail();
+  }, [token, searchParams]);
+
+  // When success is reached, broadcast to opener/original tab, but keep this page showing success
+  useEffect(() => {
+    if (status !== 'success') return;
+
+    try {
+      // 1) Broadcast via BroadcastChannel (works same-origin)
+      try {
+        const bc = new BroadcastChannel('johnify-auth');
+        bc.postMessage({ type: 'emailVerified' });
+        // Close channel shortly after to avoid leaks
+        setTimeout(() => bc.close(), 500);
+      } catch {}
+
+      // 2) localStorage flag to trigger storage events for other tabs
+      try {
+        localStorage.setItem('johnify:emailVerified', String(Date.now()));
+        // Clean up the flag soon after
+        setTimeout(() => {
+          try { localStorage.removeItem('johnify:emailVerified'); } catch {}
+        }, 2000);
+      } catch {}
+
+      // 3) Best-effort notify opener if same-origin
+      try {
+        if (window.opener && !window.opener.closed) {
+          // Prefer postMessage for safety
+          window.opener.postMessage({ source: 'johnify', type: 'emailVerified' }, window.location.origin);
+        }
+      } catch {}
+
+      // Do not close or auto-redirect this page; we just inform the user.
+      // Original signup tab should navigate via the broadcast signals.
+      return () => {};
+    } catch {}
+  }, [status]);
 
   if (status === 'verifying') {
     return (
@@ -83,14 +124,14 @@ export default function VerifyEmailForm() {
               Email Verified!
             </h2>
             <p className="mt-2 text-sm text-gray-600">
-              Your email has been successfully verified. You can now sign in to your account.
+              Your email has been successfully verified.
             </p>
             <div className="mt-6">
               <Link
-                href="/auth/signin"
+                href="/preferences"
                 className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
               >
-                Go to Login
+                Go to Preferences
               </Link>
             </div>
           </div>

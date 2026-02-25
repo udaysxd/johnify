@@ -1,148 +1,132 @@
-import HeroVideo from '@/components/HeroVideo';
-import PromptDemo from '@/components/PromptDemo';
-import SignupCTA from '@/components/SignupCTA';
+"use client";
+
+import Link from 'next/link';
+import Image from 'next/image';
+import { useEffect, useState } from 'react';
+import { useAuth } from '@/contexts/AuthContext';
+import VideoReel, { type ReelVideo } from '@/components/VideoReel';
+
+type Video = {
+  id: string;
+  title: string;
+  thumbnailUrl: string;
+  videoUrl: string;
+  createdAt: string;
+  status: 'processing' | 'completed' | 'failed';
+  userId?: string;
+  userName?: string;
+  likesCount?: number;
+};
+
+function capitalizeFirst(s?: string): string {
+  if (!s) return 'Untitled Video';
+  const match = s.match(/[A-Za-z]/);
+  if (!match) return s.trim() ? s : 'Untitled Video';
+  const i = match.index as number;
+  return s.slice(0, i) + s.charAt(i).toUpperCase() + s.slice(i + 1);
+}
+
+function timeAgo(isoDate: string): string {
+  const now = Date.now();
+  const then = new Date(isoDate).getTime();
+  if (isNaN(then)) return '';
+  const diff = Math.max(0, now - then);
+  const sec = Math.floor(diff / 1000);
+  if (sec < 60) return `${sec || 1} second${sec === 1 ? '' : 's'} ago`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min} minute${min === 1 ? '' : 's'} ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr} hour${hr === 1 ? '' : 's'} ago`;
+  const day = Math.floor(hr / 24);
+  if (day < 30) return `${day} day${day === 1 ? '' : 's'} ago`;
+  const mon = Math.floor(day / 30);
+  if (mon < 12) return `${mon} month${mon === 1 ? '' : 's'} ago`;
+  const yr = Math.floor(day / 365);
+  return `${yr} year${yr === 1 ? '' : 's'} ago`;
+}
 
 export default function Home() {
+  const { user } = useAuth();
+  const [videos, setVideos] = useState<Video[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const fetchFeed = async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        const resp = await fetch('/api/videos/feed', { cache: 'no-store' });
+        if (!resp.ok) {
+          const j = await resp.json().catch(() => ({}));
+          throw new Error((j && (j.error || j.detail || j.message)) || 'Failed to load feed');
+        }
+        const list = (await resp.json()) as Video[];
+        setVideos(Array.isArray(list) ? list : []);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Failed to load feed');
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchFeed();
+  }, []);
+
+  const visibleVideos = user ? videos.filter((v) => String(v.userId) !== String(user.user_id)) : videos;
+
   return (
-    <div className="min-h-screen bg-white dark:bg-gray-900">
-      {/* Hero Section */}
-      <section className="pt-10 pb-20 px-4 sm:px-6 lg:px-8 max-w-7xl mx-auto">
-        <div className="grid grid-cols-1 gap-8 items-stretch">
-          {/* Left Hero - JohnifyCREATE */}
-          <div className="text-center bg-blue-100 dark:bg-blue-900 rounded-2xl p-8 border border-gray-300 dark:border-gray-700 shadow-sm h-full">
-            <p className="text-sm font-semibold tracking-wide text-blue-600 mb-3">
-              johnifyLEARN
-              <span className="ml-2 inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-blue-700 dark:border-blue-900/40 dark:bg-blue-900/20 dark:text-blue-300">Beta</span>
-            </p>
-            <h1 className="text-4xl md:text-5xl font-bold text-gray-900 dark:text-white mb-6">
-              Ready to Learn Something New? 
-            </h1>
-            <p className="text-lg md:text-xl text-gray-600 dark:text-gray-300 mb-8 md:mb-10 max-w-2xl mx-auto">
-              Join thousands of students who are using Johnify to learn anything free of cost.
-            </p>
-            <div className="flex justify-center">
-              <a
-                href="/learn"
-                className="bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 px-8 rounded-lg text-lg transition-colors inline-block"
-              >
-                Learn Now
-              </a>
+    <div className="min-h-screen bg-white">
+      {/* Body layout */}
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-0 grid grid-cols-12 gap-6">
+        {/* Left navigation */}
+        <aside className="hidden md:block md:col-span-3">
+          <div className="sticky top-2 space-y-4">
+            <div className="px-3 mb-8">
+              <Link href="/" className="block text-3xl font-extrabold tracking-tight">Johnify</Link>
+              <div className="text-sm font-bold text-gray-600 mt-1">Social <span className="line-through">Media</span> Learning app</div>
             </div>
+            <Link
+              href="/"
+              className="block px-3 py-2 rounded font-medium bg-[var(--color-primary)] text-white"
+              aria-current="page"
+            >
+              For You
+            </Link>
+            <Link href="/mlites" className="block px-3 py-2 rounded hover:bg-gray-100 text-[var(--color-primary)]">My Lites</Link>
+            {user ? (
+              <Link href="/my-saved" className="block px-3 py-2 rounded hover:bg-gray-100 text-[var(--color-primary)]">My Saved</Link>
+            ) : (
+              <Link href="/auth/signin?callback=/my-saved" className="block px-3 py-2 rounded hover:bg-gray-100 text-[var(--color-primary)]">My Saved</Link>
+            )}
+            {user ? (
+              <Link href="/my-profile" className="block px-3 py-2 rounded hover:bg-gray-100 text-[var(--color-primary)]">My Profile</Link>
+            ) : (
+              <Link href="/auth/signin?callback=/my-profile" className="block px-3 py-2 rounded hover:bg-gray-100 text-[var(--color-primary)]">My Profile</Link>
+            )}
+            {!user && (
+              <Link href="/auth/signin" className="inline-flex mt-2 btn-outline">Login</Link>
+            )}
           </div>
+        </aside>
 
-          {/* Right Hero - JohnifyTutor (temporarily hidden) */}
-          {/**
-          <div className="text-center md:text-left bg-gray-50 dark:bg-gray-800/60 rounded-2xl p-8 border border-gray-100 dark:border-gray-700 shadow-sm h-full">
-            <p className="text-sm font-semibold tracking-wide text-purple-600 mb-3">
-              johnifyTUTOR
-              <span className="ml-2 inline-flex items-center rounded-full border border-purple-200 bg-purple-50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-purple-700 dark:border-purple-900/40 dark:bg-purple-900/20 dark:text-purple-300">Beta</span>
-            </p>
-            <h2 className="text-4xl md:text-5xl font-bold text-gray-900 dark:text-white mb-6">
-              Get your personalised AI tutor
-            </h2>
-            <p className="text-lg md:text-xl text-gray-600 dark:text-gray-300 mb-8 max-w-2xl mx-auto md:mx-0">
-              Learn anything anywhere 24x7 with your own tutor in your own language. No need to pay for expensive tutors.
-            </p>
-            <div className="flex justify-center md:justify-start">
-              <a
-                href="/tutor"
-                className="bg-purple-600 hover:bg-purple-700 text-white font-medium py-3 px-8 rounded-lg text-lg transition-colors inline-block"
-              >
-                Create Tutor
-              </a>
+        {/* Feed */}
+        <main className="col-span-12 md:col-span-9">
+          <div className="md:hidden mb-6">
+            <h1 className="text-3xl font-extrabold tracking-tight">Johnify</h1>
+            <div className="text-sm font-bold text-gray-600 mt-1">Social <span className="line-through">Media</span> Learning app</div>
+          </div>
+          <h1 className="sr-only">Public Reel</h1>
+          {loading ? (
+            <div className="flex justify-center py-16">
+              <div className="w-10 h-10 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
             </div>
-          </div>
-          **/}
-        </div>
-
-        {/* Hero Video */}
-        <div className="mt-16 rounded-xl overflow-hidden shadow-2xl">
-          <HeroVideo src="https://storage.googleapis.com/assets-johnify/homepage/hero.mp4" />
-        </div>
-      </section>
-
-      {/* Prompt-to-Video Section */}
-      <section className="relative py-20 px-4 sm:px-6 lg:px-8 overflow-hidden bg-blue-50/50 dark:bg-gray-900">
-        {/* decorative background */}
-        <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-transparent via-blue-50/40 to-transparent dark:via-blue-900/10" />
-        <div className="max-w-7xl mx-auto relative">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-12 items-start">
-            {/* Copy */}
-            <div>
-              <h3 className="text-sm font-semibold tracking-wide text-blue-600 mb-3">
-                johnifyLEARN
-                <span className="ml-2 inline-flex items-center rounded-full border border-blue-200 bg-blue-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-blue-700 dark:border-blue-900/40 dark:bg-blue-900/30 dark:text-blue-300">Beta</span>
-              </h3>
-              <h2 className="text-4xl md:text-5xl font-bold text-gray-900 dark:text-white mb-4">From question to video answer in seconds.</h2>
-              <p className="text-lg md:text-xl text-gray-600 dark:text-gray-300 mb-8 max-w-2xl">
-                Learn instantly and effortlessly with our generative AI video maker. Go from the state &#39;I don&#39;t know&#39; to &#39;I know it&#39; in minutes.
-              </p>
-              {/* CTA moved below input as 'Learn with Video' */}
-            </div>
-
-            {/* Demo input */}
-            <div className="bg-white/80 dark:bg-gray-900/70 backdrop-blur rounded-2xl border border-gray-200/80 dark:border-gray-800/80 shadow-lg p-6 ring-1 ring-gray-200/60 dark:ring-gray-700/50 hover:shadow-xl transition-shadow">
-              <PromptDemo />
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* Features Section */}
-      <section className="py-16 bg-gray-50 dark:bg-gray-800">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <h2 className="text-3xl font-bold text-center text-gray-900 dark:text-white mb-12">
-            Why Choose Our Personalised AI Tutor?
-          </h2>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-            {[
-              {
-                title: "Lightning Fast",
-                description: "Learn anything in minutes, not hours. Our AI handles the heavy lifting so you don't have to.",
-                icon: "⚡",
-                iconBg: "bg-blue-50 dark:bg-blue-900/30",
-                iconText: "text-blue-700 dark:text-blue-300",
-                ring: "ring-blue-100 dark:ring-blue-900/30",
-              },
-              {
-                title: "Easy to Use",
-                description: "No special skills needed. Learn anything with just a few clicks.",
-                icon: "🎯",
-                iconBg: "bg-fuchsia-50 dark:bg-fuchsia-900/30",
-                iconText: "text-fuchsia-700 dark:text-fuchsia-300",
-                ring: "ring-fuchsia-100 dark:ring-fuchsia-900/30",
-              },
-              {
-                title: "High Quality",
-                description: "Get high-quality content videos with our advanced AI technology.",
-                icon: "✨",
-                iconBg: "bg-amber-50 dark:bg-amber-900/30",
-                iconText: "text-amber-700 dark:text-amber-300",
-                ring: "ring-amber-100 dark:ring-amber-900/30",
-              }
-            ].map((feature, index) => (
-              <div
-                key={index}
-                className="group relative bg-white dark:bg-gray-700/80 backdrop-blur-sm p-6 rounded-xl border border-gray-200/70 dark:border-gray-600 shadow-sm hover:shadow-lg transition-all duration-200 hover:-translate-y-0.5"
-              >
-                <div className={`w-12 h-12 rounded-xl flex items-center justify-center mb-4 ${feature.iconBg} ${feature.ring} ring-1`}>
-                  <span className={`text-2xl ${feature.iconText}`}>{feature.icon}</span>
-                </div>
-                <h3 className="text-xl font-semibold text-gray-900 dark:text-white mb-2">
-                  {feature.title}
-                </h3>
-                <p className="text-gray-600 dark:text-gray-300">
-                  {feature.description}
-                </p>
-                <div className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-gradient-to-r from-transparent via-gray-200/70 to-transparent dark:via-gray-600" />
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      {/* Removed separate CTA section — integrated into right hero column */}
-      <SignupCTA />
+          ) : error ? (
+            <div className="bg-red-50 border border-red-200 text-red-700 rounded p-3">{error}</div>
+          ) : (
+            <VideoReel videos={visibleVideos as unknown as ReelVideo[]} />
+          )}
+        </main>
+      </div>
     </div>
   );
 }

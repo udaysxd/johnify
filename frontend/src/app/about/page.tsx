@@ -81,7 +81,7 @@ export default function AboutPage() {
               <h3 className="text-xl font-medium text-gray-900 dark:text-white">Prashant More</h3>
               <p className="text-gray-600 dark:text-gray-300">Co-Founder</p>
               <p className="mt-2 text-gray-700 dark:text-gray-300">
-                Past: <span className="font-medium">Founder</span> at <span className="font-medium">Engg.tv</span>
+                Past: <span className="font-medium">Founder</span> at <span className="font-medium">Engg.tv, Vidyanti</span>
               </p>
               <div className="mt-3">
                 <a

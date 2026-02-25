@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { useAuth } from '@/contexts/AuthContext';
@@ -9,13 +9,77 @@ export default function RegisterPage() {
   const [formData, setFormData] = useState({
     user_name: '',
     user_email: '',
-    password: '',
-    confirmPassword: ''
+    password: ''
   });
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+  // Removed confirm password; only track main password visibility
   const router = useRouter();
   const { signIn, setUser } = useAuth();
+  const [showVerifyNotice, setShowVerifyNotice] = useState(false);
+  const [registeredEmail, setRegisteredEmail] = useState('');
+  const [resendStatus, setResendStatus] = useState<'idle' | 'sending' | 'sent' | 'error'>('idle');
+  const [resendMessage, setResendMessage] = useState<string | null>(null);
+
+  // Listen for verification completion from other tab/window and redirect to preferences
+  useEffect(() => {
+    let bc: BroadcastChannel | null = null;
+    let storageHandler: ((e: StorageEvent) => void) | null = null;
+    let messageHandler: ((e: MessageEvent) => void) | null = null;
+
+    const goToPreferences = () => {
+      try {
+        // Hard navigation ensures a refresh as requested
+        window.location.assign('/preferences');
+      } catch {
+        router.replace('/preferences');
+      }
+    };
+
+    // BroadcastChannel listener (same-origin modern browsers)
+    try {
+      bc = new BroadcastChannel('johnify-auth');
+      bc.onmessage = (evt) => {
+        if (evt && evt.data && evt.data.type === 'emailVerified') {
+          goToPreferences();
+        }
+      };
+    } catch {}
+
+    // storage event listener (fallback, works across tabs)
+    storageHandler = (e: StorageEvent) => {
+      if (e.key === 'johnify:emailVerified' && e.newValue) {
+        goToPreferences();
+      }
+    };
+    window.addEventListener('storage', storageHandler);
+
+    // postMessage listener from opener/child
+    messageHandler = (e: MessageEvent) => {
+      try {
+        if (e.origin === window.location.origin && e.data && e.data.type === 'emailVerified') {
+          goToPreferences();
+        }
+      } catch {}
+    };
+    window.addEventListener('message', messageHandler);
+
+    return () => {
+      try { if (bc) bc.close(); } catch {}
+      if (storageHandler) window.removeEventListener('storage', storageHandler);
+      if (messageHandler) window.removeEventListener('message', messageHandler);
+    };
+  }, [router]);
+
+  // Live password requirement checks
+  const pw = formData.password || '';
+  const pwReq = {
+    len: pw.length >= 8,
+    upper: /[A-Z]/.test(pw),
+    lower: /[a-z]/.test(pw),
+    number: /[0-9]/.test(pw),
+  } as const;
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value } = e.target;
@@ -32,11 +96,6 @@ export default function RegisterPage() {
     setError('');
     
     // Basic validation
-    if (formData.password !== formData.confirmPassword) {
-      setError('Passwords do not match');
-      return;
-    }
-
     if (formData.password.length < 8) {
       setError('Password must be at least 8 characters long');
       return;
@@ -65,36 +124,11 @@ export default function RegisterPage() {
         throw new Error(data.error || data.detail || 'Registration failed');
       }
 
-      // The registration API now automatically logs the user in and returns the user data
-      if (data.access_token) {
-        // Update the auth state with the user data
-        setUser({
-          user_id: data.user?.user_id || '',
-          user_email: data.user?.user_email || formData.user_email.trim(),
-          user_name: data.user?.user_name || formData.user_name.trim(),
-          is_verified: data.user?.is_verified ?? false,
-        });
-
-        // Store the token in localStorage for API requests
-        if (typeof window !== 'undefined') {
-          localStorage.setItem('auth_token', data.access_token);
-        }
-
-        // Redirect to the home page
-        window.location.href = '/';
-      } else {
-        // Fallback: Try to log in manually if auto-login didn't work
-        const { error: loginError } = await signIn(
-          formData.user_email.trim(),
-          formData.password
-        );
-        
-        if (loginError) {
-          console.error('Error during login after registration:', loginError);
-          // Still redirect to home as the registration was successful
-          window.location.href = '/';
-        }
-      }
+      // Show verification notice instead of auto-login
+      setShowVerifyNotice(true);
+      setRegisteredEmail(formData.user_email.trim());
+      setResendStatus('idle');
+      setResendMessage(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Registration failed');
       console.error('[RegisterPage] Registration error:', err);
@@ -104,8 +138,33 @@ export default function RegisterPage() {
     }
   };
 
+  const handleResend = async () => {
+    try {
+      if (!registeredEmail && !formData.user_email) return;
+      setResendStatus('sending');
+      setResendMessage(null);
+      const email = (registeredEmail || formData.user_email).trim();
+      const resp = await fetch('/api/auth/resend-verification', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_email: email }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        setResendStatus('error');
+        setResendMessage(data?.message || 'Failed to resend verification email');
+        return;
+      }
+      setResendStatus('sent');
+      setResendMessage(data?.message || 'Verification email sent.');
+    } catch (e) {
+      setResendStatus('error');
+      setResendMessage(e instanceof Error ? e.message : 'Failed to resend verification email');
+    }
+  };
+
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50 py-12 px-4 sm:px-6 lg:px-8">
+    <div className="min-h-screen flex items-center justify-center bg-[var(--color-background)] py-12 px-4 sm:px-6 lg:px-8">
       <div className="max-w-md w-full space-y-8">
         <div>
           <h2 className="mt-6 text-center text-3xl font-extrabold text-gray-900">
@@ -134,6 +193,28 @@ export default function RegisterPage() {
           </div>
         )}
         
+        {showVerifyNotice ? (
+          <div className="mt-6 space-y-4 bg-green-50 border border-green-200 rounded p-4">
+            <h3 className="text-lg font-semibold text-green-800">Thank you!</h3>
+            <p className="text-sm text-green-900">
+              You must have received an email at <span className="font-medium">{registeredEmail || formData.user_email}</span>. Please verify your email to continue.
+            </p>
+            <div className="flex gap-3 items-center">
+              <button
+                type="button"
+                onClick={handleResend}
+                disabled={resendStatus === 'sending'}
+                className={`inline-flex items-center px-4 py-2 rounded-md text-white text-sm font-medium ${resendStatus === 'sending' ? 'bg-indigo-400' : 'bg-indigo-600 hover:bg-indigo-700'}`}
+              >
+                {resendStatus === 'sending' ? 'Resending...' : 'Resend verification email'}
+              </button>
+              <Link href="/auth/signin" className="text-sm text-indigo-700 hover:text-indigo-900">Go to Sign in</Link>
+            </div>
+            {resendMessage && (
+              <div className={`text-sm ${resendStatus === 'error' ? 'text-red-700' : 'text-green-700'}`}>{resendMessage}</div>
+            )}
+          </div>
+        ) : (
         <form className="mt-8 space-y-6" onSubmit={handleSubmit}>
           <div className="rounded-md shadow-sm space-y-4">
             <div>
@@ -143,8 +224,8 @@ export default function RegisterPage() {
                 name="user_name"
                 type="text"
                 required
-                className="appearance-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-md focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 focus:z-10 sm:text-sm"
-                placeholder="Full Name"
+                className="appearance-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-md focus:outline-none focus:ring-2 focus:ring-[var(--color-secondary)] focus:border-[var(--color-secondary)] focus:z-10 sm:text-sm"
+                placeholder="Name"
                 value={formData.user_name}
                 onChange={handleChange}
                 suppressHydrationWarning
@@ -158,7 +239,7 @@ export default function RegisterPage() {
                 type="email"
                 autoComplete="email"
                 required
-                className="appearance-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-md focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 focus:z-10 sm:text-sm"
+                className="appearance-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-md focus:outline-none focus:ring-2 focus:ring-[var(--color-secondary)] focus:border-[var(--color-secondary)] focus:z-10 sm:text-sm"
                 placeholder="Email address"
                 value={formData.user_email}
                 onChange={handleChange}
@@ -167,47 +248,71 @@ export default function RegisterPage() {
             </div>
             <div>
               <label htmlFor="password" className="sr-only">Password</label>
-              <input
-                id="password"
-                name="password"
-                type="password"
-                autoComplete="new-password"
-                required
-                className="appearance-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-md focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 focus:z-10 sm:text-sm"
-                placeholder="Password"
-                value={formData.password}
-                onChange={handleChange}
-                suppressHydrationWarning
-              />
+              <div className="relative">
+                <input
+                  id="password"
+                  name="password"
+                  type={showPassword ? 'text' : 'password'}
+                  autoComplete="new-password"
+                  required
+                  className="appearance-none relative block w-full pr-10 px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-md focus:outline-none focus:ring-2 focus:ring-[var(--color-secondary)] focus:border-[var(--color-secondary)] focus:z-10 sm:text-sm"
+                  placeholder="Password"
+                  value={formData.password}
+                  onChange={handleChange}
+                  suppressHydrationWarning
+                />
+                <button
+                  type="button"
+                  aria-label={showPassword ? 'Hide password' : 'Show password'}
+                  onClick={() => setShowPassword((v) => !v)}
+                  className="absolute inset-y-0 right-2 flex items-center text-gray-500 hover:text-gray-700"
+                >
+                  {showPassword ? (
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M17.94 17.94A10.94 10.94 0 0 1 12 20C7 20 2.73 16.11 1 12c.58-1.27 1.4-2.45 2.43-3.5M9.88 9.88A3 3 0 0 1 12 9c1.66 0 3 1.34 3 3 0 .7-.24 1.34-.64 1.84" />
+                      <path d="M1 1l22 22" />
+                    </svg>
+                  ) : (
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z" />
+                      <circle cx="12" cy="12" r="3" />
+                    </svg>
+                  )}
+                </button>
+              </div>
+              {/* Password requirements */}
+              <div className="mt-2 text-xs text-gray-600">
+                <ul className="space-y-1">
+                  <li className={pwReq.len ? 'text-green-600' : ''}>
+                    {pwReq.len ? '✓' : '•'} At least 8 characters
+                  </li>
+                  <li className={pwReq.upper ? 'text-green-600' : ''}>
+                    {pwReq.upper ? '✓' : '•'} At least one uppercase letter
+                  </li>
+                  <li className={pwReq.lower ? 'text-green-600' : ''}>
+                    {pwReq.lower ? '✓' : '•'} At least one lowercase letter
+                  </li>
+                  <li className={pwReq.number ? 'text-green-600' : ''}>
+                    {pwReq.number ? '✓' : '•'} At least one number
+                  </li>
+                </ul>
+              </div>
             </div>
-            <div>
-              <label htmlFor="confirmPassword" className="sr-only">Confirm Password</label>
-              <input
-                id="confirmPassword"
-                name="confirmPassword"
-                type="password"
-                autoComplete="new-password"
-                required
-                className="appearance-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-md focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 focus:z-10 sm:text-sm"
-                placeholder="Confirm Password"
-                value={formData.confirmPassword}
-                onChange={handleChange}
-                suppressHydrationWarning
-              />
-            </div>
+            {/* Confirm password removed */}
           </div>
 
           <div>
             <button
               type="submit"
               disabled={isLoading}
-              className={`group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
+              className={`group relative w-full flex justify-center py-2 px-4 text-sm font-medium rounded-md btn-primary ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
               suppressHydrationWarning
             >
               {isLoading ? 'Creating account...' : 'Create Account'}
             </button>
           </div>
         </form>
+        )}
       </div>
     </div>
   );

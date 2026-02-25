@@ -34,6 +34,11 @@ const nextConfig = {
       },
     ];
   },
+  async rewrites() {
+    return [
+      { source: '/.well-known/assetlinks.json', destination: '/.well-known/assetlinks.json' },
+    ];
+  },
 }
 
 module.exports = nextConfig

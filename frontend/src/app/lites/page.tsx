@@ -48,9 +48,9 @@ function LitesPageContent() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [jobDirs, setJobDirs] = useState<string[]>([]); // kept for compatibility; not used for /generate flow
-  const [videoUrl, setVideoUrl] = useState<string | null>(null); // kept for compatibility; not used in card view
-  const [sseConnected, setSseConnected] = useState<boolean>(false);
+  // Removed unused states: videoUrl, sseConnected
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
+  const [progressPct, setProgressPct] = useState<number>(0);
   const [topics, setTopics] = useState<UserTopic[]>([]);
   const formRef = useRef<HTMLDivElement | null>(null);
   // My videos grid state
@@ -59,22 +59,44 @@ function LitesPageContent() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [selectedVideo, setSelectedVideo] = useState<GridVideo | null>(null);
 
+  const canonicalLinkFor = (videoUrl: string | undefined): string => {
+    if (!videoUrl) return '';
+    try {
+      // Extract path after /videos/
+      const u = new URL(videoUrl, typeof window !== 'undefined' ? window.location.origin : 'https://johnify.com');
+      const idx = u.pathname.indexOf('/videos/');
+      if (idx >= 0) {
+        const rel = u.pathname.slice(idx + '/videos/'.length).replace(/^\/+/, '');
+        return `https://johnify.com/lites/${rel}`;
+      }
+      // If it's already relative or unexpected, fall back to leaving it as-is
+      const p = u.pathname.replace(/^\/+/, '');
+      return `https://johnify.com/lites/${p}`;
+    } catch {
+      return '';
+    }
+  };
+
   const fetchMyVideos = async () => {
     try {
       const resp = await fetch('/api/videos/my-videos', { method: 'GET', headers: { 'Accept': 'application/json' }, cache: 'no-store' });
       if (!resp.ok) return;
       const data = await resp.json();
       if (Array.isArray(data)) {
+        const isObj = (x: unknown): x is Record<string, unknown> => x !== null && typeof x === 'object';
         const mapped: GridVideo[] = data
-          .map((v: any) => ({
-            id: String(v.id || ''),
-            title: String(v.title || 'Untitled Video'),
-            videoUrl: String(v.videoUrl || v.url || ''),
-            thumbnailUrl: String(v.thumbnailUrl || v.thumbnail || ''),
-            createdAt: String(v.createdAt || new Date().toISOString()),
-            type: typeof v.type === 'string' ? v.type.toLowerCase() : 'lites', // Normalize to lowercase
-          }))
-          .filter(v => !!v.videoUrl)
+          .map((v) => {
+            if (!isObj(v)) return null;
+            const id = 'id' in v ? String(v.id ?? '') : '';
+            const title = 'title' in v ? String(v.title ?? 'Untitled Video') : 'Untitled Video';
+            const videoUrl = 'videoUrl' in v ? String((v as Record<string, unknown>).videoUrl ?? '') : ('url' in v ? String((v as Record<string, unknown>).url ?? '') : '');
+            const thumbnailUrl = 'thumbnailUrl' in v ? String((v as Record<string, unknown>).thumbnailUrl ?? '') : ('thumbnail' in v ? String((v as Record<string, unknown>).thumbnail ?? '') : '');
+            const createdAt = 'createdAt' in v ? String(v.createdAt ?? new Date().toISOString()) : new Date().toISOString();
+            const type = 'type' in v && typeof v.type === 'string' ? (v.type as string).toLowerCase() : 'lites';
+            const out: GridVideo = { id, title, videoUrl, thumbnailUrl, createdAt, type };
+            return out.videoUrl ? out : null;
+          })
+          .filter((v): v is GridVideo => v !== null)
           .filter(v => v.type === 'lites'); // Now we can do direct comparison
         // Sort newest first
         mapped.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
@@ -122,8 +144,6 @@ function LitesPageContent() {
     let es: EventSource | null = null;
     try {
       es = new EventSource(`/api/lites/stream?user_id=${encodeURIComponent(user.user_id)}`);
-      const onOpen = () => setSseConnected(true);
-      const onError = () => setSseConnected(false);
       const onLiteVideo = (ev: MessageEvent) => {
         try {
           const payload = JSON.parse(ev.data || '{}');
@@ -136,25 +156,35 @@ function LitesPageContent() {
           fetchMyVideos();
           // Some backends may provide direct video_url
           if (payload.video_url && typeof payload.video_url === 'string') {
-            setVideoUrl(payload.video_url);
             setSuccess('Your Lite is ready!');
           } else {
             setSuccess('Your Lite is ready!');
           }
+          setProgressPct(100);
           setIsGenerating(false);
         } catch {}
       };
-      es.addEventListener('open', onOpen as any);
-      es.addEventListener('error', onError as any);
-      es.addEventListener('lite_video', onLiteVideo as any);
+      es.addEventListener('lite_video', onLiteVideo);
     } catch {
-      setSseConnected(false);
+      // swallow
     }
     return () => {
       try { es?.close(); } catch {}
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.user_id, jobDirs.join('|')]);
+
+  // Client-side incremental progress while generating (indeterminate style)
+  useEffect(() => {
+    if (!isGenerating) return;
+    let pct = progressPct || 0;
+    const id = setInterval(() => {
+      pct = Math.min(98, pct + Math.max(1, Math.floor((100 - pct) * 0.03)));
+      setProgressPct(pct);
+    }, 600);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isGenerating]);
 
   // (Removed diff-based 'New' timer; we now show 'New' only based on createdAt being today)
 
@@ -196,16 +226,21 @@ function LitesPageContent() {
         body: JSON.stringify(topicsPayload),
       });
       if (!tResp.ok) {
-        const err = await tResp.json().catch(() => ({} as any));
-        throw new Error(err?.message || err?.detail || 'Failed to save topics');
+        const err = await tResp.json().catch(() => ({} as Record<string, unknown>));
+        let msg: string;
+        if (typeof (err as Record<string, unknown>).message === 'string') msg = String((err as Record<string, unknown>).message);
+        else if (typeof (err as Record<string, unknown>).detail === 'string') msg = String((err as Record<string, unknown>).detail);
+        else msg = 'Failed to save topics';
+        throw new Error(msg);
       }
-      const tData = await tResp.json().catch(() => ({ topics: [] as any[] }));
+      type TopicsPostResponse = { topics?: Array<{ topic_id?: unknown; topic?: unknown }>; };
+      const tData: TopicsPostResponse = await tResp.json().catch(() => ({} as TopicsPostResponse));
       const entered = new Set(items.map((it) => it.topic.trim()));
       const selectedTopicIds: number[] = Array.isArray(tData?.topics)
         ? tData.topics
-            .filter((r: any) => entered.has(String(r?.topic || '').trim()))
-            .map((r: any) => Number(r?.topic_id))
-            .filter((n: any) => Number.isFinite(n))
+            .filter((r) => entered.has(String(r?.topic ?? '').trim()))
+            .map((r) => Number(r?.topic_id))
+            .filter((n): n is number => Number.isFinite(n))
         : [];
 
       // 2) Trigger sequential generator that persists to user_posts
@@ -228,12 +263,18 @@ function LitesPageContent() {
       }
       // Start generation state; keep patience message visible until video ready
       setIsGenerating(true);
+      setProgressPct(5);
       setJobDirs([]); // no deterministic dirs from /generate; rely on SSE
       // Preload current videos list
       fetchMyVideos();
       fetchTopics();
-    } catch (err: any) {
-      setError(err?.message || "Something went wrong");
+    } catch (err: unknown) {
+      let message = 'Something went wrong';
+      if (err instanceof Error) message = err.message;
+      else if (err && typeof err === 'object' && 'message' in err && typeof (err as Record<string, unknown>).message === 'string') {
+        message = String((err as Record<string, unknown>).message);
+      }
+      setError(message);
       setIsGenerating(false);
     } finally {
       setIsSubmitting(false);
@@ -254,7 +295,7 @@ function LitesPageContent() {
       formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     } catch {
       try {
-        window?.scrollTo?.({ top: 0, behavior: 'smooth' } as any);
+        window?.scrollTo?.({ top: 0, behavior: 'smooth' } as ScrollToOptions);
       } catch {}
     }
   };
@@ -275,31 +316,10 @@ function LitesPageContent() {
     return Array.isArray(data?.jobs) ? data.jobs : [];
   };
 
-  const pollUntilReady = async (dirs: string[]) => {
-    const start = Date.now();
-    const timeoutMs = 10 * 60 * 1000; // 10 minutes
-    const intervalMs = 2500;
-    while (Date.now() - start < timeoutMs) {
-      try {
-        const jobs = await pollStatusOnce(dirs);
-        const done = jobs.find((j) => j.status === 'completed' && j.video_url);
-        if (done && typeof done.video_url === 'string') {
-          setVideoUrl(done.video_url);
-          setSuccess('Your Lite is ready!');
-          setIsGenerating(false);
-          return;
-        }
-      } catch {
-        // Ignore and continue polling
-      }
-      await new Promise((r) => setTimeout(r, intervalMs));
-    }
-    setError('Timed out waiting for video. Please check later in My Videos.');
-    setIsGenerating(false);
-  };
+  // Removed unused pollUntilReady function
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-[var(--color-background)]">
       <div className="py-12 px-4 sm:px-6 lg:px-8">
         <div className="max-w-3xl mx-auto">
           {/* Header with Create Lites button */}
@@ -308,7 +328,7 @@ function LitesPageContent() {
               <h1 className="text-2xl font-bold text-gray-900">Lites</h1>
               <p className="text-gray-600 text-sm">Your 1-minute learning videos</p>
             </div>
-            <button onClick={scrollToForm} className="px-4 py-2 text-sm font-semibold text-white bg-indigo-600 rounded-md hover:bg-indigo-700">
+            <button onClick={scrollToForm} className="btn-primary text-sm">
               Create Lites
             </button>
           </div>
@@ -345,7 +365,7 @@ function LitesPageContent() {
           {isAuthLoading ? (
             <div className="min-h-[200px] flex items-center justify-center">
               <div className="text-center">
-                <div className="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto"></div>
+                <div className="w-12 h-12 border-4 border-[var(--color-secondary)] border-t-transparent rounded-full animate-spin mx-auto"></div>
                 <p className="mt-4 text-gray-600">Loading...</p>
               </div>
             </div>
@@ -378,7 +398,7 @@ function LitesPageContent() {
                             value={it.topic}
                             onChange={(e) => updateItem(idx, { topic: e.target.value })}
                             placeholder="e.g., Science, World History, Python Basics"
-                            className="w-full px-4 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
+                            className="w-full px-4 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-2 focus:ring-[var(--color-secondary)] focus:border-[var(--color-secondary)]"
                             disabled={isSubmitting}
                             required
                           />
@@ -388,7 +408,7 @@ function LitesPageContent() {
                           <select
                             value={it.minutes_per_day}
                             onChange={(e) => updateItem(idx, { minutes_per_day: Number(e.target.value) as TopicInput["minutes_per_day"] })}
-                            className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
+                            className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-2 focus:ring-[var(--color-secondary)] focus:border-[var(--color-secondary)]"
                             disabled={isSubmitting}
                           >
                             <option value={1}>1 min / day</option>
@@ -410,8 +430,8 @@ function LitesPageContent() {
                     type="button"
                     onClick={addItem}
                     disabled={isSubmitting || items.length >= 3}
-                    className={`px-4 py-2 text-sm rounded-md border ${
-                      items.length >= 3 ? "bg-gray-100 text-gray-400 cursor-not-allowed" : "bg-white hover:bg-gray-50"
+                    className={`px-4 py-2 text-sm rounded-md btn-outline ${
+                      items.length >= 3 ? 'opacity-50 cursor-not-allowed' : ''
                     }`}
                   >
                     Add another topic ({items.length}/3)
@@ -420,8 +440,8 @@ function LitesPageContent() {
                   <button
                     type="submit"
                     disabled={!canSubmit()}
-                    className={`inline-flex justify-center px-4 py-2 rounded-md text-sm font-medium text-white ${
-                      !canSubmit() ? "bg-indigo-300 cursor-not-allowed" : "bg-indigo-600 hover:bg-indigo-700"
+                    className={`inline-flex justify-center px-4 py-2 rounded-md text-sm font-medium btn-primary ${
+                      !canSubmit() ? 'opacity-50 cursor-not-allowed' : ''
                     }`}
                   >
                     {isSubmitting ? "Starting…" : "Save & Generate"}
@@ -429,9 +449,17 @@ function LitesPageContent() {
                 </div>
 
                 {isGenerating && (
-                  <p className="mt-3 text-center text-sm font-bold text-gray-700" aria-live="polite">
-                    Please be patient. Your Lites will be ready in a moment...
-                  </p>
+                  <div className="mt-4" aria-live="polite">
+                    <div className="w-full bg-gray-200 rounded h-2 overflow-hidden">
+                      <div
+                        className="h-2 transition-all bg-[var(--color-primary)]"
+                        style={{ width: `${Math.round(progressPct || 5)}%` }}
+                      />
+                    </div>
+                    <div className="mt-2 text-xs text-gray-600">
+                      Please be patient. It takes a few minutes to generate.
+                    </div>
+                  </div>
                 )}
 
                 {error && (
@@ -455,7 +483,7 @@ function LitesPageContent() {
               <button
                 type="button"
                 onClick={() => fetchMyVideos()}
-                className="text-sm text-indigo-600 hover:text-indigo-700"
+                className="text-sm text-[var(--color-secondary)] hover:opacity-80"
               >
                 Refresh
               </button>
@@ -553,7 +581,7 @@ function LitesPageContent() {
                           <div className="absolute inset-0 flex items-center justify-center opacity-0 hover:opacity-100 transition-opacity">
                             <div className="bg-black bg-opacity-50 rounded-full p-3">
                               <svg className="w-10 h-10 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path>
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0110 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path>
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
                               </svg>
                             </div>
@@ -621,24 +649,45 @@ function LitesPageContent() {
               </button>
             </div>
             <div className="relative bg-black">
-              <div className="relative pb-[56.25%]">
-                <video src={selectedVideo.videoUrl} controls className="absolute inset-0 w-full h-full" autoPlay>
-                  Your browser does not support the video tag.
-                </video>
-              </div>
-            </div>
-            <div className="px-4 py-3 border-t text-sm text-gray-600 flex items-center justify-between">
-              <div className="truncate">Generated Lite</div>
-              <div className="text-gray-500">{new Date(selectedVideo.createdAt).toLocaleString()}</div>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
+               <div className="relative pb-[56.25%]">
+                 <video src={selectedVideo.videoUrl} controls className="absolute inset-0 w-full h-full" autoPlay>
+                   Your browser does not support the video tag.
+                 </video>
+               </div>
+             </div>
+             <div className="px-4 py-3 border-t text-sm text-gray-600">
+               <div className="flex flex-col gap-2">
+                 <div className="flex items-center justify-between">
+                   <div className="truncate">Generated Lite</div>
+                   <div className="text-gray-500">{new Date(selectedVideo.createdAt).toLocaleString()}</div>
+                 </div>
+                 {(() => {
+                   const canonical = canonicalLinkFor(selectedVideo.videoUrl);
+                   return canonical ? (
+                     <div className="flex items-center gap-3">
+                       <span className="text-gray-500">Share link:</span>
+                       <a href={canonical} className="text-[var(--color-secondary)] hover:underline truncate" target="_blank" rel="noopener noreferrer">
+                         {canonical}
+                       </a>
+                       <button
+                         onClick={() => navigator.clipboard.writeText(canonical).catch(() => {})}
+                         className="px-2 py-1 text-xs rounded border border-gray-300 hover:bg-gray-50"
+                       >
+                         Share
+                       </button>
+                     </div>
+                   ) : null;
+                 })()}
+               </div>
+             </div>
+           </div>
+         </div>
+       )}
+     </div>
+   );
+ }
 
-export default function LitesPage() {
+ export default function LitesPage() {
   return (
     <Suspense fallback={<div className="min-h-screen bg-gray-50 flex items-center justify-center"><div className="text-gray-600">Loading…</div></div>}>
       <>

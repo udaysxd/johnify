@@ -39,7 +39,7 @@ export async function GET(request: Request) {
     const ct = resp.headers.get('content-type') || '';
     if (!resp.ok) {
       if (ct.includes('application/json')) {
-        const err = await resp.json().catch(() => ({} as any));
+        const err = await resp.json().catch(() => ({} as { message?: string; detail?: string }));
         return NextResponse.json({ message: err?.message || err?.detail || 'Failed to fetch status' }, { status: resp.status });
       } else {
         const text = await resp.text().catch(() => '');
@@ -59,8 +59,9 @@ export async function GET(request: Request) {
         return NextResponse.json({ message: text }, { status: 200 });
       }
     }
-  } catch (error: any) {
-    if (error?.name === 'AbortError') {
+  } catch (error: unknown) {
+    const errObj = (error && typeof error === 'object') ? (error as { name?: string; message?: string }) : {};
+    if (errObj.name === 'AbortError') {
       return NextResponse.json({ message: 'Status request timed out' }, { status: 504 });
     }
     console.error('Error in /api/lites/status:', error);
