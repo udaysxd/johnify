@@ -7,6 +7,8 @@ _BEAUTY_BG_OPACITY = max(0.0, min(1.0, _BEAUTY_BG_OPACITY))
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Depends
 import google.generativeai as genai
+import os
+import requests
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
@@ -19,6 +21,9 @@ import logging
 from PIL import Image, ImageDraw, ImageFont
 import re
 import requests
+import asyncio
+import time
+from typing import List, Dict, Any, Optional, Tuple, Set
 
 from .auth.models import User as AuthUser
 from .auth.security import get_current_user
@@ -460,15 +465,259 @@ def _pick_stock_video_by_gender(preferred_gender: Optional[str]) -> Optional[str
         return None
 
 
+# Request throttling to prevent asyncio issues
+_last_request_time = 0
+_request_delay = 0.5  # 500ms between requests
+
+def _throttled_request(url: str, headers: Optional[Dict] = None, params: Optional[Dict] = None, timeout: int = 10) -> Optional[requests.Response]:
+    """Make a throttled HTTP request to prevent asyncio buffer issues."""
+    global _last_request_time
+    
+    try:
+        # Add delay between requests
+        current_time = time.time()
+        time_since_last = current_time - _last_request_time
+        if time_since_last < _request_delay:
+            time.sleep(_request_delay - time_since_last)
+        
+        _last_request_time = time.time()
+        
+        # Make request with proper session handling
+        with requests.Session() as session:
+            response = session.get(url, headers=headers, params=params, timeout=timeout)
+            return response
+            
+    except Exception as e:
+        try:
+            logger.warning(f"[beauty] Request failed: {e}")
+        except Exception:
+            pass
+        return None
+
+
+def _generate_semantic_tags_polinations(narration_text: str, section_title: str) -> List[str]:
+    """Generate semantic tags using Polinations text API as fallback."""
+    try:
+        prompt = f"""
+        Analyze this text and generate 5-8 relevant tags for finding stock videos/images.
+        Focus on visual elements, actions, emotions, and concepts.
+        
+        Section Title: {section_title}
+        Narration: {narration_text}
+        
+        Return only a comma-separated list of tags, no explanations.
+        Examples: "nature, sunset, peaceful, landscape, golden hour"
+        """
+        
+        response = requests.post(
+            "https://text.pollinations.ai/openai/v1/chat/completions",
+            headers={"Content-Type": "application/json"},
+            json={
+                "model": "Qwen3Guard-8B",
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 100,
+                "temperature": 0.7
+            },
+            timeout=5  # Reduced timeout
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            if content:
+                tags = [tag.strip().lower() for tag in content.split(',')]
+                # Filter out empty tags and limit to relevant ones
+                return [tag for tag in tags if tag and len(tag) > 2][:8]
+    except Exception as e:
+        try:
+            logger.warning(f"[beauty] Polinations tag generation failed: {e}")
+        except Exception:
+            pass
+    
+    # Simple rule-based fallback if all else fails
+    fallback_tags = set()
+    text = f"{section_title} {narration_text}".lower()
+    
+    # First check for specific topic keywords to avoid wrong theme detection
+    topic_specific_keywords = {
+        'dance': ['dance', 'dancing', 'salsa', 'ballet', 'hip hop', 'tango', 'waltz', 'jazz', 'contemporary', 'choreography', 'movement', 'rhythm', 'music', 'performance', 'stage', 'studio', 'dancer', 'partner', 'steps', 'beat', 'groove'],
+        'music': ['music', 'song', 'melody', 'rhythm', 'beat', 'instrument', 'guitar', 'piano', 'drums', 'violin', 'singing', 'concert', 'performance', 'band', 'orchestra', 'studio', 'audio', 'sound'],
+        'art': ['art', 'painting', 'drawing', 'sculpture', 'artist', 'canvas', 'brush', 'color', 'creative', 'gallery', 'museum', 'exhibition', 'portrait', 'abstract', 'design'],
+        'nature': ['nature', 'forest', 'mountain', 'ocean', 'river', 'lake', 'sunset', 'sunrise', 'landscape', 'wildlife', 'animals', 'flowers', 'trees', 'sky', 'clouds', 'weather'],
+        'city': ['city', 'urban', 'buildings', 'skyline', 'street', 'architecture', 'downtown', 'metropolitan', 'traffic', 'lights', 'nightlife', 'modern', 'construction'],
+        'travel': ['travel', 'journey', 'adventure', 'vacation', 'tourism', 'destination', 'explore', 'discovery', 'trip', 'holiday', 'beach', 'hotel', 'airport', 'culture'],
+        'food': ['food', 'cooking', 'eating', 'restaurant', 'kitchen', 'chef', 'recipe', 'ingredients', 'meal', 'dinner', 'lunch', 'breakfast', 'cuisine', 'delicious'],
+        'sports': ['sports', 'football', 'basketball', 'soccer', 'tennis', 'golf', 'swimming', 'running', 'fitness', 'exercise', 'gym', 'athlete', 'competition', 'game'],
+        'technology': ['technology', 'computer', 'phone', 'internet', 'software', 'app', 'digital', 'innovation', 'future', 'robot', 'ai', 'data', 'screen'],
+        'education': ['education', 'school', 'university', 'learning', 'student', 'teacher', 'study', 'knowledge', 'book', 'classroom', 'academic', 'course', 'lesson'],
+        'business': ['business', 'office', 'work', 'company', 'meeting', 'professional', 'career', 'corporate', 'team', 'management', 'strategy', 'success']
+    }
+    
+    # Check for specific topic matches first
+    topic_matched = False
+    for topic, keywords in topic_specific_keywords.items():
+        if any(keyword in text for keyword in keywords):
+            fallback_tags.update(keywords)
+            topic_matched = True
+            break
+    
+    # Only use general theme rules if no specific topic was matched
+    if not topic_matched:
+        # Rule-based keyword extraction for common themes
+        theme_rules = {
+            # Historical/Political themes
+            'revolution': ['revolution', 'freedom', 'independence', 'struggle', 'protest', 'rights', 'movement', 'change'],
+            'war': ['war', 'battle', 'conflict', 'soldier', 'military', 'peace', 'treaty', 'victory'],
+            'politics': ['government', 'leader', 'speech', 'campaign', 'vote', 'election', 'policy', 'democracy'],
+            
+            # Cultural/Religious themes  
+            'religion': ['temple', 'church', 'mosque', 'sacred', 'holy', 'prayer', 'worship', 'faith', 'spiritual'],
+            'culture': ['tradition', 'ceremony', 'festival', 'celebration', 'ritual', 'custom', 'heritage'],
+            
+            # People/Society themes
+            'people': ['crowd', 'community', 'society', 'family', 'friends', 'relationship', 'love', 'romance'],
+            'work': ['office', 'business', 'career', 'professional', 'meeting', 'computer', 'technology'],
+            
+            # General positive themes
+            'inspiration': ['hope', 'dream', 'success', 'achievement', 'goal', 'motivation', 'courage', 'wisdom']
+        }
+        
+        # Check which themes match the text
+        for theme, keywords in theme_rules.items():
+            if any(keyword in text for keyword in keywords):
+                fallback_tags.update(keywords)
+    
+    # Add visual keywords as final fallback
+    visual_keywords = {
+        'nature', 'landscape', 'city', 'urban', 'people', 'person', 'woman', 'man',
+        'technology', 'computer', 'phone', 'screen', 'ocean', 'mountain', 'forest',
+        'sunset', 'sunrise', 'night', 'day', 'light', 'dark', 'color', 'bright',
+        'happy', 'sad', 'excited', 'calm', 'peaceful', 'energetic', 'dramatic',
+        'travel', 'adventure', 'home', 'office', 'work', 'business', 'education',
+        'food', 'cooking', 'eating', 'health', 'fitness', 'exercise', 'sport',
+        'music', 'art', 'creative', 'painting', 'drawing', 'dance', 'celebration',
+        'family', 'friends', 'relationship', 'love', 'romance', 'wedding', 'party',
+        'historical', 'ancient', 'monument', 'architecture', 'building', 'structure',
+        'desert', 'sand', 'stone', 'marble', 'gold', 'silver', 'metal', 'wood',
+        'royal', 'king', 'queen', 'palace', 'luxury', 'elegant', 'grand',
+        'mystery', 'secret', 'hidden', 'dark', 'mysterious', 'unknown', 'puzzle',
+        'power', 'strength', 'force', 'energy', 'movement', 'action', 'dynamic',
+        'culture', 'tradition', 'ceremony', 'festival', 'celebration', 'ritual',
+        'war', 'battle', 'revolution', 'freedom', 'independence', 'struggle',
+        'science', 'research', 'discovery', 'innovation', 'technology', 'future',
+        'religion', 'spiritual', 'temple', 'church', 'mosque', 'sacred', 'holy'
+    }
+    
+    words = re.findall(r'\b\w+\b', text)
+    for word in words:
+        if word in visual_keywords:
+            fallback_tags.add(word)
+    
+    return list(fallback_tags)[:8]
+
+
+def _generate_semantic_tags(narration_text: str, section_title: str) -> List[str]:
+    """Generate semantic tags based on the meaning and context of the narration."""
+    # Try Gemini first, but fall back to keyword extraction immediately if it fails
+    try:
+        genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+        # Try different model names that might be available
+        models_to_try = [
+            'gemini-2.0-flash',
+            'gemini-1.5-flash-latest', 
+            'gemini-1.5-pro',
+            'gemini-1.0-pro',
+            'gemini-pro',
+            'gemini-1.5-flash'
+        ]
+        
+        for model_name in models_to_try:
+            try:
+                model = genai.GenerativeModel(model_name)
+                break
+            except Exception:
+                continue
+        
+        if not model:
+            raise Exception("No available Gemini model found")
+        
+        prompt = f"""
+        Analyze this text and generate 5-8 relevant tags for finding stock videos/images.
+        Focus on visual elements, actions, emotions, and concepts.
+        
+        Section Title: {section_title}
+        Narration: {narration_text}
+        
+        Return only a comma-separated list of tags, no explanations.
+        Examples: "nature, sunset, peaceful, landscape, golden hour"
+        """
+        
+        response = model.generate_content(prompt)
+        if response.text:
+            tags = [tag.strip().lower() for tag in response.text.split(',')]
+            # Filter out empty tags and limit to relevant ones
+            return [tag for tag in tags if tag and len(tag) > 2][:8]
+    except Exception as e:
+        try:
+            logger.warning(f"[beauty] Semantic tag generation failed: {e}")
+        except Exception:
+            pass
+    
+    # Fallback to Polinations text API
+    try:
+        logger.info(f"[beauty] Falling back to Polinations API")
+        return _generate_semantic_tags_polinations(narration_text, section_title)
+    except Exception as e:
+        try:
+            logger.warning(f"[beauty] Polinations fallback failed: {e}")
+        except Exception:
+            pass
+    
+    # Enhanced keyword extraction with visual focus
+    fallback_tags = set()
+    text = f"{section_title} {narration_text}".lower()
+    
+    # Visual and conceptual keywords that work well for stock media
+    visual_keywords = {
+        'nature', 'landscape', 'city', 'urban', 'people', 'person', 'woman', 'man',
+        'technology', 'computer', 'phone', 'screen', 'ocean', 'mountain', 'forest',
+        'sunset', 'sunrise', 'night', 'day', 'light', 'dark', 'color', 'bright',
+        'happy', 'sad', 'excited', 'calm', 'peaceful', 'energetic', 'dramatic',
+        'travel', 'adventure', 'home', 'office', 'work', 'business', 'education',
+        'food', 'cooking', 'eating', 'health', 'fitness', 'exercise', 'sport',
+        'music', 'art', 'creative', 'painting', 'drawing', 'dance', 'celebration',
+        'family', 'friends', 'relationship', 'love', 'romance', 'wedding', 'party',
+        'historical', 'ancient', 'monument', 'architecture', 'building', 'structure',
+        'desert', 'sand', 'stone', 'marble', 'gold', 'silver', 'metal', 'wood',
+        'royal', 'king', 'queen', 'palace', 'luxury', 'elegant', 'grand',
+        'mystery', 'secret', 'hidden', 'dark', 'mysterious', 'unknown', 'puzzle',
+        'power', 'strength', 'force', 'energy', 'movement', 'action', 'dynamic',
+        'culture', 'tradition', 'ceremony', 'festival', 'celebration', 'ritual',
+        'war', 'battle', 'revolution', 'freedom', 'independence', 'struggle',
+        'science', 'research', 'discovery', 'innovation', 'technology', 'future',
+        'religion', 'spiritual', 'temple', 'church', 'mosque', 'sacred', 'holy'
+    }
+    
+    words = re.findall(r'\b\w+\b', text)
+    for word in words:
+        if word in visual_keywords:
+            fallback_tags.add(word)
+    
+    return list(fallback_tags)[:8]
+
+
 def _pick_stock_video_from_pexels(query: str, preferred_gender: Optional[str] = None) -> Optional[str]:
+    """Fetch stock video from Pexels API as backup."""
     try:
         api_key = os.getenv("PEXELS_API_KEY")
         if not api_key:
             return None
+        
         headers = {"Authorization": api_key}
         params = {"query": query, "per_page": 1, "orientation": "portrait"}
-        response = requests.get("https://api.pexels.com/videos/search", headers=headers, params=params, timeout=10)
-        if response.status_code == 200:
+        
+        response = _throttled_request("https://api.pexels.com/videos/search", headers=headers, params=params, timeout=10)
+        if response and response.status_code == 200:
             data = response.json()
             videos = data.get("videos", [])
             if videos:
@@ -489,7 +738,227 @@ def _pick_stock_video_from_pexels(query: str, preferred_gender: Optional[str] = 
         return None
 
 
-def _make_portrait_video_with_audio(stock_video: Path | str, audio_mp3: Path, out_mp4: Path, *, subtitles_path: Optional[Path] = None, drawtext_filter: Optional[str] = None, log_file: Optional[Path] = None, subtitles_font: str = "Arial", strict: bool = False) -> Path:
+def _pick_stock_video_from_pixabay(query: str, preferred_gender: Optional[str] = None) -> Optional[str]:
+    """Fetch stock video from Pixabay API as backup."""
+    try:
+        api_key = os.getenv("PIXABAY_API_KEY")
+        if not api_key:
+            return None
+        
+        params = {
+            "key": api_key,
+            "q": query,
+            "video_type": "film",
+            "orientation": "vertical",
+            "per_page": 5,
+            "safesearch": "true"
+        }
+        
+        response = _throttled_request("https://pixabay.com/api/videos/", params=params, timeout=10)
+        if response and response.status_code == 200:
+            data = response.json()
+            videos = data.get("hits", [])
+            if videos:
+                # Get the best quality video
+                video = videos[0]
+                videos_dict = video.get("videos", {})
+                
+                # Try different sizes in order of preference
+                for size in ["large", "medium", "small", "tiny"]:
+                    if size in videos_dict:
+                        return videos_dict[size]["url"]
+        return None
+    except Exception as e:
+        try:
+            logger.warning(f"[beauty] Pixabay video search failed: {e}")
+        except Exception:
+            pass
+        return None
+
+
+def _pick_stock_image_from_pexels(query: str, preferred_gender: Optional[str] = None) -> Optional[str]:
+    """Fetch stock image from Pexels as fallback when no videos are found."""
+    try:
+        api_key = os.getenv("PEXELS_API_KEY")
+        if not api_key:
+            return None
+        
+        headers = {"Authorization": api_key}
+        params = {"query": query, "per_page": 1, "orientation": "portrait"}
+        
+        response = _throttled_request("https://api.pexels.com/v1/search", headers=headers, params=params, timeout=10)
+        if response and response.status_code == 200:
+            data = response.json()
+            photos = data.get("photos", [])
+            if photos:
+                photo = photos[0]
+                # Get the best size for portrait video
+                for size in ["large", "medium", "small"]:
+                    if size in photo.get("src", {}):
+                        return photo["src"][size]
+        return None
+    except Exception as e:
+        try:
+            logger.warning(f"[beauty] Pexels image search failed: {e}")
+        except Exception:
+            pass
+        return None
+
+
+def _pick_stock_image_from_pixabay(query: str, preferred_gender: Optional[str] = None) -> Optional[str]:
+    """Fetch stock image from Pixabay as fallback."""
+    try:
+        api_key = os.getenv("PIXABAY_API_KEY")
+        if not api_key:
+            return None
+        
+        params = {
+            "key": api_key,
+            "q": query,
+            "image_type": "photo",
+            "orientation": "vertical",
+            "per_page": 5,
+            "safesearch": "true",
+            "min_width": 720,
+            "min_height": 1280
+        }
+        
+        response = _throttled_request("https://pixabay.com/api/", params=params, timeout=10)
+        if response and response.status_code == 200:
+            data = response.json()
+            images = data.get("hits", [])
+            if images:
+                # Get the best quality image
+                image = images[0]
+                return image.get("webformatURL") or image.get("largeImageURL")
+        return None
+    except Exception as e:
+        try:
+            logger.warning(f"[beauty] Pixabay image search failed: {e}")
+        except Exception:
+            pass
+        return None
+
+
+
+
+def _enhanced_semantic_stock_selection(section_title: str, narration_text: str, preferred_gender: Optional[str] = None) -> Tuple[Optional[str], bool]:
+    """
+    Enhanced semantic stock selection with multiple fallback strategies.
+    Returns: (stock_url, is_image_fallback)
+    """
+    # Generate semantic tags
+    semantic_tags = _generate_semantic_tags(narration_text, section_title)
+    
+    # Create dynamic search queries from semantic tags
+    search_queries = []
+    
+    # Add main topic first
+    filler_words_basic = ['the', 'but', 'and', 'for', 'with', 'were', 'this', 'that', 'from', 'they', 'have', 'been', 'are', 'was', 'be', 'to', 'of', 'in', 'it', 'you', 'he', 'she', 'we', 'them', 'his', 'her', 'its', 'our', 'their', 'who', 'which', 'who', 'what', 'where', 'when', 'why', 'how', 'that', 'this', 'these', 'those', 'am', 'is', 'was', 'were', 'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'a', 'an', 'at', 'by', 'from', 'in', 'into', 'of', 'on', 'onto', 'out', 'over', 'through', 'to', 'up', 'with', 'about', 'against', 'between', 'among', 'during', 'before', 'after', 'above', 'below', 'under', 'again', 'further', 'then', 'once', 'imagine', 'one', 'peaceful', 'movement', 'temple', 'sacred']
+    
+    main_topic = section_title.split()[0] if section_title else ""
+    if main_topic and len(main_topic) > 2 and main_topic.lower() not in filler_words_basic:
+        search_queries.append(main_topic)
+    
+    # Add semantic tags (prioritize meaningful ones)
+    filler_words = {
+        'the', 'but', 'and', 'for', 'with', 'were', 'this', 'that', 'from', 'they', 'have', 'been', 'not', 'all', 'can', 'will', 'just', 'so', 'if', 'out', 'up', 'what', 'when', 'where', 'how', 'than', 'then', 'some', 'more', 'very', 'also', 'even', 'only', 'own', 'same', 'such', 'too', 'think', 'say', 'well', 'get', 'go', 'know', 'take', 'come', 'see', 'look', 'want', 'give', 'use', 'find', 'tell', 'ask', 'work', 'seem', 'feel', 'try', 'leave', 'call',
+        # Additional common filler words
+        'are', 'was', 'were', 'be', 'to', 'of', 'in', 'it', 'you', 'he', 'she', 'we', 'them', 'his', 'her', 'its', 'our', 'their', 'who', 'whom', 'which', 'who', 'whom', 'whose', 'what', 'where', 'when', 'why', 'how', 'that', 'this', 'these', 'those', 'am', 'is', 'was', 'were', 'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'done', 'shall', 'should', 'could', 'would', 'might', 'must', 'may', 'can', 'will', 'would', 'should', 'could', 'might', 'must',
+        # Articles and prepositions
+        'a', 'an', 'the', 'at', 'by', 'for', 'from', 'in', 'into', 'of', 'on', 'onto', 'out', 'over', 'through', 'to', 'up', 'with', 'about', 'against', 'between', 'among', 'during', 'before', 'after', 'above', 'below', 'under', 'again', 'further', 'then', 'once',
+        # Abstract/conceptual words that don't work well for stock media
+        'imagine', 'one', 'peaceful', 'movement', 'temple', 'sacred', 'struggle', 'dignity', 'freedom', 'independence', 'revolution', 'concept', 'idea', 'theory', 'philosophy', 'belief', 'principle', 'value', 'ideal', 'dream', 'hope', 'faith', 'trust', 'courage', 'wisdom', 'knowledge', 'understanding', 'awareness', 'consciousness'
+    }
+    meaningful_tags = [tag for tag in semantic_tags if len(tag) > 2 and tag.lower() not in filler_words]
+    search_queries.extend(meaningful_tags[:6])
+    
+    # Remove duplicates and empty queries
+    search_queries = [q for q in list(dict.fromkeys(search_queries)) if q and len(q.strip()) > 2]
+    
+    try:
+        logger.info(f"[beauty] Generated semantic tags: {semantic_tags}")
+        logger.info(f"[beauty] Search queries: {search_queries}")
+    except Exception:
+        pass
+    
+    # Strategy 1: Try Pexels videos with specific queries only
+    for query in search_queries[:4]:  # Try top 4 most specific queries
+        video_url = _pick_stock_video_from_pexels(query, preferred_gender)
+        if video_url:
+            try:
+                logger.info(f"[beauty] Found Pexels video for query: {query}")
+            except Exception:
+                pass
+            return video_url, False
+    
+    # Strategy 2: Try Pixabay videos with specific queries
+    for query in search_queries[:4]:
+        video_url = _pick_stock_video_from_pixabay(query, preferred_gender)
+        if video_url:
+            try:
+                logger.info(f"[beauty] Found Pixabay video for query: {query}")
+            except Exception:
+                pass
+            return video_url, False
+    
+    # Strategy 3: Try Pexels images as fallback (more specific queries)
+    for query in search_queries[:3]:
+        image_url = _pick_stock_image_from_pexels(query, preferred_gender)
+        if image_url:
+            try:
+                logger.info(f"[beauty] Using Pexels image fallback for query: {query}")
+            except Exception:
+                pass
+            return image_url, True
+    
+    # Strategy 4: Try Pixabay images as final fallback
+    for query in search_queries[:3]:
+        image_url = _pick_stock_image_from_pixabay(query, preferred_gender)
+        if image_url:
+            try:
+                logger.info(f"[beauty] Using Pixabay image fallback for query: {query}")
+            except Exception:
+                pass
+            return image_url, True
+    
+    # Strategy 5: Fall back to database methods
+    try:
+        logger.info(f"[beauty] All APIs failed, falling back to database")
+    except Exception:
+        pass
+    
+    # Try existing database methods as last resort
+    try:
+        from .mlites import _pick_stock_video_by_tags, _pick_stock_video_by_gender
+    except ImportError:
+        try:
+            logger.warning(f"[beauty] Could not import database methods, using random fallback")
+        except Exception:
+            pass
+        return None, False
+    
+    # Extract topic words from title and narration
+    topic_words = section_title.split() + narration_text.split()[:10]
+    topic_words = [w for w in topic_words if len(w) > 3][:5]
+    
+    # Try simple tag-based selection
+    stock_video = _pick_stock_video_by_tags(topic_words, preferred_gender)
+    if stock_video:
+        return stock_video, False
+    
+    stock_video = _pick_stock_video_by_tags([section_title], preferred_gender)
+    if stock_video:
+        return stock_video, False
+    
+    stock_video = _pick_stock_video_by_gender(preferred_gender)
+    if stock_video:
+        return stock_video, False
+    
+    return None, False
+
+
+def _make_portrait_video_with_audio(stock_video: Path | str, audio_mp3: Path, out_mp4: Path, *, subtitles_path: Optional[Path] = None, drawtext_filter: Optional[str] = None, log_file: Optional[Path] = None, subtitles_font: str = "Arial", strict: bool = False, is_image_fallback: bool = False) -> Path:
     # Scale/pad to portrait; loop video if shorter than audio; cut to shortest
     env = _ffmpeg_env_settings()
     W, H = env["width"], env["height"]
@@ -506,6 +975,66 @@ def _make_portrait_video_with_audio(stock_video: Path | str, audio_mp3: Path, ou
         sub_filter = f"subtitles='{sp}':force_style='{force_style}'"
 
     is_url = isinstance(stock_video, str) and stock_video.lower().startswith(("http://","https://"))
+    
+    # Handle image fallback - convert image to video
+    if is_image_fallback:
+        try:
+            # Download and convert image to video
+            idx = out_mp4.stem.split("_")[1] if "_" in out_mp4.stem else "0"
+            image_path = out_mp4.parent / f'fallback_image_{idx}.jpg'
+            
+            if is_url:
+                # Download image with throttled request
+                response = _throttled_request(stock_video, timeout=10)
+                if response and response.status_code == 200:
+                    with open(image_path, 'wb') as f:
+                        f.write(response.content)
+            else:
+                # Copy local image
+                import shutil
+                shutil.copy2(stock_video, image_path)
+            
+            # Create video from image with slow zoom/pan effect
+            vf_image = f"fps=30,scale={W}:{H}:force_original_aspect_ratio=decrease,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1"
+            vf_image += ",zoompan=z='if(lte(on,1),1+0.001*on,1.2)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1"
+            
+            cmd = [
+                "ffmpeg","-y",
+                "-loop","1","-i", str(image_path),
+                "-i",str(audio_mp3),
+                "-shortest",
+                "-map","0:v:0","-map","1:a:0",
+                "-c:v","libx264","-preset",str(env["preset"]),"-crf",str(env["crf"]),"-r","30",
+                "-vf", vf_image,
+                "-aspect","9:16",
+                "-pix_fmt","yuv420p",
+                "-c:a","aac","-b:a","128k",
+                str(out_mp4)
+            ]
+            
+            if log_file:
+                with open(log_file, 'ab') as lf:
+                    lf.write(('\n\n=== ffmpeg (image fallback) ===\n' + ' '.join(cmd) + '\n').encode('utf-8', errors='ignore'))
+                    subprocess.run(cmd, check=True, stdout=lf, stderr=lf)
+            else:
+                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            
+            # Cleanup
+            try:
+                image_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            
+            return out_mp4
+            
+        except Exception as e:
+            try:
+                logger.warning(f"[beauty] Image fallback failed: {e}")
+            except Exception:
+                pass
+            # Fall back to original video logic
+            pass
+    
     # If remote URL, re-encode to a local mezzanine file so we can loop it reliably (handles non-seekable/chunked sources)
     local_src: Path | str = stock_video
     if is_url:
@@ -1209,34 +1738,30 @@ async def create_beauty(req: CreateBeautyRequest, bg: BackgroundTasks, current_u
                                 subprocess.run([
                                     'ffmpeg','-y','-f','concat','-safe','0','-i',str(list_file),'-c:a','libmp3lame','-b:a','128k',str(section_audio)
                                 ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        # Pick stock
-                        stock_url = _pick_stock_video_from_pexels(section_title, preferred_gender)
+                        # Pick stock using enhanced semantic selection
+                        # Combine all narration text for better semantic understanding
+                        full_narration = " ".join(section_narr)
+                        stock_url, is_image_fallback = _enhanced_semantic_stock_selection(section_title, full_narration, preferred_gender)
+                        
                         if not stock_url:
-                            sel = _pick_stock_video_by_topic_words(section_title, preferred_gender)
-                            if sel:
-                                stock_url = sel[0]
-                            else:
-                                sel = _pick_stock_video_by_tags(topic_tags, preferred_gender)
-                                if sel:
-                                    stock_url = sel[0]
-                        if not stock_url:
-                            inferred = _infer_gender_from_tags(topic_tags)
-                            if inferred in ("male", "female"):
-                                stock_url = _pick_stock_video_by_gender(inferred)
-                        if not stock_url:
-                            stock_url = str(_pick_random_template_video())
-                        if stock_url:
                             try:
-                                logger.info(f"[beauty] Section {idx}: stock_url={stock_url}")
+                                logger.warning(f"[beauty] No stock media found for section {idx}")
                             except Exception:
                                 pass
+                            continue
+                            
+                        try:
+                            logger.info(f"[beauty] Section {idx}: Using {'image' if is_image_fallback else 'video'} fallback: {stock_url}")
+                        except Exception:
+                            pass
+                        
                         # Skip per-segment subtitle burning in multi-section mode; captions will be burned after concatenation
                         out_mp4 = out_dir / f"segment_{idx}.mp4"
                         # Temporarily suppress subtitle burn warnings for multi-section segments
                         import logging as _logging
                         _logging.getLogger("mlites_beauty").setLevel(_logging.ERROR)
                         try:
-                            success = _make_portrait_video_with_audio(stock_url, str(section_audio), out_mp4, subtitles_path=None, drawtext_filter=None)
+                            success = _make_portrait_video_with_audio(stock_url, str(section_audio), out_mp4, subtitles_path=None, drawtext_filter=None, is_image_fallback=is_image_fallback)
                         finally:
                             # Restore normal logging level
                             _logging.getLogger("mlites_beauty").setLevel(_logging.INFO)
