@@ -5,7 +5,7 @@ from typing import Dict, List, Optional
 import os
 
 class RateLimiter:
-    def __init__(self, max_requests: int = 3000, window: int = 60):
+    def __init__(self, max_requests: int = 10000, window: int = 60):
         """
         Initialize rate limiter
         

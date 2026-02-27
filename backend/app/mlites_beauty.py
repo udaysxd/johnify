@@ -8,7 +8,7 @@ _BEAUTY_BG_OPACITY = max(0.0, min(1.0, _BEAUTY_BG_OPACITY))
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Depends
 import google.generativeai as genai
 from pydantic import BaseModel
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 import os
 import time
@@ -18,6 +18,7 @@ import subprocess
 import logging
 from PIL import Image, ImageDraw, ImageFont
 import re
+import requests
 
 from .auth.models import User as AuthUser
 from .auth.security import get_current_user
@@ -95,6 +96,20 @@ def _to_title_case(text: str) -> str:
     title_case = ' '.join(word.capitalize() for word in words)
 
     return title_case
+
+def _split_script_into_sections(narrations: List[str], max_sections: int = 3) -> List[Tuple[str, List[str]]]:
+    if not narrations:
+        return []
+    n = len(narrations)
+    section_size = max(1, n // max_sections)
+    sections: List[Tuple[str, List[str]]] = []
+    for i in range(0, n, section_size):
+        section_narr = narrations[i:i + section_size]
+        # Title from first narration, truncated
+        first_narr = section_narr[0]
+        title = first_narr[:50] + "..." if len(first_narr) > 50 else first_narr
+        sections.append((title, section_narr))
+    return sections
 
 # Environment-aware FFmpeg tuning to reduce memory in production (Cloud Run)
 def _ffmpeg_env_settings() -> dict[str, any]:
@@ -176,6 +191,24 @@ def _pick_random_template_video() -> Path:
         p = base / "beautytips_01.mov"
         return p
     return random.choice(candidates)
+
+
+def _get_audio_duration(audio_path: Path) -> float:
+    """Get duration of an audio file in seconds."""
+    try:
+        cmd = [
+            'ffprobe',
+            '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            str(audio_path)
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        duration = float(result.stdout.strip())
+        return duration
+    except Exception as e:
+        logger.error(f"[beauty] Failed to get audio duration: {e}")
+        return 30.0  # Default to 30 seconds
 
 
 def _concat_mp3s(mp3_files: List[Path], out_mp3: Path) -> Path:
@@ -427,6 +460,35 @@ def _pick_stock_video_by_gender(preferred_gender: Optional[str]) -> Optional[str
         return None
 
 
+def _pick_stock_video_from_pexels(query: str, preferred_gender: Optional[str] = None) -> Optional[str]:
+    try:
+        api_key = os.getenv("PEXELS_API_KEY")
+        if not api_key:
+            return None
+        headers = {"Authorization": api_key}
+        params = {"query": query, "per_page": 1, "orientation": "portrait"}
+        response = requests.get("https://api.pexels.com/videos/search", headers=headers, params=params, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            videos = data.get("videos", [])
+            if videos:
+                video = videos[0]
+                video_files = video.get("video_files", [])
+                # Prefer hd quality
+                hd_files = [vf for vf in video_files if vf.get("quality") == "hd"]
+                if hd_files:
+                    return hd_files[0]["link"]
+                elif video_files:
+                    return video_files[0]["link"]
+        return None
+    except Exception as e:
+        try:
+            logger.warning(f"[beauty] Pexels video search failed: {e}")
+        except Exception:
+            pass
+        return None
+
+
 def _make_portrait_video_with_audio(stock_video: Path | str, audio_mp3: Path, out_mp4: Path, *, subtitles_path: Optional[Path] = None, drawtext_filter: Optional[str] = None, log_file: Optional[Path] = None, subtitles_font: str = "Arial", strict: bool = False) -> Path:
     # Scale/pad to portrait; loop video if shorter than audio; cut to shortest
     env = _ffmpeg_env_settings()
@@ -439,7 +501,7 @@ def _make_portrait_video_with_audio(stock_video: Path | str, audio_mp3: Path, ou
         sp = _esc_path(str(subtitles_path))
         # Style: bottom-centered, boxed look via libass outline
         force_style = (
-            f"FontName={subtitles_font},FontSize=44,OutlineColour=&H80000000&,BorderStyle=3,Outline=2,Shadow=0,Alignment=2,MarginV=120"
+            f"FontName={subtitles_font},FontSize=6,Bold=1,OutlineColour=&H80000000&,BorderStyle=3,Outline=2,Shadow=0,Alignment=2,MarginV=20"
         )
         sub_filter = f"subtitles='{sp}':force_style='{force_style}'"
 
@@ -448,7 +510,8 @@ def _make_portrait_video_with_audio(stock_video: Path | str, audio_mp3: Path, ou
     local_src: Path | str = stock_video
     if is_url:
         try:
-            local_src = out_mp4.parent / 'stock_src.mp4'
+            idx = out_mp4.stem.split("_")[1]  # extract idx from segment_{idx}.mp4
+            local_src = out_mp4.parent / f'stock_src_{idx}.mp4'
             subprocess.run([
                 'ffmpeg','-y','-i', str(stock_video),
                 '-an', '-r','30',
@@ -748,7 +811,7 @@ async def create_beauty(req: CreateBeautyRequest, bg: BackgroundTasks, current_u
                 """
             ), {"uid": int(getattr(current_user, "user_id", 0) or 0)}).mappings().first()
             used = int(row["cnt"]) if row and row.get("cnt") is not None else 0
-            limit = 25
+            limit = 100
             if used >= limit:
                 remaining = 0
                 raise HTTPException(status_code=429, detail=f"Daily limit reached: {limit} MLites Beauty videos in the last 24 hours. Try again later.")
@@ -771,6 +834,7 @@ async def create_beauty(req: CreateBeautyRequest, bg: BackgroundTasks, current_u
             pass
 
     def _run(items: List[Dict[str, Any]], user_email: Optional[str], user_id: Optional[int], ts: int):
+        ENVIRONMENT = os.getenv("ENVIRONMENT", "development").lower()
         try:
             base_dir = _get_generated_root()
             base_dir.mkdir(parents=True, exist_ok=True)
@@ -1042,11 +1106,21 @@ async def create_beauty(req: CreateBeautyRequest, bg: BackgroundTasks, current_u
                     logger.error(f"[beauty] audio generation error: {e}")
                     mp3_files = []
 
+                # Check for identical narrations and fix
+                if len(narr) > 1 and len(set(narr)) <= 1:
+                    try:
+                        logger.warning(f"[beauty] All {len(narr)} narrations are identical, numbering them to prevent repeated captions")
+                        base = narr[0] if narr else "Default narration."
+                        narr = [f"Part {i+1}: {base}" for i in range(len(narr))]
+                    except Exception as e:
+                        logger.error(f"[beauty] Failed to fix identical narrations: {e}")
+
                 if not mp3_files:
                     # Generate a 5-second silent MP3 as last resort
                     silent = audio_dir / 's000.mp3'
                     subprocess.run(['ffmpeg','-y','-f','lavfi','-i','anullsrc=channel_layout=stereo:sample_rate=44100','-t','5','-c:a','libmp3lame',str(silent)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     mp3_files = [silent]
+
 
                 # Concatenate all narration audio into one
                 # List-mode: keep original audio frames by using concat demuxer with stream copy (no re-encode)
@@ -1060,46 +1134,17 @@ async def create_beauty(req: CreateBeautyRequest, bg: BackgroundTasks, current_u
                         'ffmpeg','-y','-f','concat','-safe','0','-i',str(list_file),
                         '-c','copy', str(concat_mp3)
                     ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                else:
-                    concat_mp3 = out_dir / 'narration_full.mp3'
-                    try:
-                        _concat_mp3s(mp3_files, concat_mp3)
-                    except Exception:
-                        # If concat-copy fails, re-encode
-                        list_file = out_dir / 'inputs_reencode.txt'
-                        with list_file.open('w', encoding='utf-8') as f:
-                            for p in mp3_files:
-                                f.write(f"file '{p.as_posix()}'\n")
-                        subprocess.run([
-                            'ffmpeg','-y','-f','concat','-safe','0','-i',str(list_file),'-c:a','libmp3lame','-b:a','128k',str(concat_mp3)
-                        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-                # Build subtitles (SRT) aligned to each narration clip's duration
-                captions_path = out_dir / 'captions.srt'
-                try:
+                    # Build subtitles (SRT) for list_mode
+                    captions_path = out_dir / 'captions.srt'
                     cues: List[tuple[float, float, str]] = []
                     t = 0.0
-                    # Important: scope timing behavior by mode
-                    # - List-mode: exact original per-clip durations (no scaling, no padding), strict chaining
-                    # - Non-list: original logic (with 20s cap), no scaling, no padding
-                    is_list = bool('is_list_mode' in locals() and is_list_mode)
                     for idx, p in enumerate(mp3_files):
                         dur_meas = float(_get_audio_duration(Path(p)))
-                        if is_list:
-                            # Exact measured durations; no scaling/padding/safety for list-mode
-                            base = max(0.2, (dur_meas if dur_meas and dur_meas == dur_meas else 0.5))
-                            text_line = str(narr[idx]) if idx < len(narr) else ""
-                            start, end = t, t + base
-                            cues.append((start, end, text_line))
-                            t = end
-                        else:
-                            # Original non-list behavior (pre-change): include 20.0 cap, no scaling/padding
-                            dur = max(1.5, min(20.0, dur_meas if dur_meas and dur_meas == dur_meas else 2.5))
-                            start, end = t, t + dur
-                            text_line = str(narr[idx]) if idx < len(narr) else ""
-                            cues.append((start, end, text_line))
-                            t = end
-                    # List-mode: no end-extension; cues reflect original audio exactly
+                        base = max(0.2, (dur_meas if dur_meas and dur_meas == dur_meas else 0.5))
+                        text_line = str(narr[idx]) if idx < len(narr) else ""
+                        start, end = t, t + base
+                        cues.append((start, end, text_line))
+                        t = end
                     def _fmt(ts: float) -> str:
                         total_ms = max(0, int(round(ts * 1000)))
                         hh = total_ms // 3600000
@@ -1110,246 +1155,168 @@ async def create_beauty(req: CreateBeautyRequest, bg: BackgroundTasks, current_u
                     with captions_path.open('w', encoding='utf-8') as f:
                         for i, (s, e, txt) in enumerate(cues, 1):
                             f.write(f"{i}\n{_fmt(s)} --> {_fmt(e)}\n{txt}\n\n")
-                    # Expose cues for potential overlays fallback later
+                    # Expose cues
                     try:
                         use_cues = list(cues)
                     except Exception:
                         use_cues = []
+                    video_path = out_dir / f"mlites_beauty_{safe}_{ts}.mp4"
+                else:
+                    # Split into sections for multiple stock videos
                     try:
-                        logger.info(f"[beauty] built captions: cues={len(cues)} file={captions_path} size={captions_path.stat().st_size if captions_path.exists() else 0}")
+                        tags = gem.get("tags") or []
                     except Exception:
-                        pass
-                    # Also prepare drawtext overlay filter from SRT (preferred, avoids subtitles filter)
-                    # Choose a font path that likely exists (Windows/Assets/DejaVu/Noto)
-                    font_candidates = [
-                        # Prefer bundled font to avoid system permission/path issues
-                        str(Path(__file__).resolve().parent / 'assets' / 'fonts' / 'DejaVuSans.ttf'),
-                        str(Path(__file__).resolve().parent / 'assets' / 'fonts' / 'NotoSansDevanagari-Regular.ttf'),
-                        # Windows fonts
-                        r"C:\\Windows\\Fonts\\Nirmala.ttf",
-                        r"C:\\Windows\\Fonts\\NirmalaB.ttf",
-                        r"C:\\Windows\\Fonts\\Mangal.ttf",
-                        r"C:\\Windows\\Fonts\\Kokila.ttf",
-                        r"C:\\Windows\\Fonts\\segoeui.ttf",
-                        r"C:\\Windows\\Fonts\\arial.ttf",
-                    ]
-                    font_path = next((p for p in font_candidates if os.path.exists(p)), None)
-                    # Escape for ffmpeg drawtext (single-line variant used for overlays/png)
-                    def esc_txt(t: str) -> str:
-                        # Keep for potential inline drawtext usage, but when using textfile we should not escape content.
-                        return t
-                    # Escape and preserve newlines for drawtext
-                    def esc_txt_multiline(s: str) -> str:
-                        s = (s or "").replace('\r', ' ')
-                        return s
-                    # Pick a font family name to avoid fontfile path parsing issues on Windows
-                    def has_devanagari(s: str) -> bool:
-                        import re
-                        return bool(re.search(r"[\u0900-\u097F]", s or ""))
-                    needs_dev = False
-                    try:
-                        for _s in narr:
-                            if has_devanagari(str(_s)):
-                                needs_dev = True
-                                break
-                    except Exception:
-                        needs_dev = False
-                    font_family = 'Nirmala UI' if needs_dev else 'Arial'
-                    drawtext_entries: List[str] = []
-                    # Decide font spec for drawtext: prefer fontfile if available (works without fontconfig install)
-                    def _esc_path(p: Optional[str]) -> str:
-                        if not p:
-                            return ''
-                        # Escape backslashes and colons for ffmpeg filter args
-                        return p.replace('\\', r'\\').replace(':', r'\:').replace("'", "\\'")
-                    ff_font_spec = (
-                        f"fontfile='{_esc_path(font_path)}'" if font_path else f"font='{font_family}'"
-                    )
-                    cap_env = _caption_env()
-                    fs = cap_env["font_size"]
-                    line_spacing = cap_env["line_spacing"]
-                    margin_v = cap_env["margin_v"]
-                    side_margin = cap_env["side_margin"]
-                    # Ensure we have the target frame width/height for wrapping calculations
-                    _env_dims = _ffmpeg_env_settings()
-                    W = int(_env_dims.get("width", 1080))
-                    H = int(_env_dims.get("height", 1920))
-                    try:
-                        logger.info(f"[beauty] caption settings: font={'file' if font_path else 'family'} size={fs} line_spacing={line_spacing} margin_v={margin_v} side_margin={side_margin} WxH={W}x{H}")
-                    except Exception:
-                        pass
-                    # Rough character-per-line estimate: glyph width ~ 0.6 * font_size
-                    approx_glyph_w = max(10, int(0.6 * fs))
-                    usable_w = max(100, (W - 2 * side_margin))
-                    max_chars = max(12, usable_w // approx_glyph_w)
-                    def wrap_for_drawtext(s: str) -> str:
-                        words = (s or '').split()
-                        lines: list[str] = []
-                        cur = ''
-                        for w in words:
-                            test = w if not cur else cur + ' ' + w
-                            if len(test) <= max_chars:
-                                cur = test
-                            else:
-                                if cur:
-                                    lines.append(cur)
-                                cur = w
-                        if cur:
-                            lines.append(cur)
-                        # Allow more lines; configurable via env (default 10)
-                        try:
-                            max_lines = int(os.getenv('MLITES_BEAUTY_CAPTION_MAX_LINES', '10') or '10')
-                        except Exception:
-                            max_lines = 10
-                        if max_lines > 0:
-                            lines = lines[:max_lines]
-                        return esc_txt_multiline('\n'.join(lines))
-                    # Prefer to parse the actual SRT file for start/end timings
-                    def _parse_ts(ts: str) -> float:
-                        # Format: HH:MM:SS,mmm
-                        hh, mm, rest = ts.split(':', 2)
-                        ss, ms = rest.split(',', 1)
-                        return int(hh) * 3600 + int(mm) * 60 + int(ss) + (int(ms) / 1000.0)
-                    use_cues: List[tuple[float, float, str]] = []
-                    try:
-                        txt = captions_path.read_text(encoding='utf-8', errors='ignore') if captions_path.exists() else ''
-                        blocks = [b for b in txt.split('\n\n') if b.strip()]
-                        cues_srt: List[tuple[float, float, str]] = []
-                        import re as _re
-                        for b in blocks:
-                            lines = [ln for ln in b.splitlines() if ln.strip()]
-                            if not lines:
-                                continue
-                            # first line may be index; find time line
-                            time_line = None
-                            for ln in lines[:3]:
-                                if '-->' in ln:
-                                    time_line = ln
-                                    break
-                            if not time_line:
-                                continue
-                            m = _re.match(r"\s*(\d\d:\d\d:\d\d,\d\d\d)\s*-->\s*(\d\d:\d\d:\d\d,\d\d\d)", time_line)
-                            if not m:
-                                continue
-                            s_ts, e_ts = m.group(1), m.group(2)
-                            s_val, e_val = _parse_ts(s_ts), _parse_ts(e_ts)
-                            # Remaining lines after the time line are text
-                            text_lines = []
-                            seen_time = False
-                            for ln in lines:
-                                if not seen_time and ln is time_line:
-                                    seen_time = True
-                                    continue
-                                if seen_time:
-                                    text_lines.append(ln)
-                            # Join text lines with spaces (no escaping; textfile will read raw content)
-                            text_join = ' '.join(text_lines).strip()
-                            cues_srt.append((s_val, e_val, text_join))
-                        # Use cues_srt if non-empty; else fallback to duration-based cues (no escaping)
-                        use_cues = cues_srt if cues_srt else [(s, e, tx) for (s, e, tx) in cues]
-                        # Use textfile to ensure FFmpeg processes newlines uniformly across environments
-                        txt_dir = out_dir / 'captions_txt'
-                        txt_dir.mkdir(exist_ok=True)
-                        for (idx2, (s, e, txt_line)) in enumerate(use_cues, start=1):
-                            wrapped = wrap_for_drawtext(txt_line)
-                            txt_path = txt_dir / f"cap_{idx2:03d}.txt"
+                        tags = []
+                    topic_tags = _normalize_tags(tags)
+                    preferred_gender = (os.getenv("MLITES_BEAUTY_DEFAULT_GENDER", "") or "").strip().lower() or None
+                    sections = _split_script_into_sections(narr, max_sections=3)
+                    # Concatenate all narration audio into one for multi-section fallback
+                    concat_mp3 = out_dir / 'narration_full.mp3'
+                    list_file = out_dir / 'inputs_copy.txt'
+                    with list_file.open('w', encoding='utf-8') as f:
+                        for p in mp3_files:
+                            f.write(f"file '{p.as_posix()}'\n")
+                    subprocess.run([
+                        'ffmpeg','-y','-f','concat','-safe','0','-i',str(list_file),'-c','copy', str(concat_mp3)
+                    ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    section_mp3_groups = []
+                    start = 0
+                    for _, section_narr in sections:
+                        count = len(section_narr)
+                        section_mp3_groups.append(mp3_files[start:start+count])
+                        start += count
+                    video_segments = []
+                    def _fmt(ts: float) -> str:
+                        total_ms = max(0, int(round(ts * 1000)))
+                        hh = total_ms // 3600000
+                        mm = (total_ms % 3600000) // 60000
+                        ss = (total_ms % 60000) // 1000
+                        ms = total_ms % 1000
+                        return f"{hh:02d}:{mm:02d}:{ss:02d},{ms:03d}"
+                    for idx, (section_title, section_narr) in enumerate(sections):
+                        section_mp3s = section_mp3_groups[idx]
+                        if len(section_mp3s) == 1:
+                            section_audio = section_mp3s[0]
+                        else:
+                            section_audio = out_dir / f"section_audio_{idx}.mp3"
                             try:
-                                txt_path.write_text(wrapped.replace(r"\n", "\n"), encoding='utf-8')
+                                _concat_mp3s(section_mp3s, section_audio)
                             except Exception:
-                                # best-effort
-                                pass
-                            entry = (
-                                f",drawtext={ff_font_spec}:textfile='{_esc_path(str(txt_path))}':fontsize={fs}:fontcolor=white@0.98:"
-                                f"line_spacing={line_spacing}:x=(w-text_w)/2:y=h-{margin_v}:box=1:boxcolor=black@0.55:boxborderw=12:"
-                                f"enable='between(t,{s:.2f},{e:.2f})'"
-                            )
-                            drawtext_entries.append(entry)
-                    except Exception:
-                        # Fallback to duration-based cues if SRT parse fails
-                        use_cues = [(s, e, txt) for (s, e, txt) in cues]
-                        txt_dir = out_dir / 'captions_txt'
-                        txt_dir.mkdir(exist_ok=True)
-                        for (idx2, (s, e, txt)) in enumerate(use_cues, start=1):
-                            wrapped = wrap_for_drawtext(txt)
-                            txt_path = txt_dir / f"cap_{idx2:03d}.txt"
-                            try:
-                                txt_path.write_text(wrapped.replace(r"\n", "\n"), encoding='utf-8')
-                            except Exception:
-                                pass
-                            entry = (
-                                f",drawtext={ff_font_spec}:textfile='{_esc_path(str(txt_path))}':fontsize={fs}:fontcolor=white@0.98:"
-                                f"line_spacing={line_spacing}:x=(w-text_w)/2:y=h-{margin_v}:box=1:boxcolor=black@0.55:boxborderw=12:"
-                                f"enable='between(t,{s:.2f},{e:.2f})'"
-                            )
-                            drawtext_entries.append(entry)
-                    drawtext_filter = ''.join(drawtext_entries) if drawtext_entries else None
-                    if drawtext_filter:
-                        try:
-                            logger.info(f"[beauty] prepared drawtext overlay for {len(cues)} cues using font={font_path}")
-                        except Exception:
-                            pass
-                except Exception:
-                    try:
-                        if captions_path.exists():
-                            captions_path.unlink(missing_ok=True)  # type: ignore[arg-type]
-                    except Exception:
-                        pass
-                    drawtext_filter = None
-
-                # Choose a stock video in two steps:
-                # Step 1: try topic words search against tags (partial matches)
-                # Step 2: if none found, fall back to existing tag-to-tag comparison
-                try:
-                    tags = gem.get("tags") or []
-                except Exception:
-                    tags = []
-                topic_tags = _normalize_tags(tags)
-                # Preferred gender from env or future user profile
-                preferred_gender = (os.getenv("MLITES_BEAUTY_DEFAULT_GENDER", "") or "").strip().lower() or None
-                sel = _pick_stock_video_by_topic_words(tp, preferred_gender)
-                if not sel:
-                    sel = _pick_stock_video_by_tags(topic_tags, preferred_gender)
-                stock_url = sel[0] if sel else None
-                overlap_score = sel[1] if sel else -1
-                images_fallback = False
-                if not stock_url:
-                    # Try gender-only selection ONLY if tags contain gender hints; ignore 'neutral'
-                    inferred = _infer_gender_from_tags(topic_tags)
-                    if inferred in ("male", "female"):
-                        genders_try: list[str] = [inferred]
-                        stock_url = None
-                        for g in genders_try:
-                            gu = _pick_stock_video_by_gender(g)
-                            if gu:
-                                stock_url = gu
-                                preferred_gender = g
-                                break
+                                list_file = out_dir / f"inputs_reencode_{idx}.txt"
+                                with list_file.open('w', encoding='utf-8') as f:
+                                    for p in section_mp3s:
+                                        f.write(f"file '{p.as_posix()}'\n")
+                                subprocess.run([
+                                    'ffmpeg','-y','-f','concat','-safe','0','-i',str(list_file),'-c:a','libmp3lame','-b:a','128k',str(section_audio)
+                                ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        # Pick stock
+                        stock_url = _pick_stock_video_from_pexels(section_title, preferred_gender)
                         if not stock_url:
-                            images_fallback = True
+                            sel = _pick_stock_video_by_topic_words(section_title, preferred_gender)
+                            if sel:
+                                stock_url = sel[0]
+                            else:
+                                sel = _pick_stock_video_by_tags(topic_tags, preferred_gender)
+                                if sel:
+                                    stock_url = sel[0]
+                        if not stock_url:
+                            inferred = _infer_gender_from_tags(topic_tags)
+                            if inferred in ("male", "female"):
+                                stock_url = _pick_stock_video_by_gender(inferred)
+                        if not stock_url:
+                            stock_url = str(_pick_random_template_video())
+                        if stock_url:
                             try:
-                                logger.warning(f"[beauty] gender hinted as {inferred} but no DB video found; using image-video fallback pipeline")
+                                logger.info(f"[beauty] Section {idx}: stock_url={stock_url}")
                             except Exception:
                                 pass
-                    else:
-                        # No gender hints in tags -> go straight to image-video fallback
-                        images_fallback = True
+                        # Skip per-segment subtitle burning in multi-section mode; captions will be burned after concatenation
+                        out_mp4 = out_dir / f"segment_{idx}.mp4"
+                        # Temporarily suppress subtitle burn warnings for multi-section segments
+                        import logging as _logging
+                        _logging.getLogger("mlites_beauty").setLevel(_logging.ERROR)
                         try:
-                            logger.warning(f"[beauty] no tag match and no gender hints; using image-video fallback pipeline")
+                            success = _make_portrait_video_with_audio(stock_url, str(section_audio), out_mp4, subtitles_path=None, drawtext_filter=None)
+                        finally:
+                            # Restore normal logging level
+                            _logging.getLogger("mlites_beauty").setLevel(_logging.INFO)
+                        if success:
+                            video_segments.append(out_mp4)
+                        else:
+                            try:
+                                logger.warning(f"[beauty] Failed to create segment {idx}")
+                            except Exception:
+                                pass
+                    if len(video_segments) == 1:
+                        final_video = video_segments[0]
+                    else:
+                        concat_file = out_dir / "concat_list.txt"
+                        with concat_file.open("w") as f:
+                            for seg in video_segments:
+                                f.write(f"file '{seg.name}'\n")
+                        final_video = out_dir / f"mlites_beauty_{safe}_{ts}.mp4"
+                        subprocess.run([
+                            "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_file), "-c", "copy", str(final_video)
+                        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=str(out_dir))
+                    video_path = final_video
+                    multi_stock = True
+                    images_fallback = False
+                    stock_video = None
+
+                    # After concatenation, burn captions into the final video
+                    try:
+                        # Create a single SRT for the entire video by merging section captions
+                        final_srt = out_dir / 'final_captions.srt'
+                        cues_all: List[tuple[float, float, str]] = []
+                        t_offset = 0.0
+                        for idx, (_, section_narr) in enumerate(sections):
+                            section_mp3s = section_mp3_groups[idx]
+                            for i, p in enumerate(section_mp3s):
+                                dur_meas = float(_get_audio_duration(Path(p)))
+                                dur = max(1.5, min(20.0, dur_meas if dur_meas == dur_meas else 2.5))
+                                text_line = section_narr[i] if i < len(section_narr) else ""
+                                cues_all.append((t_offset, t_offset + dur, text_line))
+                                t_offset += dur
+                        def _fmt(ts: float) -> str:
+                            total_ms = max(0, int(round(ts * 1000)))
+                            hh = total_ms // 3600000
+                            mm = (total_ms % 3600000) // 60000
+                            ss = (total_ms % 60000) // 1000
+                            ms = total_ms % 1000
+                            return f"{hh:02d}:{mm:02d}:{ss:02d},{ms:03d}"
+                        with final_srt.open('w', encoding='utf-8') as f:
+                            for i, (s, e, txt) in enumerate(cues_all, 1):
+                                f.write(f"{i}\n{_fmt(s)} --> {_fmt(e)}\n{txt}\n\n")
+                        # Burn captions into final video
+                        env = _ffmpeg_env_settings()
+                        tmp_burn = out_dir / 'final_with_captions.mp4'
+                        sp = _esc_path(str(final_srt))
+                        subprocess.run([
+                            'ffmpeg','-y','-i',str(final_video),
+                            '-vf', f"subtitles='{sp}':force_style='FontName=Arial,FontSize=6,Bold=1,OutlineColour=&H80000000&,BorderStyle=3,Outline=2,Shadow=0,Alignment=2,MarginV=20'",
+                            '-c:v','libx264','-preset',str(env['preset']),'-crf',str(env['crf']),'-r','30',
+                            '-c:a','copy', str(tmp_burn)
+                        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        # Replace final video
+                        final_video.unlink(missing_ok=True)
+                        tmp_burn.rename(final_video)
+                        video_path = final_video
+                    except Exception as e:
+                        try:
+                            logger.warning(f"[beauty] Failed to burn captions into final video: {e}")
                         except Exception:
                             pass
-                if not images_fallback:
-                    stock_video = stock_url  # type: ignore[assignment]
-                    try:
-                        logger.info(f"[beauty] stock selection: tags={topic_tags} gender={preferred_gender} url={stock_url} overlap={overlap_score}")
-                    except Exception:
-                        pass
-                video_path = out_dir / f"mlites_beauty_{safe}_{ts}.mp4"
+
+                # Skip redundant single-stock fallback; multi-section already handled
+                
                 # Persist the effective ffmpeg command used for debugging
                 try:
                     ffdbg = out_dir / 'ffmpeg_cmd.txt'
                     ffdbg.write_text('drawtext_filter=' + (drawtext_filter or ''), encoding='utf-8')
                 except Exception:
                     ffdbg = None
+
+                font_family = 'Arial'
 
                 # If images fallback OR list-mode, build slide images; list-mode uses exact-duration stitching
                 if images_fallback or ('is_list_mode' in locals() and is_list_mode):
@@ -1658,7 +1625,7 @@ async def create_beauty(req: CreateBeautyRequest, bg: BackgroundTasks, current_u
                                             sp = _esc_path(str(captions_path))
                                             subprocess.run([
                                                 'ffmpeg','-y','-i',str(video_path),
-                                                '-vf', f"subtitles='{sp}':force_style='FontName=Arial,FontSize=44,OutlineColour=&H80000000&,BorderStyle=3,Outline=2,Shadow=0,Alignment=2,MarginV=120'",
+                                                '-vf', f"subtitles='{sp}':force_style='FontName=Arial,FontSize=6,Bold=1,OutlineColour=&H80000000&,BorderStyle=3,Outline=2,Shadow=0,Alignment=2,MarginV=20'",
                                                 '-c:v','libx264','-preset',str(env['preset']),'-crf',str(env['crf']),'-r','30',
                                                 '-c:a','copy', str(tmp_burn)
                                             ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -1682,7 +1649,10 @@ async def create_beauty(req: CreateBeautyRequest, bg: BackgroundTasks, current_u
                         continue
                 # Else choose caption rendering mode for stock video path: prefer drawtext in production to minimize memory
                 else:
-                    ENVIRONMENT = os.getenv("ENVIRONMENT", "development").lower()
+                    if 'multi_stock' in locals() and multi_stock:
+                        pass
+                    else:
+                        ENVIRONMENT = os.getenv("ENVIRONMENT", "development").lower()
                     is_prod = ENVIRONMENT == "production" or os.getenv("CLOUD_RUN", "").strip() == "1"
                     caption_mode = os.getenv("MLITES_BEAUTY_CAPTION_MODE", "drawtext" if is_prod else "overlays").lower()
                     # For list-type, FORCE overlays to guarantee captions display
@@ -1751,45 +1721,48 @@ async def create_beauty(req: CreateBeautyRequest, bg: BackgroundTasks, current_u
                             else:
                                 raise RuntimeError('no overlays built')
                         except Exception as _ov_err:
-                            # Fallback to subtitles/drawtext path
-                            _make_portrait_video_with_audio(
-                                stock_video, concat_mp3, video_path,
-                                subtitles_path=captions_path if captions_path.exists() else None,
-                                drawtext_filter=drawtext_filter,
-                                log_file=ffdbg,
-                                subtitles_font=font_family
-                            )
+                            # Fallback to subtitles/drawtext path only if stock_video is valid
+                            if stock_video:
+                                _make_portrait_video_with_audio(
+                                    stock_video, concat_mp3, video_path,
+                                    subtitles_path=captions_path if captions_path.exists() else None,
+                                    drawtext_filter=drawtext_filter,
+                                    log_file=ffdbg,
+                                    subtitles_font=font_family
+                                )
                     else:
                         # Production default: single-pass drawtext (lower memory than multi-input overlays)
-                        try:
-                            # For list-mode, use the same drawtext-only approach as non-list
-                            _make_portrait_video_with_audio(
-                                stock_video, concat_mp3, video_path,
-                                subtitles_path=None,
-                                drawtext_filter=drawtext_filter,
-                                log_file=ffdbg,
-                                subtitles_font=font_family,
-                                strict=True,
-                            )
-                        except Exception as _dt_err:
-                            # Fallback to PNG overlay captions to handle intermittent drawtext failures
+                        # Only run if stock_video is valid (not None)
+                        if stock_video:
                             try:
-                                overlays: List[tuple[Path, float, float]] = []
-                                cards_dir = out_dir / 'captions_png'
-                                cards_dir.mkdir(exist_ok=True)
-                                for i, (s, e, txt_line) in enumerate(use_cues or [], start=1):
-                                    env_xy = _ffmpeg_env_settings(); W, H = env_xy["width"], env_xy["height"]
-                                    card_path = cards_dir / f'cap_{i:03d}.png'
-                                    _render_caption_card(txt_line, card_path, width=W, height=H, language_font_family=font_family)
-                                    overlays.append((card_path, float(s), float(e)))
-                                if overlays:
-                                    _make_portrait_video_with_overlays(stock_video, concat_mp3, video_path, overlays, log_file=ffdbg)
-                                else:
-                                    # As last resort, output video without captions
-                                    _make_portrait_video_with_audio(stock_video, concat_mp3, video_path, subtitles_path=None, drawtext_filter=None, log_file=ffdbg, subtitles_font=font_family)
-                            except Exception:
-                                # Last resort already attempted
-                                pass
+                                # For list-mode, use the same drawtext-only approach as non-list
+                                _make_portrait_video_with_audio(
+                                    stock_video, concat_mp3, video_path,
+                                    subtitles_path=None,
+                                    drawtext_filter=drawtext_filter,
+                                    log_file=ffdbg,
+                                    subtitles_font=font_family,
+                                    strict=True,
+                                )
+                            except Exception as _dt_err:
+                                # Fallback to PNG overlay captions to handle intermittent drawtext failures
+                                try:
+                                    overlays: List[tuple[Path, float, float]] = []
+                                    cards_dir = out_dir / 'captions_png'
+                                    cards_dir.mkdir(exist_ok=True)
+                                    for i, (s, e, txt_line) in enumerate(use_cues or [], start=1):
+                                        env_xy = _ffmpeg_env_settings(); W, H = env_xy["width"], env_xy["height"]
+                                        card_path = cards_dir / f'cap_{i:03d}.png'
+                                        _render_caption_card(txt_line, card_path, width=W, height=H, language_font_family=font_family)
+                                        overlays.append((card_path, float(s), float(e)))
+                                    if overlays:
+                                        _make_portrait_video_with_overlays(stock_video, concat_mp3, video_path, overlays, log_file=ffdbg)
+                                    else:
+                                        # As last resort, output video without captions
+                                        _make_portrait_video_with_audio(stock_video, concat_mp3, video_path, subtitles_path=None, drawtext_filter=None, log_file=ffdbg, subtitles_font=font_family)
+                                except Exception:
+                                    # Last resort already attempted
+                                    pass
 
                 # Thumbnail
                 thumb = out_dir / 'thumbnail.jpg'
