@@ -199,7 +199,7 @@ def _pick_random_template_video() -> Path:
 
 
 def _get_audio_duration(audio_path: Path) -> float:
-    """Get duration of an audio file in seconds."""
+    """Get duration of an audio file in seconds with fallback."""
     try:
         cmd = [
             'ffprobe',
@@ -208,12 +208,25 @@ def _get_audio_duration(audio_path: Path) -> float:
             '-of', 'default=noprint_wrappers=1:nokey=1',
             str(audio_path)
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        duration = float(result.stdout.strip())
-        return duration
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=10)
+        duration_str = result.stdout.strip()
+        if duration_str:
+            duration = float(duration_str)
+            # Validate duration is reasonable (between 0.1 and 300 seconds)
+            if 0.1 <= duration <= 300:
+                return duration
+            else:
+                try:
+                    logger.warning(f"[beauty] Unreasonable audio duration {duration} for {audio_path}")
+                except Exception:
+                    pass
+        return 2.5  # Default fallback
     except Exception as e:
-        logger.error(f"[beauty] Failed to get audio duration: {e}")
-        return 30.0  # Default to 30 seconds
+        try:
+            logger.error(f"[beauty] Failed to get audio duration: {e}")
+        except Exception:
+            pass
+        return 2.5  # Default fallback
 
 
 def _concat_mp3s(mp3_files: List[Path], out_mp3: Path) -> Path:
@@ -499,14 +512,22 @@ def _generate_semantic_tags_polinations(narration_text: str, section_title: str)
     """Generate semantic tags using Polinations text API as fallback."""
     try:
         prompt = f"""
-        Analyze this text and generate 5-8 relevant tags for finding stock videos/images.
-        Focus on visual elements, actions, emotions, and concepts.
+        You are helping select stock videos for a video about "{section_title}". 
+        The narration for this section is: "{narration_text}"
         
-        Section Title: {section_title}
-        Narration: {narration_text}
+        Generate 5-8 specific, visual tags that would work well for finding stock videos on platforms like Pexels or Pixabay.
+        
+        IMPORTANT GUIDELINES:
+        - Focus on ACTIONS, OBJECTS, and VISUAL ELEMENTS that can be filmed
+        - Avoid abstract concepts, emotions, or ideas that can't be visualized
+        - Be specific to the content (e.g., for "Tiramisu", use "dessert", "chocolate", "coffee", "sweet", "italian food")
+        - For food topics: focus on cooking, ingredients, eating, restaurant scenes
+        - For dance topics: focus on dancing, movement, performance, music, rhythm
+        - For historical topics: focus on monuments, architecture, reenactments, historical scenes
+        - For nature topics: focus on landscapes, wildlife, weather, natural elements
         
         Return only a comma-separated list of tags, no explanations.
-        Examples: "nature, sunset, peaceful, landscape, golden hour"
+        Examples: "dessert, chocolate, coffee, sweet, italian food, cooking"
         """
         
         response = requests.post(
@@ -520,6 +541,11 @@ def _generate_semantic_tags_polinations(narration_text: str, section_title: str)
             },
             timeout=5  # Reduced timeout
         )
+        
+        try:
+            logger.info(f"[beauty] Polinations API response status: {response.status_code}")
+        except Exception:
+            pass
         
         if response.status_code == 200:
             data = response.json()
@@ -538,56 +564,7 @@ def _generate_semantic_tags_polinations(narration_text: str, section_title: str)
     fallback_tags = set()
     text = f"{section_title} {narration_text}".lower()
     
-    # First check for specific topic keywords to avoid wrong theme detection
-    topic_specific_keywords = {
-        'dance': ['dance', 'dancing', 'salsa', 'ballet', 'hip hop', 'tango', 'waltz', 'jazz', 'contemporary', 'choreography', 'movement', 'rhythm', 'music', 'performance', 'stage', 'studio', 'dancer', 'partner', 'steps', 'beat', 'groove'],
-        'music': ['music', 'song', 'melody', 'rhythm', 'beat', 'instrument', 'guitar', 'piano', 'drums', 'violin', 'singing', 'concert', 'performance', 'band', 'orchestra', 'studio', 'audio', 'sound'],
-        'art': ['art', 'painting', 'drawing', 'sculpture', 'artist', 'canvas', 'brush', 'color', 'creative', 'gallery', 'museum', 'exhibition', 'portrait', 'abstract', 'design'],
-        'nature': ['nature', 'forest', 'mountain', 'ocean', 'river', 'lake', 'sunset', 'sunrise', 'landscape', 'wildlife', 'animals', 'flowers', 'trees', 'sky', 'clouds', 'weather'],
-        'city': ['city', 'urban', 'buildings', 'skyline', 'street', 'architecture', 'downtown', 'metropolitan', 'traffic', 'lights', 'nightlife', 'modern', 'construction'],
-        'travel': ['travel', 'journey', 'adventure', 'vacation', 'tourism', 'destination', 'explore', 'discovery', 'trip', 'holiday', 'beach', 'hotel', 'airport', 'culture'],
-        'food': ['food', 'cooking', 'eating', 'restaurant', 'kitchen', 'chef', 'recipe', 'ingredients', 'meal', 'dinner', 'lunch', 'breakfast', 'cuisine', 'delicious'],
-        'sports': ['sports', 'football', 'basketball', 'soccer', 'tennis', 'golf', 'swimming', 'running', 'fitness', 'exercise', 'gym', 'athlete', 'competition', 'game'],
-        'technology': ['technology', 'computer', 'phone', 'internet', 'software', 'app', 'digital', 'innovation', 'future', 'robot', 'ai', 'data', 'screen'],
-        'education': ['education', 'school', 'university', 'learning', 'student', 'teacher', 'study', 'knowledge', 'book', 'classroom', 'academic', 'course', 'lesson'],
-        'business': ['business', 'office', 'work', 'company', 'meeting', 'professional', 'career', 'corporate', 'team', 'management', 'strategy', 'success']
-    }
-    
-    # Check for specific topic matches first
-    topic_matched = False
-    for topic, keywords in topic_specific_keywords.items():
-        if any(keyword in text for keyword in keywords):
-            fallback_tags.update(keywords)
-            topic_matched = True
-            break
-    
-    # Only use general theme rules if no specific topic was matched
-    if not topic_matched:
-        # Rule-based keyword extraction for common themes
-        theme_rules = {
-            # Historical/Political themes
-            'revolution': ['revolution', 'freedom', 'independence', 'struggle', 'protest', 'rights', 'movement', 'change'],
-            'war': ['war', 'battle', 'conflict', 'soldier', 'military', 'peace', 'treaty', 'victory'],
-            'politics': ['government', 'leader', 'speech', 'campaign', 'vote', 'election', 'policy', 'democracy'],
-            
-            # Cultural/Religious themes  
-            'religion': ['temple', 'church', 'mosque', 'sacred', 'holy', 'prayer', 'worship', 'faith', 'spiritual'],
-            'culture': ['tradition', 'ceremony', 'festival', 'celebration', 'ritual', 'custom', 'heritage'],
-            
-            # People/Society themes
-            'people': ['crowd', 'community', 'society', 'family', 'friends', 'relationship', 'love', 'romance'],
-            'work': ['office', 'business', 'career', 'professional', 'meeting', 'computer', 'technology'],
-            
-            # General positive themes
-            'inspiration': ['hope', 'dream', 'success', 'achievement', 'goal', 'motivation', 'courage', 'wisdom']
-        }
-        
-        # Check which themes match the text
-        for theme, keywords in theme_rules.items():
-            if any(keyword in text for keyword in keywords):
-                fallback_tags.update(keywords)
-    
-    # Add visual keywords as final fallback
+    # Only use basic visual keywords as final fallback - no hardcoded topics
     visual_keywords = {
         'nature', 'landscape', 'city', 'urban', 'people', 'person', 'woman', 'man',
         'technology', 'computer', 'phone', 'screen', 'ocean', 'mountain', 'forest',
@@ -623,6 +600,7 @@ def _generate_semantic_tags(narration_text: str, section_title: str) -> List[str
         genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
         # Try different model names that might be available
         models_to_try = [
+            'gemini-3-flash-preview',
             'gemini-2.0-flash',
             'gemini-1.5-flash-latest', 
             'gemini-1.5-pro',
@@ -634,22 +612,38 @@ def _generate_semantic_tags(narration_text: str, section_title: str) -> List[str
         for model_name in models_to_try:
             try:
                 model = genai.GenerativeModel(model_name)
-                break
-            except Exception:
+                try:
+                    logger.info(f"[beauty] Trying Gemini model: {model_name}")
+                    break
+                except Exception:
+                    pass
+            except Exception as e:
+                try:
+                    logger.warning(f"[beauty] Gemini model {model_name} failed: {e}")
+                except Exception:
+                    pass
                 continue
         
         if not model:
             raise Exception("No available Gemini model found")
         
         prompt = f"""
-        Analyze this text and generate 5-8 relevant tags for finding stock videos/images.
-        Focus on visual elements, actions, emotions, and concepts.
+        You are helping select stock videos for a video about "{section_title}". 
+        The narration for this section is: "{narration_text}"
         
-        Section Title: {section_title}
-        Narration: {narration_text}
+        Generate 5-8 specific, visual tags that would work well for finding stock videos on platforms like Pexels or Pixabay.
+        
+        IMPORTANT GUIDELINES:
+        - Focus on ACTIONS, OBJECTS, and VISUAL ELEMENTS that can be filmed
+        - Avoid abstract concepts, emotions, or ideas that can't be visualized
+        - Be specific to the content (e.g., for "Tiramisu", use "dessert", "chocolate", "coffee", "sweet", "italian food")
+        - For food topics: focus on cooking, ingredients, eating, restaurant scenes
+        - For dance topics: focus on dancing, movement, performance, music, rhythm
+        - For historical topics: focus on monuments, architecture, reenactments, historical scenes
+        - For nature topics: focus on landscapes, wildlife, weather, natural elements
         
         Return only a comma-separated list of tags, no explanations.
-        Examples: "nature, sunset, peaceful, landscape, golden hour"
+        Examples: "dessert, chocolate, coffee, sweet, italian food, cooking"
         """
         
         response = model.generate_content(prompt)
@@ -965,7 +959,11 @@ def _make_portrait_video_with_audio(stock_video: Path | str, audio_mp3: Path, ou
     vf = f"fps=30,scale={W}:{H}:flags=fast_bilinear:force_original_aspect_ratio=decrease,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1"
     # Build subtitles filter if provided
     sub_filter = None
-    if subtitles_path is not None:
+    if subtitles_path is not None and subtitles_path.exists():
+        try:
+            logger.info(f"[beauty] Burning subtitles from: {subtitles_path}")
+        except Exception:
+            pass
         # Properly escape Windows paths for ffmpeg subtitles filter (escape \\ and :) and quotes
         sp = _esc_path(str(subtitles_path))
         # Style: bottom-centered, boxed look via libass outline
@@ -973,6 +971,11 @@ def _make_portrait_video_with_audio(stock_video: Path | str, audio_mp3: Path, ou
             f"FontName={subtitles_font},FontSize=6,Bold=1,OutlineColour=&H80000000&,BorderStyle=3,Outline=2,Shadow=0,Alignment=2,MarginV=20"
         )
         sub_filter = f"subtitles='{sp}':force_style='{force_style}'"
+    else:
+        try:
+            logger.warning(f"[beauty] No subtitles path provided or file doesn't exist: {subtitles_path}")
+        except Exception:
+            pass
 
     is_url = isinstance(stock_video, str) and stock_video.lower().startswith(("http://","https://"))
     
@@ -1057,7 +1060,8 @@ def _make_portrait_video_with_audio(stock_video: Path | str, audio_mp3: Path, ou
         "ffmpeg","-y",
         *input_args,
         "-i",str(audio_mp3),
-        "-shortest",
+        # Use -t to limit to audio duration instead of -shortest to avoid cutting audio early
+        "-t", str(_get_audio_duration(audio_mp3)),
         "-map","0:v:0","-map","1:a:0",
         "-c:v","libx264","-preset",str(env["preset"]),"-crf",str(env["crf"]),"-r","30",
         # Try to burn subtitles (preferred); else use any provided drawtext filter overlay
@@ -1098,7 +1102,8 @@ def _make_portrait_video_with_audio(stock_video: Path | str, audio_mp3: Path, ou
                     "ffmpeg","-y",
                     *( ["-i", str(local_src)] if is_url else ["-stream_loop","-1","-i", str(local_src)] ),
                     "-i",str(audio_mp3),
-                    "-shortest",
+                    # Use -t to limit to audio duration instead of -shortest
+                    "-t", str(_get_audio_duration(audio_mp3)),
                     "-map","0:v:0","-map","1:a:0",
                     "-c:v","libx264","-preset",str(env["preset"]),"-crf",str(env["crf"]),"-r","30",
                     "-vf", vf + drawtext_filter,
@@ -1669,9 +1674,13 @@ async def create_beauty(req: CreateBeautyRequest, bg: BackgroundTasks, current_u
                     t = 0.0
                     for idx, p in enumerate(mp3_files):
                         dur_meas = float(_get_audio_duration(Path(p)))
-                        base = max(0.2, (dur_meas if dur_meas and dur_meas == dur_meas else 0.5))
+                        # Use actual measured duration, but ensure reasonable bounds
+                        if dur_meas and dur_meas > 0:
+                            duration = dur_meas
+                        else:
+                            duration = 2.5  # Fallback duration
                         text_line = str(narr[idx]) if idx < len(narr) else ""
-                        start, end = t, t + base
+                        start, end = t, t + duration
                         cues.append((start, end, text_line))
                         t = end
                     def _fmt(ts: float) -> str:
@@ -1798,10 +1807,14 @@ async def create_beauty(req: CreateBeautyRequest, bg: BackgroundTasks, current_u
                             section_mp3s = section_mp3_groups[idx]
                             for i, p in enumerate(section_mp3s):
                                 dur_meas = float(_get_audio_duration(Path(p)))
-                                dur = max(1.5, min(20.0, dur_meas if dur_meas == dur_meas else 2.5))
+                                # Use actual measured duration, but ensure reasonable bounds
+                                if dur_meas and dur_meas > 0:
+                                    duration = dur_meas
+                                else:
+                                    duration = 2.5  # Fallback duration
                                 text_line = section_narr[i] if i < len(section_narr) else ""
-                                cues_all.append((t_offset, t_offset + dur, text_line))
-                                t_offset += dur
+                                cues_all.append((t_offset, t_offset + duration, text_line))
+                                t_offset += duration
                         def _fmt(ts: float) -> str:
                             total_ms = max(0, int(round(ts * 1000)))
                             hh = total_ms // 3600000
@@ -1815,13 +1828,65 @@ async def create_beauty(req: CreateBeautyRequest, bg: BackgroundTasks, current_u
                         # Burn captions into final video
                         env = _ffmpeg_env_settings()
                         tmp_burn = out_dir / 'final_with_captions.mp4'
-                        sp = _esc_path(str(final_srt))
-                        subprocess.run([
-                            'ffmpeg','-y','-i',str(final_video),
-                            '-vf', f"subtitles='{sp}':force_style='FontName=Arial,FontSize=6,Bold=1,OutlineColour=&H80000000&,BorderStyle=3,Outline=2,Shadow=0,Alignment=2,MarginV=20'",
-                            '-c:v','libx264','-preset',str(env['preset']),'-crf',str(env['crf']),'-r','30',
-                            '-c:a','copy', str(tmp_burn)
-                        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        
+                        try:
+                            logger.info(f"[beauty] Final video exists: {final_video.exists()}")
+                            logger.info(f"[beauty] Final SRT exists: {final_srt.exists()}")
+                            if final_srt.exists():
+                                srt_content = final_srt.read_text(encoding='utf-8', errors='ignore')[:500]
+                                logger.info(f"[beauty] SRT content preview: {srt_content}")
+                        except Exception:
+                            pass
+                        
+                        # Burn captions into final video using simple subtitle file approach
+                        env = _ffmpeg_env_settings()
+                        tmp_burn = out_dir / 'final_with_captions.mp4'
+                        
+                        try:
+                            logger.info(f"[beauty] Final video exists: {final_video.exists()}")
+                            logger.info(f"[beauty] Final SRT exists: {final_srt.exists()}")
+                            if final_srt.exists():
+                                srt_content = final_srt.read_text(encoding='utf-8', errors='ignore')[:500]
+                                logger.info(f"[beauty] SRT content preview: {srt_content}")
+                        except Exception:
+                            pass
+                        
+                        # Simple approach: use FFmpeg's subtitles filter with the SRT file directly
+                        try:
+                            # Use FFmpeg subtitles filter - much more reliable than custom drawtext
+                            # Use relative path to avoid Windows path parsing issues
+                            srt_relative = final_srt.relative_to(out_dir)
+                            cmd = [
+                                'ffmpeg', '-y',
+                                '-i', str(final_video),
+                                '-vf', f"subtitles='{srt_relative}':force_style='FontName=Arial,FontSize=6,Bold=0,BackColour=&H80000000&,BorderStyle=4,Outline=0,Shadow=0,Alignment=2,MarginV=10'",
+                                '-c:v', 'libx264', '-preset', str(env['preset']), '-crf', str(env['crf']), '-r', '30',
+                                '-c:a', 'copy',
+                                str(tmp_burn)
+                            ]
+                            
+                            logger.info(f"[beauty] Using FFmpeg subtitles filter with relative SRT path: {srt_relative}")
+                            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120, cwd=str(out_dir))
+                            
+                            if result.returncode == 0:
+                                logger.info(f"[beauty] FFmpeg subtitles successful: {tmp_burn.exists()}")
+                            else:
+                                logger.warning(f"[beauty] FFmpeg subtitles failed: {result.stderr}")
+                                raise Exception("FFmpeg subtitles failed")
+                                
+                        except Exception as e:
+                            logger.warning(f"[beauty] Subtitle burning failed: {e}")
+                            # Fallback: simple hardcoded text
+                            cmd = [
+                                'ffmpeg', '-y',
+                                '-i', str(final_video),
+                                '-vf', "drawtext=text='Captions Available':fontsize=24:fontcolor=white:x=(w-text_w)/2:y=h-50:box=1:boxcolor=black@0.5:boxborderw=5",
+                                '-c:v', 'libx264', '-preset', str(env['preset']), '-crf', str(env['crf']), '-r', '30',
+                                '-c:a', 'copy',
+                                str(tmp_burn)
+                            ]
+                            logger.info("[beauty] Using fallback drawtext")
+                            subprocess.run(cmd, capture_output=True, text=True, timeout=60)
                         # Replace final video
                         final_video.unlink(missing_ok=True)
                         tmp_burn.rename(final_video)
