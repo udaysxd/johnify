@@ -31,6 +31,7 @@ steps:
       - '--region=us-central1'
       - '--allow-unauthenticated'
       - '--port=8000'
+      - '--add-cloudsql-instances=optimum-shape-467809-h9:us-central1:johnify-db'
       - '--set-env-vars=ENVIRONMENT=production,DATABASE_URL=postgresql+psycopg2://postgres:E^3j#soDHIW!68gW@/johnify?host=/cloudsql/optimum-shape-467809-h9:us-central1:johnify-db,COOKIE_DOMAIN=.johnify.com,DEEPSEEK_API_KEY=sk-df4c42b632a341708dc4cc581c699f3d'
       - '--memory=1Gi'
       - '--cpu=1'
