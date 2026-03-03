@@ -61,8 +61,9 @@ gdown==4.6.0
 # Web server
 gunicorn==20.1.0
 
-# Ensure correct Pydantic version (1.x line; 1.10.17 has Python 3.13 compatibility fixes)
-pydantic[email]==1.10.17
+# Ensure correct Pydantic version (v2.x line for pydantic-settings compatibility)
+pydantic[email]==2.5.3
+pydantic-settings==2.1.0
 
 # PostgreSQL driver for SQLAlchemy
 pg8000>=1.16.6,<2.0.0
