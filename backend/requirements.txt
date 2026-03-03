@@ -1,5 +1,5 @@
-# Core FastAPI and dependencies
-fastapi==0.95.2
+# Core FastAPI and dependencies (v0.100.0+ supports Pydantic v2)
+fastapi>=0.100.0
 
 # Web server and ASGI
 uvicorn[standard]>=0.29.0
